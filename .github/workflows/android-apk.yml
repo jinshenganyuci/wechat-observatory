@@ -44,7 +44,7 @@ jobs:
       - name: Verify and package
         run: |
           mkdir -p artifacts
-          cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.3-fork.1-debug.apk
+          cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.3-fork.2-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs artifacts/*.apk > artifacts/apk-verification.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging artifacts/*.apk > artifacts/apk-package.txt
           git rev-parse HEAD > artifacts/SOURCE_COMMIT.txt

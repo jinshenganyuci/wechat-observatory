@@ -109,7 +109,20 @@ final class BridgeConfigFiles {
                 + " && chmod 755 " + shellQuote(LOCAL_TMP_DIR)
                 + " && chmod 644 " + shellQuote(LOCAL_TMP_CONFIG);
         try {
-            int code = Runtime.getRuntime().exec(new String[]{"su", "-c", command}).waitFor();
+            Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", command});
+            long deadline = android.os.SystemClock.elapsedRealtime() + 15000L;
+            int code;
+            while (true) {
+                try { code = process.exitValue(); break; }
+                catch (IllegalThreadStateException running) {
+                    if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+                        process.destroy();
+                        Log.w(TAG, "write local tmp config mirror timed out waiting for root permission");
+                        return;
+                    }
+                    Thread.sleep(100);
+                }
+            }
             if (code != 0) {
                 Log.w(TAG, "write local tmp config mirror failed, su exit=" + code);
             }
