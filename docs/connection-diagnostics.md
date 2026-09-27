@@ -12,7 +12,7 @@
 
 ## 更新
 
-覆盖安装新版 APK（沿用 fork.1 签名）。在 `.env` 设置
+fork.1 的构建实际使用了临时 Debug 签名；fork.2 起显式指定固定签名并在 CI 校验指纹。首次升级需要先保存服务地址和 API Key，卸载 fork.1 后安装 fork.2。后续使用相同固定签名的版本可覆盖安装。在 `.env` 设置
 `OBSERVATORY_IMAGE=jinshenganyuci/wechat-observatory:v0.1.3-fork.2`，然后执行：
 
 ```bash

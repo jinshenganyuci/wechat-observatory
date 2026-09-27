@@ -35,9 +35,9 @@ jobs:
           ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
         run: |
           test -n "$ANDROID_DEBUG_KEYSTORE_BASE64"
-          mkdir -p "$HOME/.android"
-          printf '%s' "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
-          chmod 600 "$HOME/.android/debug.keystore"
+          printf '%s' "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/observatory-debug.keystore"
+          chmod 600 "$RUNNER_TEMP/observatory-debug.keystore"
+          echo "OBSERVATORY_DEBUG_KEYSTORE=$RUNNER_TEMP/observatory-debug.keystore" >> "$GITHUB_ENV"
       - name: Test and build installable APK
         working-directory: android-module
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
@@ -46,6 +46,7 @@ jobs:
           mkdir -p artifacts
           cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.3-fork.2-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs artifacts/*.apk > artifacts/apk-verification.txt
+          grep -F "Signer #1 certificate SHA-256 digest: 6b95e8c196f30a26b0f1dd0d9be43d08d2714cc0a2614dce2f33165043996f4e" artifacts/apk-verification.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging artifacts/*.apk > artifacts/apk-package.txt
           git rev-parse HEAD > artifacts/SOURCE_COMMIT.txt
           cd artifacts
