@@ -31,7 +31,6 @@ public final class ConnectionProbe {
                 byte[] data = json.getBytes(StandardCharsets.UTF_8);
                 connection.setRequestMethod("POST");
                 connection.setDoOutput(true);
-                connection.setFixedLengthStreamingMode(data.length);
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
                 try (OutputStream stream = connection.getOutputStream()) { stream.write(data); }
             }
