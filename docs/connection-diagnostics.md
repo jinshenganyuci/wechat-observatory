@@ -26,3 +26,11 @@ docker compose up -d --remove-orphans
 ```bash
 docker compose logs -f --tail=100 observatory
 ```
+
+## v0.1.3-fork.3 后端修复
+
+修复新生成且尚未注册设备的有效 API Key 在诊断接口被误报 401。
+诊断鉴权现在与首次模块注册一致：密钥存在且未停用即可，设备记录尚不存在时返回
+`api_key_valid: true`、`registered: false` 和 `runtime_status: unregistered`。
+不会创建设备、刷新心跳或修改原有内部凭据 introspection 的语义。
+手机继续使用 fork.2 APK，只需更新后端镜像到 `v0.1.3-fork.3`。

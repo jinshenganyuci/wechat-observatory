@@ -20,12 +20,14 @@ func (s *HTTPServer) moduleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "api_key is required")
 		return
 	}
-	identity, err := s.service.IntrospectAPIKey(r.Context(), APIKeyIntrospectionRequest{APIKey: req.APIKey})
+	// Use the same credential rules as first-time module registration. A web-
+	// generated key is valid before its device/runtime rows have been created.
+	key, exists, err := s.service.lookupAPIKey(r.Context(), strings.TrimSpace(req.APIKey))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "diagnostics_unavailable", "credential lookup failed")
 		return
 	}
-	if !identity.Active {
+	if !exists || key.Disabled {
 		writeError(w, http.StatusUnauthorized, "invalid_api_key", "API Key is invalid or disabled")
 		return
 	}
@@ -34,9 +36,9 @@ func (s *HTTPServer) moduleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "diagnostics_unavailable", "module status lookup failed")
 		return
 	}
-	result := map[string]any{"ok": true, "api_key_valid": true, "device": identity.Device, "registered": false, "runtime_status": "unregistered"}
+	result := map[string]any{"ok": true, "api_key_valid": true, "device": apiKeyDeviceName(key), "registered": false, "runtime_status": "unregistered"}
 	for _, status := range statuses {
-		if status.Device != identity.Device {
+		if status.Device != apiKeyDeviceName(key) {
 			continue
 		}
 		result["registered"] = status.Registered

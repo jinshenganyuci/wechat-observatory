@@ -103,3 +103,31 @@ func TestModuleRequestLogDoesNotExposeCredentials(t *testing.T) {
 		t.Fatalf("secret in log: %s", output)
 	}
 }
+
+func TestModuleDiagnosticsAcceptsFreshWebGeneratedKeyBeforeRegistration(t *testing.T) {
+	service := newTestService("")
+	key, err := service.UpsertAPIKey(t.Context(), APIKeyUpsertRequest{Nickname: "Fresh phone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := service.Device(key.Device); exists {
+		t.Fatal("fixture already has a device")
+	}
+	response := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]string{"api_key": key.APIKey})
+	server := NewHTTPServer(service, "admin").Handler()
+	server.ServeHTTP(response, httptest.NewRequest("POST", "/module/diagnostics", bytes.NewReader(body)))
+	if response.Code != 200 {
+		t.Fatalf("valid new API Key rejected before first registration: status=%d body=%s", response.Code, response.Body)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["api_key_valid"] != true || data["registered"] != false || data["runtime_status"] != "unregistered" {
+		t.Fatalf("incorrect diagnostic: %v", data)
+	}
+	if _, exists := service.Device(key.Device); exists {
+		t.Fatal("diagnostics must not register device")
+	}
+}
