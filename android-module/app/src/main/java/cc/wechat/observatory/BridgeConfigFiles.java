@@ -30,7 +30,7 @@ final class BridgeConfigFiles {
         File dir = file.getParentFile();
         if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
             Log.w(TAG, "create config mirror dir failed: " + dir.getAbsolutePath());
-            return;
+            // Still attempt the local mirror below; provider preferences are authoritative.
         }
 
         Map<String, ?> all = prefs.getAll();

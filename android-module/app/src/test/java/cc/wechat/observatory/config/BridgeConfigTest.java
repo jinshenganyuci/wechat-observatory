@@ -23,10 +23,10 @@ public final class BridgeConfigTest {
     }
 
     @Test
-    public void missingBridgeUrlUsesDefaultEndpoint() {
+    public void missingBridgeUrlLeavesConnectionUnconfigured() {
         BridgeConfig config = BridgeConfig.fromProperties(new Properties());
 
-        assertEquals(GatewayEndpoint.PRODUCTION_BASE_URL, config.baseUrl);
+        assertEquals("", config.baseUrl);
         assertEquals(false, config.outboxWebSocketEnabled);
     }
 
@@ -41,13 +41,13 @@ public final class BridgeConfigTest {
     }
 
     @Test
-    public void invalidBridgeUrlUsesDefaultEndpoint() {
+    public void invalidBridgeUrlCannotRedirectCredentialsToFallbackServer() {
         Properties properties = new Properties();
         properties.setProperty("bridge_url", "not-a-url");
 
         BridgeConfig config = BridgeConfig.fromProperties(properties);
 
-        assertEquals(GatewayEndpoint.PRODUCTION_BASE_URL, config.baseUrl);
+        assertEquals("", config.baseUrl);
     }
 
     @Test

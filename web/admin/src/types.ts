@@ -1,4 +1,5 @@
 export type ModuleStatus = {
+  account_generation?: number;
   device: string;
   device_wxid?: string;
   device_nickname?: string;
@@ -18,6 +19,31 @@ export type ModuleStatus = {
   last_ack_sent_count?: number;
   last_ack_failed_count?: number;
   last_outbound_ack_at?: string;
+  installations?: ModuleInstallation[];
+  switch_request?: ModuleSwitchRequest;
+};
+
+/** One phone (installation) that used a device binding; the current phone is listed first. */
+export type ModuleInstallation = {
+  id: number;
+  short_id: string;
+  active: boolean;
+  state: "active" | "standby" | "offline" | string;
+  owner_wxid?: string;
+  wechat_nickname?: string;
+  device_model?: string;
+  android_version?: string;
+  wechat_version?: string;
+  module_version?: string;
+  last_seen_at?: string;
+  last_active_at?: string;
+  switch_pending: boolean;
+};
+
+/** Pending operator switch; applied on the target phone's next heartbeat. */
+export type ModuleSwitchRequest = {
+  installation_id: number;
+  expires_at: string;
 };
 
 export type ApiKey = {
@@ -73,6 +99,7 @@ export type StoredMessage = {
 };
 
 export type LiveMessageEvent = {
+  owner_wxid?: string;
   id?: string;
   event_id?: number;
   chat_record_id?: number;

@@ -62,6 +62,7 @@ public final class SettingsActivity extends Activity {
     private static final ExecutorService CONFIG_WRITER = Executors.newSingleThreadExecutor();
 
     private final Map<String, EditText> fields = new LinkedHashMap<>();
+    private TextView statusView;
     private TextView connectionStatus;
     private Button testButton;
     private Button saveButton;
@@ -75,6 +76,31 @@ public final class SettingsActivity extends Activity {
         setContentView(createContentView());
         loadValues();
         connectionStatus.setText("尚未测试连接。保存配置不代表微信模块已注册。");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        showRuntimeStatus();
+    }
+
+    /** Shows whether this phone serves its Key or waits on standby (written by the WeChat process). */
+    private void showRuntimeStatus() {
+        if (statusView == null) {
+            return;
+        }
+        SharedPreferences status = getSharedPreferences(BridgeConfigProvider.STATUS_PREFS_NAME, Context.MODE_PRIVATE);
+        String state = status.getString("state", "");
+        String detail = status.getString("detail", "");
+        long updatedAt = status.getLong("updated_at", 0L);
+        String time = updatedAt <= 0L ? "" : android.text.format.DateFormat.format("MM-dd HH:mm:ss", updatedAt).toString();
+        if ("standby".equals(state)) {
+            statusView.setText(getString(R.string.status_standby, detail, time));
+        } else if ("active".equals(state)) {
+            statusView.setText(getString(R.string.status_active, detail, time));
+        } else {
+            statusView.setText(R.string.status_unknown);
+        }
     }
 
     private View createContentView() {
@@ -98,6 +124,11 @@ public final class SettingsActivity extends Activity {
         hint.setTextSize(14);
         hint.setPadding(0, 0, 0, dp(14));
         root.addView(hint);
+
+        statusView = new TextView(this);
+        statusView.setTextSize(14);
+        statusView.setPadding(0, 0, 0, dp(14));
+        root.addView(statusView);
 
         addField(root, "bridge_url", R.string.label_bridge_url, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addField(root, "api_key", R.string.label_api_key, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -259,9 +290,9 @@ public final class SettingsActivity extends Activity {
                         report += "\nAPI Key：未填写。请在自己的网页管理台生成。\n微信模块：尚未验证。";
                     } else {
                         String body = new JSONObject().put("api_key", key).toString();
-                        ConnectionProbe.Reply result = ConnectionProbe.request(endpoint, "/module/diagnostics", body);
+                        ConnectionProbe.Reply result = ConnectionProbe.request(endpoint, "/module/connection", body);
                         if (result.status == 404 || result.status == 405) {
-                            report += "\nAPI Key / 微信模块：当前后端版本不支持诊断，请升级到 v0.1.3-fork.2 或更新版本。";
+                            report += "\nAPI Key / 微信模块：当前后端不支持本模块的账号会话协议，请升级到本 fork 的 0.1.13 服务端。";
                         } else if (result.status == 401 || result.status == 403) {
                             report += "\nAPI Key：无效、已停用或请求被代理拒绝。请检查自己的管理台。\n微信模块：尚未验证。";
                         } else if (result.status != 200) {
@@ -270,6 +301,8 @@ public final class SettingsActivity extends Activity {
                             JSONObject status = new JSONObject(result.body);
                             if (!status.optBoolean("ok") || !status.optBoolean("api_key_valid")) {
                                 report += "\n诊断响应异常，无法确认密钥及微信状态。";
+                            } else if (!status.optBoolean("account_session_supported", false)) {
+                                report += "\nAPI Key：有效，但服务器不支持账号会话确认。请升级到本 fork 的 0.1.13 服务端。";
                             } else {
                                 report += "\nAPI Key：有效。设备：" + status.optString("device", "未知");
                                 report += "\n" + ConnectionProbe.moduleSummary(status.optBoolean("registered"), status.optString("runtime_status"));

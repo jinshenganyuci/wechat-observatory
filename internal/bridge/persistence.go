@@ -216,6 +216,7 @@ type ModuleContactView struct {
 }
 
 type ModuleStatusView struct {
+	AccountGeneration  int64  `json:"account_generation"`
 	Device             string `json:"device"`
 	DeviceWxID         string `json:"device_wxid,omitempty"`
 	DeviceNickname     string `json:"device_nickname,omitempty"`
@@ -243,6 +244,10 @@ type ModuleStatusView struct {
 	LastAckFailedCount int    `json:"last_ack_failed_count,omitempty"`
 	RuntimeUpdatedAt   string `json:"runtime_updated_at,omitempty"`
 	DeviceUpdatedAt    string `json:"device_updated_at,omitempty"`
+	// Installations lists the phones that used this device binding recently,
+	// current phone first. SwitchRequest is a pending operator switch.
+	Installations []ModuleInstallationView `json:"installations,omitempty"`
+	SwitchRequest *ModuleSwitchRequestView `json:"switch_request,omitempty"`
 }
 
 func (v *ModuleStatusView) NormalizeRuntimeStatus() {

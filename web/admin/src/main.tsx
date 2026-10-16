@@ -1,4 +1,5 @@
-﻿import React from "react";
+import { AccountScope, belongsToAccount } from "./accountScope";
+import React from "react";
 import { createRoot } from "react-dom/client";
 import { formatBeijingClock, formatBeijingDateTime, formatBeijingTimeAgo } from "@/time";
 import {
@@ -40,6 +41,7 @@ import {
   publicPath,
   setApiKeyEnabled,
   sendText,
+  switchModuleInstallation,
   updateDevice
 } from "@/api";
 import { Badge } from "@/components/ui/badge";
@@ -59,7 +61,9 @@ import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleStatus, StoredMessage } from "@/types";
+import { InstallationList, InstallationSwitchHint, type InstallationNotice } from "@/components/InstallationList";
+import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, parseApiError } from "@/installations";
+import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleInstallation, ModuleStatus, StoredMessage } from "@/types";
 import "./index.css";
 
 const PASSWORD_KEY = "wgc_admin_password";
@@ -103,6 +107,8 @@ function App() {
   const [newApiKeyNickname, setNewApiKeyNickname] = React.useState("");
   const [deviceNicknameDraft, setDeviceNicknameDraft] = React.useState("");
   const [notice, setNotice] = React.useState("输入管理密码后连接");
+  const [switchingInstallation, setSwitchingInstallation] = React.useState<{ device: string; id: number } | null>(null);
+  const [installationNotice, setInstallationNotice] = React.useState<(InstallationNotice & { device: string }) | null>(null);
 
   const adminPassword = password.trim();
   const selectedModule = React.useMemo(
@@ -110,8 +116,14 @@ function App() {
     [modules, selectedDevice]
   );
   const selectedOwnerWxid = moduleOwnerWxid(selectedModule);
-  const selectedScopeKey = `${selectedDevice}:${selectedOwnerWxid}`;
-  const selectedScopeRef = React.useRef(selectedScopeKey);
+  const selectedGeneration = selectedModule?.account_generation ?? 0;
+  const selectedScopeKey = `${selectedDevice}:${selectedOwnerWxid}:${selectedGeneration}`;
+  const accountScope = React.useRef(new AccountScope());
+  const moduleRequest = React.useRef(0);
+  const deviceRef = React.useRef(selectedDevice);
+  deviceRef.current = selectedDevice;
+  accountScope.current.update(selectedDevice, selectedOwnerWxid, selectedGeneration);
+  accountScope.current.selectChat(selectedWxid);
   const messageListRef = React.useRef<HTMLDivElement>(null);
   const loadedMessageChatRef = React.useRef("");
   const pendingBottomScrollChatRef = React.useRef("");
@@ -122,8 +134,11 @@ function App() {
   }, [theme]);
 
   React.useEffect(() => {
-    selectedScopeRef.current = selectedScopeKey;
-  }, [selectedScopeKey]);
+    if (!installationNotice) return;
+    const timer = window.setTimeout(() => setInstallationNotice(null), 20000);
+    return () => window.clearTimeout(timer);
+  }, [installationNotice]);
+
 
   React.useEffect(() => {
     setDeviceNicknameDraft(selectedModule?.device_nickname || selectedModule?.device || "");
@@ -185,9 +200,7 @@ function App() {
   const leftListCountText = messageListActive ? `${visibleRecentMessages.length} 个会话` : `${visibleContacts.length} 个对象`;
   const leftListTitle = messageListActive ? "消息列表" : "好友列表";
   const leftSearchPlaceholder = messageListActive ? "搜索消息、昵称、备注" : "搜索昵称、备注、别名";
-  const scopeMatches = React.useCallback((device: string, ownerWxid: string) => {
-    return selectedScopeRef.current === `${device}:${ownerWxid || ""}`;
-  }, []);
+
 
   const refreshApiKeys = React.useCallback(async () => {
     if (!adminPassword) {
@@ -205,8 +218,12 @@ function App() {
       setNotice("请输入管理密码");
       return [] as ModuleStatus[];
     }
+    const request = ++moduleRequest.current;
     const payload = await getModules(adminPassword);
+    if (request !== moduleRequest.current) return [] as ModuleStatus[];
     const nextModules = payload.modules || [];
+    const active = nextModules.find((item) => item.device === deviceRef.current) ?? nextModules[0];
+    accountScope.current.update(active?.device ?? "", moduleOwnerWxid(active), active?.account_generation ?? 0);
     setModules(nextModules);
     setSelectedDevice((current) => {
       if (current && nextModules.some((item) => item.device === current)) return current;
@@ -222,6 +239,8 @@ function App() {
         setSelectedWxid("");
         return [] as ModuleContact[];
       }
+      const ticket = accountScope.current.begin("contacts", device, ownerWxid);
+      if (!ticket) return [] as ModuleContact[];
       const payload = await getContacts({
         password: adminPassword,
         device,
@@ -230,10 +249,10 @@ function App() {
         includeDeleted: contactIncludeDeleted,
         limit: CONTACT_SNAPSHOT_LIMIT
       });
-      if (!scopeMatches(device, ownerWxid)) {
+      if (!accountScope.current.matches(ticket)) {
         return [] as ModuleContact[];
       }
-      const nextContacts = payload.contacts || [];
+      const nextContacts = (payload.contacts || []).filter((row) => belongsToAccount(row, device, ownerWxid));
       setContacts(nextContacts);
       setSelectedWxid((current) => {
         if (current && nextContacts.some((item) => item.wxid === current)) return current;
@@ -241,7 +260,7 @@ function App() {
       });
       return nextContacts;
     },
-    [adminPassword, contactIncludeDeleted, contactQuery, scopeMatches, selectedOwnerWxid]
+    [adminPassword, contactIncludeDeleted, contactQuery, selectedOwnerWxid, selectedGeneration]
   );
 
   const refreshMessages = React.useCallback(
@@ -251,6 +270,8 @@ function App() {
         setMessages([]);
         return [] as StoredMessage[];
       }
+      const ticket = accountScope.current.begin("messages", device, ownerWxid, wxid);
+      if (!ticket) return [] as StoredMessage[];
       const contact = contacts.find((item) => item.wxid === wxid);
       const payload = await getMessages({
         password: adminPassword,
@@ -261,15 +282,15 @@ function App() {
         chatKind: chatKindForContact(wxid, contact),
         limit: 180
       });
-      if (!scopeMatches(device, ownerWxid)) {
+      if (!accountScope.current.matches(ticket)) {
         return [] as StoredMessage[];
       }
-      const nextMessages = (payload.messages || []).slice().reverse();
+      const nextMessages = (payload.messages || []).filter((row) => belongsToAccount(row, device, ownerWxid)).reverse();
       loadedMessageChatRef.current = wxid;
       setMessages(nextMessages);
       return nextMessages;
     },
-    [adminPassword, contacts, scopeMatches, selectedOwnerWxid]
+    [adminPassword, contacts, selectedOwnerWxid, selectedGeneration]
   );
 
   const refreshRecentMessages = React.useCallback(
@@ -278,20 +299,22 @@ function App() {
         setRecentMessages([]);
         return [] as StoredMessage[];
       }
+      const ticket = accountScope.current.begin("recent", device, ownerWxid);
+      if (!ticket) return [] as StoredMessage[];
       const payload = await getMessages({
         password: adminPassword,
         device,
         ownerWxid,
         limit: 500
       });
-      if (!scopeMatches(device, ownerWxid)) {
+      if (!accountScope.current.matches(ticket)) {
         return [] as StoredMessage[];
       }
-      const nextMessages = payload.messages || [];
+      const nextMessages = (payload.messages || []).filter((row) => belongsToAccount(row, device, ownerWxid));
       setRecentMessages(nextMessages);
       return nextMessages;
     },
-    [adminPassword, scopeMatches, selectedOwnerWxid]
+    [adminPassword, selectedOwnerWxid, selectedGeneration]
   );
 
   const refreshAll = React.useCallback(async () => {
@@ -304,7 +327,8 @@ function App() {
         ? selectedDevice
         : nextModules[0]?.device || "";
       const ownerWxid = moduleOwnerWxid(nextModules.find((item) => item.device === device));
-      selectedScopeRef.current = `${device}:${ownerWxid}`;
+      const active = nextModules.find((item) => item.device === device);
+      accountScope.current.update(device, ownerWxid, active?.account_generation ?? 0);
       if (device) {
         setSelectedDevice(device);
       }
@@ -327,13 +351,16 @@ function App() {
     }
   }, [adminPassword, refreshApiKeys, refreshContacts, refreshMessages, refreshModules, refreshRecentMessages, selectedDevice, selectedWxid]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     loadedMessageChatRef.current = "";
     pendingBottomScrollChatRef.current = "";
     setContacts([]);
     setMessages([]);
     setRecentMessages([]);
     setSelectedWxid("");
+    setDraft("");
+    setSendOpen(false);
+    setSending(false);
   }, [selectedScopeKey]);
 
   React.useEffect(() => {
@@ -397,7 +424,7 @@ function App() {
   }, [refreshRecentMessages, selectedDevice, selectedOwnerWxid]);
 
   React.useEffect(() => {
-    if (!autoRefresh || !selectedDevice || !selectedWxid) return;
+    if (!autoRefresh || !selectedDevice) return;
     const timer = window.setInterval(() => {
       void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch(() => undefined);
       void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch(() => undefined);
@@ -420,6 +447,7 @@ function App() {
         const payload = parseLiveMessageEvent((event as globalThis.MessageEvent).data);
         if (payload.device !== selectedDevice) return;
         void refreshModules().catch(() => undefined);
+        if (!belongsToAccount(payload, selectedDevice, selectedOwnerWxid)) return;
         if (payload.raw_provider === RAW_PROVIDER_MODULE_ACK) return;
         void refreshContacts(selectedDevice, selectedOwnerWxid).catch(() => undefined);
         void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch(() => undefined);
@@ -442,7 +470,8 @@ function App() {
 
   const selectDevice = (device: string) => {
     const nextOwnerWxid = moduleOwnerWxid(modules.find((item) => item.device === device));
-    selectedScopeRef.current = `${device}:${nextOwnerWxid}`;
+    const active = modules.find((item) => item.device === device);
+    accountScope.current.update(device, nextOwnerWxid, active?.account_generation ?? 0);
     setSelectedDevice(device);
     setContacts([]);
     setMessages([]);
@@ -454,6 +483,10 @@ function App() {
 
   const selectChat = (wxid: string) => {
     pendingBottomScrollChatRef.current = wxid;
+    accountScope.current.selectChat(wxid);
+    setSending(false);
+    setDraft("");
+    setSendOpen(false);
     setSelectedWxid(wxid);
     if (selectedWxid === wxid && loadedMessageChatRef.current === wxid) {
       window.requestAnimationFrame(() => {
@@ -500,6 +533,8 @@ function App() {
 	  if (selectedModuleOffline) setNotice("当前微信离线，不能创建发送任务");
 	  return;
 	}
+    const ticket = accountScope.current.begin("send", selectedDevice, selectedOwnerWxid);
+    if (!ticket) return;
     setSending(true);
     setNotice("正在加入发送队列");
     try {
@@ -509,21 +544,24 @@ function App() {
         password: adminPassword,
         device: sentDevice,
         ownerWxid: selectedOwnerWxid,
+        accountGeneration: selectedGeneration,
         wxid: sentWxid,
         text: draft.trim()
       });
+      if (!accountScope.current.matches(ticket)) return;
       setDraft("");
       setSendOpen(false);
       setNotice("消息已加入模块发送队列");
       void refreshModules().catch(() => undefined);
       window.setTimeout(() => {
+        if (!accountScope.current.matches(ticket)) return;
         void refreshMessages(sentDevice, sentWxid, selectedOwnerWxid).catch(() => undefined);
         void refreshModules().catch(() => undefined);
       }, 800);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "发送失败");
+      if (accountScope.current.matches(ticket)) setNotice(error instanceof Error ? error.message : "发送失败");
     } finally {
-      setSending(false);
+      if (accountScope.current.matches(ticket)) setSending(false);
     }
   };
 
@@ -610,6 +648,30 @@ function App() {
     }
   };
 
+  const requestInstallationSwitch = async (device: string, installation: ModuleInstallation) => {
+    if (!adminPassword || !device || installation.active || switchingInstallation) return;
+    const ok = window.confirm(`确认把设备 ${device} 切到 ${installationDisplayName(installation)}？目标手机下一次心跳时接管。`);
+    if (!ok) return;
+    setSwitchingInstallation({ device, id: installation.id });
+    setInstallationNotice(null);
+    try {
+      await switchModuleInstallation({ password: adminPassword, device, installationId: installation.id });
+      setInstallationNotice({ device, tone: "info", text: INSTALLATION_SWITCH_REQUESTED });
+      setNotice("已请求切换手机");
+    } catch (error) {
+      const info = parseApiError(error, "切换手机失败");
+      if (info.code === "installation_active") {
+        setInstallationNotice({ device, tone: "info", text: INSTALLATION_ALREADY_ACTIVE });
+      } else {
+        setInstallationNotice({ device, tone: "error", text: info.message });
+        setNotice(info.message);
+      }
+    } finally {
+      setSwitchingInstallation(null);
+      void refreshModules().catch(() => undefined);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-muted/30 text-foreground">
       <header className="sticky top-0 z-30 border-b border-border/70 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
@@ -673,31 +735,44 @@ function App() {
               {modules.length === 0 ? (
                 <EmptyState icon={<Smartphone className="h-5 w-5" />} text="未读取到模块状态" />
               ) : (
-                modules.map((item) => (
-                  <button
-                    key={item.device}
-                    className={
-                      item.device === selectedDevice
-                        ? "rounded-lg border border-primary bg-secondary p-3 text-left shadow-sm"
-                        : "rounded-lg border bg-card p-3 text-left transition hover:bg-secondary"
-                    }
-                    onClick={() => selectDevice(item.device)}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate font-medium">{item.device || "-"}</div>
-                        <div className="truncate text-xs text-muted-foreground">
-                          {item.device_nickname || "未上报微信信息"}
+                <>
+                  {modules.map((item) => (
+                    <div
+                      key={item.device}
+                      className={
+                        item.device === selectedDevice
+                          ? "rounded-lg border border-primary bg-secondary shadow-sm"
+                          : "rounded-lg border bg-card transition hover:bg-secondary"
+                      }
+                    >
+                      <button type="button" className="block w-full p-3 text-left" onClick={() => selectDevice(item.device)}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{item.device || "-"}</div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {item.device_nickname || "未上报微信信息"}
+                            </div>
+                          </div>
+                          <StatusBadge status={item.runtime_status} />
                         </div>
-                      </div>
-                      <StatusBadge status={item.runtime_status} />
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+                          <span>待发：{item.pending_outbox ?? 0}</span>
+                          <span>失败：{item.failed_outbox ?? 0}</span>
+                        </div>
+                      </button>
+                      <InstallationList
+                        className="border-t border-border/70 px-3 pb-3 pt-2"
+                        installations={item.installations}
+                        switchRequest={item.switch_request}
+                        switchingId={switchingInstallation?.device === item.device ? switchingInstallation.id : null}
+                        disabled={!adminPassword || switchingInstallation !== null}
+                        onSwitch={(installation) => void requestInstallationSwitch(item.device, installation)}
+                        notice={installationNotice?.device === item.device ? installationNotice : null}
+                      />
                     </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-                      <span>待发：{item.pending_outbox ?? 0}</span>
-                      <span>失败：{item.failed_outbox ?? 0}</span>
-                    </div>
-                  </button>
-                ))
+                  ))}
+                  {modules.some((item) => (item.installations?.length ?? 0) > 0) ? <InstallationSwitchHint /> : null}
+                </>
               )}
             </CardContent>
           </Card>
@@ -825,7 +900,7 @@ function App() {
                   ) : (
                     visibleContacts.map((item) => (
                       <button
-                        key={`${item.device}:${item.wxid}`}
+                        key={`${item.device}:${item.owner_wxid}:${item.wxid}`}
                         className={
                           item.wxid === selectedWxid
                             ? "w-full rounded-lg border border-primary bg-secondary p-3 text-left shadow-sm"
@@ -1100,12 +1175,13 @@ function App() {
                       <TableHead className="min-w-[120px]">状态</TableHead>
                       <TableHead className="min-w-[140px]">队列</TableHead>
                       <TableHead className="min-w-[220px]">最近活动</TableHead>
+                      <TableHead className="min-w-[280px]">手机</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {modules.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={4}>
+                        <TableCell colSpan={5}>
                           <EmptyState icon={<Smartphone className="h-5 w-5" />} text="未读取到模块状态" />
                         </TableCell>
                       </TableRow>
@@ -1129,6 +1205,13 @@ function App() {
                           <TableCell className="text-xs">
                             <div>拉取：{formatBeijingDateTime(item.last_poll_at)}</div>
                             <div className="text-muted-foreground">回执：{formatBeijingDateTime(item.last_ack_at || item.last_outbound_ack_at)}</div>
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {item.installations?.length ? (
+                              <InstallationList compact installations={item.installations} switchRequest={item.switch_request} />
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))

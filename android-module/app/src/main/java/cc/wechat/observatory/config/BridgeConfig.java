@@ -16,6 +16,7 @@ import java.util.Map;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.util.BridgeLogger;
 import cc.wechat.observatory.util.Strings;
+import cc.wechat.observatory.wechat.RuntimeAccount;
 import de.robv.android.xposed.XSharedPreferences;
 
 public final class BridgeConfig {
@@ -36,6 +37,8 @@ public final class BridgeConfig {
     public String selfWxid;
     public String apiKey;
     public String nickname;
+    /** Filled only from the current WeChat kernel, never from saved operator settings. */
+    public RuntimeAccount runtimeAccount;
     public long pollIntervalMs;
     public int pollLimit;
     public boolean outboxWebSocketEnabled;
@@ -83,26 +86,15 @@ public final class BridgeConfig {
     }
 
     private static Properties readProperties(Context context) {
-        Properties localTmpProperties = readLocalTmpProperties();
-        if (!localTmpProperties.isEmpty()) {
-            return localTmpProperties;
-        }
+        return ConfigSources.firstAvailable(
+                () -> readProviderProperties(context),
+                BridgeConfig::readXposedPreferences,
+                () -> readPackagePreferences(context),
+                BridgeConfig::readLocalTmpProperties,
+                BridgeConfig::readExternalProperties);
+    }
 
-        Properties xposedProperties = readXposedPreferences();
-        if (!xposedProperties.isEmpty()) {
-            return xposedProperties;
-        }
-
-        Properties providerProperties = readProviderProperties(context);
-        if (!providerProperties.isEmpty()) {
-            return providerProperties;
-        }
-
-        Properties packagePreferences = readPackagePreferences(context);
-        if (!packagePreferences.isEmpty()) {
-            return packagePreferences;
-        }
-
+    private static Properties readExternalProperties() {
         Properties properties = new Properties();
         File root = Environment.getExternalStorageDirectory();
         File[] candidates = new File[]{
@@ -163,7 +155,7 @@ public final class BridgeConfig {
                 properties.load(input);
             }
             if (!properties.isEmpty()) {
-                BridgeLogger.log("read config from local tmp keys=" + properties.size());
+                logProviderConfigOnce("read config from local tmp keys=" + properties.size());
             }
         } catch (Throwable t) {
             logProviderConfigOnce("read config from local tmp failed: " + Strings.shortError(t));
@@ -185,7 +177,7 @@ public final class BridgeConfig {
                     properties.setProperty(entry.getKey(), String.valueOf(entry.getValue()));
                 }
             }
-            BridgeLogger.log("read config from xshared preferences keys=" + properties.size());
+            logProviderConfigOnce("read config from xshared preferences keys=" + properties.size());
         } catch (Throwable t) {
             logProviderConfigOnce("read config from xshared preferences failed: " + Strings.shortError(t));
         }
@@ -257,7 +249,7 @@ public final class BridgeConfig {
                 }
             }
             if (!properties.isEmpty()) {
-                BridgeLogger.log("read config from " + source + " provider keys=" + properties.size());
+                logProviderConfigOnce("read config from " + source + " provider keys=" + properties.size());
             }
         } catch (Throwable t) {
             logProviderConfigOnce("read config from " + source + " provider failed: " + Strings.shortError(t));

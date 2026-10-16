@@ -1,0 +1,359 @@
+{
+  "schema": 1,
+  "verifier": "tools/verify_wechat8079.py",
+  "apk": {
+    "filename": "weixin8079android3200_0x28004f30_arm64_1.apk",
+    "sha256": "f2a725bc04302ad218a563533ae79356e66b64aa711b275bc919a8d432f7e15d",
+    "bytes": 285284760,
+    "package": "com.tencent.mm",
+    "version_name": "8.0.79",
+    "version_code": 3200
+  },
+  "expected_apk_sha256": "f2a725bc04302ad218a563533ae79356e66b64aa711b275bc919a8d432f7e15d",
+  "runtime_validation": "not performed; requires a logged-in phone with LSPosed",
+  "status": "pass",
+  "dexsql_version": "dexsql 0.1.0",
+  "checks": {
+    "classes": [
+      {
+        "descriptor": "Lcom/tencent/mm/modelbase/a3;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/modelbase/n1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/storage/m3;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/o1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/p1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/t1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Ll41/d2;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Ll41/y1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lni5/n0;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lpp0/a0;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lpp0/i1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lqs/g;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lqs/h;",
+        "definition_count": 1,
+        "ok": true
+      }
+    ],
+    "fields": [
+      {
+        "descriptor": "Lqs/g;->a:[Lqs/h;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lni5/n0;->f:[Z",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/t1;->a:Lf61/p1;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->b:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->d:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->e:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->f:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->i:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/o1;->a:Lcom/tencent/mm/modelbase/n1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/o1;->b:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      }
+    ],
+    "methods": [
+      {
+        "descriptor": "Lcom/tencent/mm/modelbase/a3;->c()Z",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/t1;->a(Ljava/lang/String;)Lf61/s1;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->h(Ljava/lang/String;)Lf61/s1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->e(Ljava/lang/String;)Lf61/s1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->i(I)Lf61/s1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/s1;->a()Lf61/o1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lf61/o1;->a()Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Ll41/d2;->C(Ljava/lang/String;)I",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lpp0/i1;->x()Lpp0/a0;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lpp0/a0;->g()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lpp0/a0;->h()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lpp0/a0;->c()Lcom/tencent/mm/storage/m3;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/storage/m3;->m(ILjava/lang/Object;)Ljava/lang/Object;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Ll41/y1;->u()Ljava/lang/String;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Ll41/y1;->m()Ljava/lang/String;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      }
+    ],
+    "bytecode_relations": [
+      {
+        "check": "setter writes expected field",
+        "method": "Lf61/s1;->h(Ljava/lang/String;)Lf61/s1;",
+        "field": "Lf61/s1;->b:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "setter writes expected field",
+        "method": "Lf61/s1;->e(Ljava/lang/String;)Lf61/s1;",
+        "field": "Lf61/s1;->d:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "setter writes expected field",
+        "method": "Lf61/s1;->i(I)Lf61/s1;",
+        "field": "Lf61/s1;->e:I",
+        "ok": true
+      },
+      {
+        "check": "native account getter references ConfigStorage and expected slot constant",
+        "method": "Ll41/y1;->u()Ljava/lang/String;",
+        "slot": 2,
+        "ok": true
+      },
+      {
+        "check": "native account getter references ConfigStorage and expected slot constant",
+        "method": "Ll41/y1;->m()Ljava/lang/String;",
+        "slot": 4,
+        "ok": true
+      },
+      {
+        "check": "main database path uses guarded account directory and EnMicroMsg.db",
+        "ok": true
+      },
+      {
+        "check": "account directory calls initialization guard",
+        "ok": true
+      }
+    ]
+  }
+}
