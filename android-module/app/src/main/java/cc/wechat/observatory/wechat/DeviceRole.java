@@ -39,6 +39,14 @@ public final class DeviceRole {
         foregroundAt = now;
     }
 
+    /** A cleared/recreated configuration is a different installation. */
+    public synchronized void resetInstallation(boolean foreground, long now) {
+        state = State.UNKNOWN;
+        activeSummary = "";
+        identityFailingSince = 0L;
+        foregroundAt = foreground ? now : 0L;
+    }
+
     /**
      * Returns the takeover reason to send with the next registration. An active
      * installation consumes the claim immediately: it already owns the binding,

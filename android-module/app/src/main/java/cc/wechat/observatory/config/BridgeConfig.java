@@ -19,8 +19,13 @@ public final class BridgeConfig {
     private static Properties runtimeSettings = new Properties();
     private static boolean runtimeLoaded;
 
-    /** Ephemeral snapshot loaded from the public configuration file. */
+    /** Ephemeral snapshot loaded from WeChat's private configuration file. */
     public static synchronized void acceptRuntimeSettings(Properties values) {
+        if (values == null || values.isEmpty()) {
+            runtimeSettings.clear();
+            runtimeLoaded = true;
+            return;
+        }
         Properties next = new Properties();
         if (values != null) next.putAll(values);
         String previousId = runtimeSettings.getProperty("__installation_id", "");
@@ -33,6 +38,7 @@ public final class BridgeConfig {
         } else if (!next.containsKey("__generation_start") || !next.containsKey("__generation_limit")) {
             throw new IllegalArgumentException("New configuration identity needs a reserved session range");
         }
+        runtimeSettings.clear();
         runtimeSettings = next;
         runtimeLoaded = true;
     }
@@ -88,7 +94,7 @@ public final class BridgeConfig {
 
     static BridgeConfig fromProperties(Properties properties) {
         BridgeConfig config = new BridgeConfig();
-        config.enabled = !"0".equals(setting(properties, "enabled", "1"));
+        config.enabled = !"0".equals(setting(properties, "enabled", properties.isEmpty() ? "0" : "1"));
         config.baseUrl = baseUrlSetting(properties);
         config.device = "";
         config.selfWxid = "";
@@ -192,6 +198,7 @@ public final class BridgeConfig {
     private static String configSignature(Properties properties) {
         StringBuilder out = new StringBuilder();
         for (String key : new String[]{
+                "__installation_id",
                 "enabled",
                 "bridge_url",
                 "api_key",

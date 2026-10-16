@@ -1,16 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <queries>
         <package android:name="com.tencent.mm" />
-        <package android:name="com.android.shell" />
     </queries>
-
-    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
         android:label="WeChat Observatory"
-        android:forceQueryable="true"
         android:supportsRtl="true">
         <meta-data
             android:name="xposedmodule"
@@ -21,9 +17,6 @@
         <meta-data
             android:name="xposedminversion"
             android:value="93" />
-        <meta-data
-            android:name="xposedsharedprefs"
-            android:value="true" />
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />
@@ -38,13 +31,5 @@
             </intent-filter>
         </activity>
 
-        <receiver
-            android:name=".BridgeConfigReceiver"
-            android:permission="android.permission.DUMP"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="cc.wechat.observatory.SET_CONFIG" />
-            </intent-filter>
-        </receiver>
     </application>
 </manifest>

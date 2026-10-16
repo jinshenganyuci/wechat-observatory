@@ -139,7 +139,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile long LAST_CONFIG_LOAD_ATTEMPT;
     private static volatile boolean MODULE_REMOVED;
     private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
-    private static final Runnable CONFIG_LOADED = HookEntry::configurationChanged;
 
     public static String runtimeStatusText() {
         return RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE;
@@ -159,12 +158,20 @@ public final class HookEntry implements IXposedHookLoadPackage {
         previous.clear();
         BridgeConfig.acceptRuntimeSettings(settings);
         if (changedIdentity) {
+            ROLE.resetInstallation(!settings.isEmpty() && STARTED_ACTIVITIES.get() > 0,
+                    System.currentTimeMillis());
             SESSION_ALLOCATOR = null;
             CURRENT_ACCOUNT = null;
             REGISTERED_KEY = "";
             REGISTERED_DEVICE = "";
             LAST_REGISTER_SUCCESS_AT = 0L;
+            LAST_REGISTER_ATTEMPT_AT = 0L;
             CAPABILITY_REPORTED = false;
+            configurationChanged();
+        }
+        if (settings.isEmpty()) {
+            RUNTIME_ROLE = "网关未配置，已停用";
+            LAST_OUTBOX_STAGE = "disabled";
             configurationChanged();
         }
     }
@@ -325,6 +332,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (context != null) {
             APP_CONTEXT = context;
             preparePrivateConfigRuntime(context);
+            loadPrivateConfiguration(context);
             try {
                 ClassLoader contextLoader = context.getClassLoader();
                 if (contextLoader != null) {
@@ -342,6 +350,31 @@ public final class HookEntry implements IXposedHookLoadPackage {
             log("runtime hook preparation failed; worker will retry: " + shortError(t));
         }
         startWorker(loader);
+    }
+
+    /** Load at process startup, including background launches with no Activity. */
+    private static void loadPrivateConfiguration(Context context) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (MODULE_REMOVED || BridgeConfig.isRuntimeLoaded()) return;
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (LAST_CONFIG_LOAD_ATTEMPT != 0 && now - LAST_CONFIG_LOAD_ATTEMPT < 30000L) return;
+            try {
+                ConfigFileClient client = ConfigFileClient.get(context);
+                if (client.isBusy()) return;
+                LAST_CONFIG_LOAD_ATTEMPT = now;
+                client.execute(true, true, java.util.Collections.emptyMap(), (settings, error) -> {
+                    if (MODULE_REMOVED) return;
+                    if (settings != null && error == null) {
+                        acceptConfiguration(settings);
+                        configurationChanged();
+                    } else {
+                        log("private configuration startup load failed; open WeChat gateway settings to retry");
+                    }
+                });
+            } catch (RuntimeException unavailable) {
+                log("private configuration startup pending: " + unavailable.getClass().getSimpleName());
+            }
+        });
     }
 
     private static String shorten(String value, int maxLength) {
@@ -433,20 +466,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
             });
             hookOnce(Activity.class.getDeclaredMethod("onPostResume"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
-                    if (MODULE_REMOVED || !(param.thisObject instanceof Activity) || BridgeConfig.hasRuntimeSession()) return;
-                    Activity activity = (Activity) param.thisObject;
-                    long now = android.os.SystemClock.elapsedRealtime();
-                    if (LAST_CONFIG_LOAD_ATTEMPT != 0 && now - LAST_CONFIG_LOAD_ATTEMPT < 30000L) return;
-                    LAST_CONFIG_LOAD_ATTEMPT = now;
-                    activity.getWindow().getDecorView().post(() -> {
-                        if (!MODULE_REMOVED && !activity.isFinishing() && !activity.isDestroyed() && !BridgeConfig.hasRuntimeSession()) {
-                            try { WeChatConfigUi.load(activity, CONFIG_LOADED); }
-                            catch (Throwable failure) {
-                                log("foreground configuration load failed: " + shortError(failure));
-                                showToast("网关配置加载失败，请进入微信设置中的 Observatory 重试。");
-                            }
-                        }
-                    });
+                    if (MODULE_REMOVED || BridgeConfig.isRuntimeLoaded()) return;
+                    Context context = bridgeContext();
+                    if (context != null) loadPrivateConfiguration(context);
                 }
             });
             hookOnce(Activity.class.getDeclaredMethod("onStop"), new XC_MethodHook() {

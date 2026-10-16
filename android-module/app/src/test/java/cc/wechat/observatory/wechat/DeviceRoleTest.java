@@ -58,4 +58,28 @@ public class DeviceRoleTest {
         role.identityResolved();
         assertFalse(role.identityFailed(500_000L));
     }
+
+    @Test
+    public void recreatedConfigurationInForegroundCanClaimItsNewInstallation() {
+        DeviceRole role = new DeviceRole();
+        role.enterActive();
+        role.onForeground(1_000L);
+        assertEquals("", role.takeoverFor(1_100L));
+        role.resetInstallation(true, 2_000L);
+        assertEquals(DeviceRole.State.UNKNOWN, role.state());
+        assertEquals(DeviceRole.TAKEOVER_FOREGROUND, role.takeoverFor(2_100L));
+        role.claimSent();
+        assertEquals("", role.takeoverFor(2_200L));
+    }
+
+    @Test
+    public void backgroundOrDeletedConfigurationDoesNotInventAClaim() {
+        DeviceRole role = new DeviceRole();
+        role.enterStandby("another phone");
+        role.onForeground(1_000L);
+        role.resetInstallation(false, 2_000L);
+        assertEquals(DeviceRole.State.UNKNOWN, role.state());
+        assertEquals("", role.activeSummary());
+        assertEquals("", role.takeoverFor(2_100L));
+    }
 }

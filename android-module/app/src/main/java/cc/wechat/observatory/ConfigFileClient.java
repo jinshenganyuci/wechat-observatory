@@ -11,6 +11,7 @@ import java.util.Properties;
 import java.util.concurrent.Executor;
 
 import cc.wechat.observatory.config.BridgeConfig;
+import cc.wechat.observatory.util.BridgeLogger;
 
 /** Finite file operations inside WeChat; no connection to the module process. */
 final class ConfigFileClient {
@@ -49,25 +50,28 @@ final class ConfigFileClient {
         this.store = store;
     }
 
-    private static Properties readOrWrite(Context context, boolean loading, boolean needsSession,
+    static Properties readOrWrite(Context context, boolean loading, boolean needsSession,
                                            Map<String, String> values) throws Exception {
         Properties snapshot;
-        if (loading) snapshot = needsSession ? SharedConfigStore.loadForRuntime(context) : SharedConfigStore.read(context);
+        if (loading) snapshot = needsSession ? WeChatConfigStore.loadForRuntime(context) : WeChatConfigStore.read(context);
         else {
             Properties settings = new Properties();
             try {
                 settings.putAll(values.isEmpty() ? new LinkedHashMap<>() : ConfigWriteContract.normalize(values));
-                snapshot = SharedConfigStore.saveAndLoad(context, settings, needsSession);
+                snapshot = WeChatConfigStore.saveAndLoad(context, settings, needsSession);
             } finally { settings.clear(); }
         }
+        // An absent/deleted file is authoritative. Do not create a new identity
+        // or reserve a session until the user saves a new configuration.
+        if (snapshot.isEmpty()) return snapshot;
         Properties previous = BridgeConfig.readSettingsForEditor(null);
         try {
             if (!needsSession && !previous.getProperty("__installation_id", "").equals(
                     snapshot.getProperty("__installation_id", ""))) {
-                // A deleted/recreated or imported file starts a new installation.
+                // A recreated file starts a new installation.
                 // Reserve from that file before accepting its configuration.
                 snapshot.clear();
-                snapshot = SharedConfigStore.loadForRuntime(context);
+                snapshot = WeChatConfigStore.loadForRuntime(context);
             }
             return snapshot;
         } finally { previous.clear(); }
@@ -132,7 +136,9 @@ final class ConfigFileClient {
                             response = store.call(context, loading, needsSession, values);
                         } else error = "配置操作已过期，请重试。";
                     } catch (Exception failure) {
-                        error = "无法读写配置文件，请检查目录授权、文件内容或存储空间后重试。";
+                        BridgeLogger.log("private configuration " + (loading ? "read" : "write")
+                                + " failed: " + failure.getClass().getSimpleName());
+                        error = "无法读写微信内的网关配置，请检查存储空间后重新打开网关重试。";
                     } finally { values.clear(); }
                     Properties result = response;
                     String message = error;

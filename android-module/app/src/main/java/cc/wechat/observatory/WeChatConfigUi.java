@@ -4,12 +4,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 import android.text.InputType;
 import android.view.ContextThemeWrapper;
 import android.view.Gravity;
@@ -32,31 +29,25 @@ import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.Properties;
 import java.util.WeakHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 import cc.wechat.observatory.config.BridgeConfig;
 import cc.wechat.observatory.util.BridgeLogger;
 
-/** In-memory editor for the public configuration directory granted to WeChat. */
+/** In-memory editor; the client persists configuration inside WeChat. */
 public final class WeChatConfigUi {
-    private static final int DIRECTORY_PERMISSION_REQUEST = 0x4f31;
-    private static final String STORAGE_NOTICE = "配置保存在公共目录，无需保持 Observatory 后台。"
-            + "\n卸载后请删除 Documents/WeChatObservatory 文件夹。";
+    private static final String STORAGE_NOTICE = "配置保存在微信内，无需保持 Observatory 后台。"
+            + "\n卸载模块前，请先点击“停用并删除配置”。";
+    private static final String DELETE_UNCONFIRMED = "网关已停用，配置文件删除未确认，请重试。";
     private static final String MAIN_SETTINGS =
             "com.tencent.mm.plugin.setting.ui.setting_new.MainSettingsUI";
     // Values must not retain either the weak Activity key or its dialog/views.
     private static final Map<Activity, WeakReference<Session>> EDITORS = new WeakHashMap<>();
-    private static final Map<Activity, Boolean> DIRECTORY_REQUESTS = new WeakHashMap<>();
-    private static final ExecutorService DIRECTORY_WRITER = Executors.newSingleThreadExecutor();
-    private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static volatile boolean removed;
 
     private WeChatConfigUi() { }
 
     static void moduleRemoved() {
         removed = true;
-        synchronized (DIRECTORY_REQUESTS) { DIRECTORY_REQUESTS.clear(); }
         ArrayList<WeakReference<Session>> editors;
         synchronized (EDITORS) {
             editors = new ArrayList<>(EDITORS.values());
@@ -81,10 +72,6 @@ public final class WeChatConfigUi {
         if (!MAIN_SETTINGS.equals(activity.getClass().getName())) {
             throw new IllegalArgumentException("unsupported settings page");
         }
-        if (!SharedConfigFiles.hasPermission(activity)) {
-            requestDirectoryPermission(activity);
-            return;
-        }
         synchronized (EDITORS) {
             WeakReference<Session> existing = EDITORS.get(activity);
             Session session = existing == null ? null : existing.get();
@@ -102,81 +89,39 @@ public final class WeChatConfigUi {
     private static void showLoaded(Activity activity) {
         Map<String, String> snapshot = ConfigWriteContract.editorSnapshot(
                 BridgeConfig.readSettingsForEditor(activity));
-        Session session = new Session(activity, snapshot);
+        Session session = new Session(activity, snapshot, HookEntry.runtimeStatusText());
         synchronized (EDITORS) { EDITORS.put(activity, new WeakReference<>(session)); }
-        if (session.dialog.getWindow() != null) {
-            session.dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-        }
-        session.dialog.show();
-        session.dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener(view -> save(session));
+        session.show();
     }
 
     public static void load(Activity activity, Runnable onLoaded) {
-        if (!removed && !activity.isFinishing() && !activity.isDestroyed()
-                && SharedConfigFiles.hasPermission(activity)) {
+        if (!removed && !activity.isFinishing() && !activity.isDestroyed()) {
             launch(activity, null, onLoaded, true, new LinkedHashMap<>(), false);
         }
     }
 
-    private static void requestDirectoryPermission(Activity activity) {
-        if (removed || activity.isFinishing() || activity.isDestroyed()) return;
-        synchronized (DIRECTORY_REQUESTS) {
-            // WeChat may swallow an unsuccessful picker launch. A fresh user
-            // tap can retry that request; an already-visible explanation stays.
-            if (Boolean.FALSE.equals(DIRECTORY_REQUESTS.get(activity))) return;
-            DIRECTORY_REQUESTS.put(activity, false);
-        }
-        AlertDialog explanation = new AlertDialog.Builder(dialogContext(activity))
-                .setTitle("授权网关配置目录")
-                .setMessage("请选择本机 Documents 或 Documents/WeChatObservatory，并允许访问。微信只需授权一次，之后直接读写公共配置，不会打开 Observatory。\n\n" + STORAGE_NOTICE)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("选择目录", (dialog, which) -> {
-                    if (removed || activity.isFinishing() || activity.isDestroyed()) return;
-                    try {
-                        synchronized (DIRECTORY_REQUESTS) { DIRECTORY_REQUESTS.put(activity, true); }
-                        activity.startActivityForResult(SharedConfigFiles.permissionIntent(), DIRECTORY_PERMISSION_REQUEST);
-                    } catch (RuntimeException unavailable) {
-                        synchronized (DIRECTORY_REQUESTS) { DIRECTORY_REQUESTS.remove(activity); }
-                        Toast.makeText(activity, "无法打开系统目录选择器，请确认系统文件应用可用。", Toast.LENGTH_LONG).show();
-                    }
-                }).create();
-        explanation.setOnDismissListener(ignored -> {
-            synchronized (DIRECTORY_REQUESTS) {
-                if (Boolean.FALSE.equals(DIRECTORY_REQUESTS.get(activity))) DIRECTORY_REQUESTS.remove(activity);
-            }
-        });
-        explanation.show();
+    private static void confirmDelete(Session session) {
+        Activity activity = session.owner.get();
+        if (activity != null) confirmDelete(activity, session);
     }
 
-    /** Returns true only for a directory request initiated by this Activity. */
-    public static boolean onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
-        if (removed || requestCode != DIRECTORY_PERMISSION_REQUEST) return false;
-        synchronized (DIRECTORY_REQUESTS) {
-            if (!Boolean.TRUE.equals(DIRECTORY_REQUESTS.get(activity))) return false;
-            DIRECTORY_REQUESTS.remove(activity);
-        }
-        if (resultCode != Activity.RESULT_OK || data == null) {
-            Toast.makeText(activity, "未授权配置目录。再次打开网关设置即可重新选择。", Toast.LENGTH_SHORT).show();
-            return true;
-        }
-        Context context = activity.getApplicationContext();
+    private static void confirmDelete(Activity activity, Session session) {
+        if (removed || activity.isFinishing() || activity.isDestroyed()
+                || session != null && !session.isOpen()) return;
         WeakReference<Activity> owner = new WeakReference<>(activity);
-        DIRECTORY_WRITER.execute(() -> {
-            if (removed) return;
-            String failureMessage = null;
-            try { SharedConfigFiles.acceptPermission(context, data); }
-            catch (java.io.IOException | RuntimeException failure) {
-                failureMessage = "目录授权失败。请只选择本机 Documents 或 Documents/WeChatObservatory，并允许读写。";
-            }
-            String error = failureMessage;
-            MAIN.post(() -> {
-                Activity target = owner.get();
-                if (removed || target == null || target.isFinishing() || target.isDestroyed()) return;
-                if (error != null) Toast.makeText(target, error, Toast.LENGTH_LONG).show();
-                else show(target);
-            });
-        });
-        return true;
+        WeakReference<Session> editor = new WeakReference<>(session);
+        boolean hasEditor = session != null;
+        new AlertDialog.Builder(dialogContext(activity))
+                .setTitle("停用并删除配置")
+                .setMessage("停用网关，并删除保存在微信内的 Observatory 专用配置？下次使用需要重新填写服务地址和 API Key。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("停用并删除", (dialog, which) -> {
+                    Activity target = owner.get();
+                    Session current = editor.get();
+                    if (removed || target == null || target.isFinishing() || target.isDestroyed()
+                            || hasEditor && (current == null || !current.isOpen())) return;
+                    launch(target, current, null, false, new LinkedHashMap<>(), true);
+                }).show();
     }
 
     private static void save(Session session) {
@@ -217,40 +162,54 @@ public final class WeChatConfigUi {
         WeakReference<Activity> activity = new WeakReference<>(owner);
         WeakReference<Session> editor = new WeakReference<>(session);
         boolean needsSession = !BridgeConfig.hasRuntimeSession();
+        boolean deleting = !loading && validated.isEmpty();
         if (session != null) {
             session.setSaving(true);
-            session.status.setText("正在保存配置…");
+            session.status.setText(deleting ? "正在停用并删除配置…" : "正在保存配置…");
         }
         try {
-            client.execute(loading, needsSession, validated, (response, error) -> {
+            if (deleting) {
+                // Stop before touching disk: a timed-out deletion may already
+                // have committed, so its old runtime must never keep sending.
+                HookEntry.acceptConfiguration(new Properties());
+                HookEntry.configurationChanged();
+                if (session != null) session.enabled.setChecked(false);
+            }
+            boolean accepted = client.execute(loading, needsSession, validated, (response, error) -> {
                 if (removed) return;
                 boolean success = false;
                 String message = error;
-                if (message == null && response != null) {
+                if (message == null && response != null && (!deleting || response.isEmpty())) {
                     Properties settings = new Properties();
                     try {
                         settings.putAll(response);
-                        boolean changed = needsSession || !ConfigWriteContract.editorSnapshot(
+                        boolean changed = settings.isEmpty() || needsSession || !ConfigWriteContract.editorSnapshot(
                                 BridgeConfig.readSettingsForEditor(null)).equals(
                                 ConfigWriteContract.editorSnapshot(settings));
                         HookEntry.acceptConfiguration(settings);
                         if (changed) HookEntry.configurationChanged();
                         success = true;
-                        message = loading ? "公共目录配置已加载" : "配置已保存到公共目录，立即生效。";
+                        message = settings.isEmpty() ? (loading ? "尚未配置，请填写服务地址和 API Key。" : "已停用并删除配置。")
+                                : (loading ? "配置已加载" : "配置已保存，在微信内立即生效。");
                     } catch (RuntimeException invalid) {
-                        message = "无法接收公共目录配置，请重新打开网关设置。";
+                        message = "无法加载网关配置，请重新打开网关设置。";
                     } finally { settings.clear(); }
                 }
-                if (message == null) message = "公共目录配置读取结果无效，请重新打开网关设置。";
+                if (deleting && !success) message = DELETE_UNCONFIRMED;
+                else if (message == null) message = "配置读取结果无效，请重新打开网关设置。";
                 Session current = editor.get();
                 Activity target = activity.get();
                 if (current != null && current.isOpen()) {
                     current.finishSave(message);
-                    if (success && !loading) current.refreshSnapshot();
+                    if (success && !loading) {
+                        if (deleting) current.clearSnapshot();
+                        else current.refreshSnapshot();
+                    }
                 } else if (interactive && (!success || !loading) && target != null
                         && !target.isFinishing() && !target.isDestroyed()) {
                     if (!success && loading) showReadFailure(target, message);
-                    else Toast.makeText(target, message, Toast.LENGTH_LONG).show();
+                    else Toast.makeText(target, deleting && success
+                            ? "已停用并删除配置，请重新打开网关设置。" : message, Toast.LENGTH_LONG).show();
                 }
                 if (success && loading && onLoaded != null) {
                     try { onLoaded.run(); }
@@ -259,9 +218,13 @@ public final class WeChatConfigUi {
                     }
                 }
             });
+            if (!accepted && session != null && session.isOpen()) {
+                session.finishSave(deleting ? DELETE_UNCONFIRMED : "配置操作尚未完成，请稍后重试。");
+            }
         } catch (RuntimeException unavailable) {
-            if (session != null) session.finishSave("公共目录暂时不可用，请检查授权后重新打开网关设置。");
-            else if (interactive) showReadFailure(owner, "公共目录暂时不可用，请检查授权后重试。");
+            if (session != null) session.finishSave(deleting ? DELETE_UNCONFIRMED : "配置暂时无法读写，请重新打开网关设置。");
+            else if (interactive && deleting) Toast.makeText(owner, DELETE_UNCONFIRMED, Toast.LENGTH_LONG).show();
+            else if (interactive) showReadFailure(owner, "配置暂时无法读取，请稍后重试。");
         } finally { validated.clear(); }
     }
 
@@ -269,9 +232,10 @@ public final class WeChatConfigUi {
         if (removed || activity.isFinishing() || activity.isDestroyed()) return;
         new AlertDialog.Builder(dialogContext(activity))
                 .setTitle("无法读取网关配置")
-                .setMessage(message + "\n\n如果目录已删除、移动或授权失效，请重新选择本机 Documents 或 Documents/WeChatObservatory。")
+                .setMessage(message)
                 .setNegativeButton("关闭", null)
-                .setPositiveButton("重新授权目录", (dialog, which) -> requestDirectoryPermission(activity))
+                .setPositiveButton("重新读取", (dialog, which) -> show(activity))
+                .setNeutralButton("停用并删除配置", (dialog, which) -> confirmDelete(activity, null))
                 .show();
     }
 
@@ -285,7 +249,7 @@ public final class WeChatConfigUi {
         final Switch websocket;
         final TextView status;
 
-        Session(Activity activity, Map<String, String> snapshot) {
+        Session(Activity activity, Map<String, String> snapshot, String runtimeStatus) {
             this.owner = new WeakReference<>(activity);
             this.snapshot = snapshot;
             Context ui = dialogContext(activity);
@@ -299,15 +263,16 @@ public final class WeChatConfigUi {
             url = input(ui, fields, "服务地址", snapshot.get("bridge_url"), false);
             key = input(ui, fields, "API Key", snapshot.get("api_key"), true);
             enabled = toggle(ui, fields, "启用网关",
-                    ConfigWriteContract.isOn(snapshot.get("enabled"), true));
+                    ConfigWriteContract.isOn(snapshot.get("enabled"), false));
             websocket = toggle(ui, fields, "实时 WebSocket",
                     ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
             status = new TextView(ui);
             status.setTextSize(13);
             status.setAlpha(0.75f);
             status.setPadding(0, dp(ui, 12), 0, dp(ui, 4));
-            status.setText(HookEntry.runtimeStatusText()
-                    + "\n保存后生效。" + STORAGE_NOTICE);
+            status.setText(runtimeStatus
+                    + (snapshot.isEmpty() ? "\n请填写配置；从 0.1.17 升级也需重新填写。" : "")
+                    + "\n" + STORAGE_NOTICE);
             status.setSaveEnabled(false);
             fields.addView(status);
             ScrollView scroll = new ScrollView(ui);
@@ -316,12 +281,7 @@ public final class WeChatConfigUi {
             scroll.addView(fields);
             dialog = new AlertDialog.Builder(ui).setTitle("Observatory 网关")
                     .setView(scroll).setPositiveButton("保存", null).setNegativeButton("关闭", null)
-                    .setNeutralButton("清除配置", (ignored, which) -> new AlertDialog.Builder(ui)
-                            .setMessage("清除公共目录中保存的网关地址和 API Key，并停止当前网关？")
-                            .setNegativeButton("取消", null)
-                            .setPositiveButton("清除", (confirmation, button) ->
-                                    launch(activity, this, null, false, new LinkedHashMap<>(), true))
-                            .show()).create();
+                    .setNeutralButton("停用并删除配置", null).create();
             dialog.setOnDismissListener(ignored -> {
                 Activity target = owner.get();
                 if (target != null) {
@@ -338,6 +298,13 @@ public final class WeChatConfigUi {
             });
         }
 
+        void show() {
+            if (dialog.getWindow() != null) dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            dialog.show();
+            dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener(view -> save(this));
+            dialog.getButton(DialogInterface.BUTTON_NEUTRAL).setOnClickListener(view -> confirmDelete(this));
+        }
+
         boolean isOpen() {
             Activity activity = owner.get();
             return activity != null && !activity.isFinishing() && !activity.isDestroyed() && dialog.isShowing();
@@ -348,8 +315,16 @@ public final class WeChatConfigUi {
             snapshot.putAll(ConfigWriteContract.editorSnapshot(BridgeConfig.readSettingsForEditor(null)));
             url.setText(snapshot.get("bridge_url"));
             key.setText(snapshot.get("api_key"));
-            enabled.setChecked(ConfigWriteContract.isOn(snapshot.get("enabled"), true));
+            enabled.setChecked(ConfigWriteContract.isOn(snapshot.get("enabled"), false));
             websocket.setChecked(ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
+        }
+
+        void clearSnapshot() {
+            snapshot.clear();
+            url.setText("");
+            key.setText("");
+            enabled.setChecked(false);
+            websocket.setChecked(true);
         }
 
         void setSaving(boolean saving) {

@@ -74,6 +74,22 @@ public class ConfigOperationGuardTest {
         assertTrue(ConfigOperationGuard.allows(captured, latest()));
     }
 
+    @Test public void deletingThenSavingSameCredentialsCannotReviveOldOperations() {
+        Properties original = configured();
+        original.setProperty("__installation_id", "5ab46c33-0f96-4c49-9be7-549953a709f9");
+        original.setProperty("__generation_start", "1");
+        original.setProperty("__generation_limit", "1000000");
+        BridgeConfig old = publish(original);
+        publish(new Properties());
+        assertFalse(ConfigOperationGuard.allows(old, latest()));
+        Properties recreated = new Properties();
+        recreated.putAll(original);
+        recreated.setProperty("__installation_id", "0a5a192f-e850-49bc-9a51-17bb021a10be");
+        BridgeConfig current = publish(recreated);
+        assertFalse(ConfigOperationGuard.allows(old, latest()));
+        assertTrue(ConfigOperationGuard.allows(current, latest()));
+    }
+
     @Test public void matchingDisabledOrIncompleteConfigurationsStillCannotStartRequests() {
         Properties disabled = configured();
         disabled.setProperty("enabled", "0");

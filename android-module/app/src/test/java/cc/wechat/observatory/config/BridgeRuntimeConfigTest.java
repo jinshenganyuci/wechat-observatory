@@ -89,6 +89,18 @@ public class BridgeRuntimeConfigTest {
         assertEquals("1", BridgeConfig.readSettingsForEditor(null).getProperty("__generation_start"));
     }
 
+    @Test public void missingOrDeletedFileIsLoadedAndDisabledWithoutAReservedIdentity() {
+        BridgeConfig.acceptRuntimeSettings(initialSnapshot());
+        BridgeConfig.acceptRuntimeSettings(new Properties());
+        assertTrue(BridgeConfig.isRuntimeLoaded());
+        assertFalse(BridgeConfig.hasRuntimeSession());
+        assertTrue(BridgeConfig.readSettingsForEditor(null).isEmpty());
+        BridgeConfig empty = BridgeConfig.fromProperties(BridgeConfig.readSettingsForEditor(null));
+        assertFalse(empty.enabled);
+        assertEquals("", empty.apiKey);
+        assertEquals("", empty.baseUrl);
+    }
+
     @Test public void businessSettingsAloneDoNotInventAccountSession() {
         Properties settings = new Properties();
         settings.setProperty("api_key", "test-key");
@@ -97,7 +109,7 @@ public class BridgeRuntimeConfigTest {
         assertFalse(BridgeConfig.hasRuntimeSession());
     }
 
-    @Test public void recreatedPublicFileReplacesOldInstallationAndRange() {
+    @Test public void recreatedPrivateFileReplacesOldInstallationAndRange() {
         BridgeConfig.acceptRuntimeSettings(initialSnapshot());
         Properties recreated = initialSnapshot();
         recreated.setProperty("__installation_id", "0a5a192f-e850-49bc-9a51-17bb021a10be");
