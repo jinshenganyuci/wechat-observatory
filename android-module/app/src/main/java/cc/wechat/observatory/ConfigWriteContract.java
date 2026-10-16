@@ -15,19 +15,11 @@ import cc.wechat.observatory.gateway.GatewayEndpoint;
 /** Bounded string-only protocol; never includes runtime account identity. */
 final class ConfigWriteContract {
     static final String MODULE_PACKAGE = "cc.wechat.observatory";
-    static final String WRITE_ACTIVITY = MODULE_PACKAGE + ".ConfigWriteActivity";
-    static final String ACTION_LOAD = MODULE_PACKAGE + ".config.LOAD";
-    static final String ACTION_SAVE = MODULE_PACKAGE + ".config.SAVE";
-    static final String EXTRA_VALUES = MODULE_PACKAGE + ".config.values";
-    static final String EXTRA_NONCE = MODULE_PACKAGE + ".config.nonce";
-    static final String EXTRA_STATUS = MODULE_PACKAGE + ".config.status";
-    static final String EXTRA_NEEDS_SESSION = MODULE_PACKAGE + ".config.needs_session";
     static final String REVISION_KEY = "__bridge_write_revision";
     static final String OK = "ok";
     static final String DENIED = "denied";
     static final String INVALID = "invalid";
     static final String FAILED = "failed";
-    static final int REQUEST_CODE = 0x4f42;
     static final Set<String> KEYS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
             "enabled", "bridge_url", "api_key", "poll_interval_ms", "poll_limit",
             "outbox_websocket_enabled", "contact_sync_interval_ms", "contact_sync_limit",
@@ -35,10 +27,6 @@ final class ConfigWriteContract {
             "stale_message_grace_ms", "stale_message_replay_limit")));
 
     private ConfigWriteContract() { }
-
-    static boolean allowedCaller(String packageName) {
-        return "com.tencent.mm".equals(packageName);
-    }
 
     static boolean validNonce(String nonce) {
         if (nonce == null || nonce.length() != 36) return false;

@@ -287,6 +287,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     @Override public void onReceive(Context ignored, Intent intent) {
                         if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false) || intent.getData() == null
                                 || !"cc.wechat.observatory".equals(intent.getData().getSchemeSpecificPart())) return;
+                        ConfigServiceClient.moduleRemoved();
+                        WeChatConfigUi.moduleRemoved();
                         BridgeConfig.clearRuntimeSettings();
                         CURRENT_ACCOUNT = null;
                         SESSION_ALLOCATOR = null;

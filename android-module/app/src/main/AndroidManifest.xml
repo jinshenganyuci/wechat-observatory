@@ -38,11 +38,9 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".ConfigWriteActivity"
-            android:exported="true"
-            android:excludeFromRecents="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <service
+            android:name=".ConfigService"
+            android:exported="true" />
 
         <receiver
             android:name=".BridgeConfigReceiver"

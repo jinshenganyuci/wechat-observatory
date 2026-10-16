@@ -19,7 +19,7 @@ public final class BridgeConfig {
     private static Properties runtimeSettings = new Properties();
     private static boolean runtimeLoaded;
 
-    /** Ephemeral snapshot supplied by the module-owned foreground activity. */
+    /** Ephemeral snapshot supplied by the module-owned Binder service. */
     public static synchronized void acceptRuntimeSettings(Properties values) {
         Properties next = new Properties();
         if (values != null) next.putAll(values);
@@ -104,7 +104,7 @@ public final class BridgeConfig {
     }
 
     private static Properties readProperties(Context context) {
-        // No disk or IPC from WeChat. The module activity owns persistent data.
+        // No disk or IPC on the message path. The module service owns persistent data.
         return readSettingsForEditor(context);
     }
 

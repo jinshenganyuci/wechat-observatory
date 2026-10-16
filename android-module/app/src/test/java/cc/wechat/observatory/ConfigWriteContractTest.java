@@ -18,13 +18,6 @@ public class ConfigWriteContractTest {
         return values;
     }
 
-    @Test public void onlySystemReportedWeChatCallerIsAllowed() {
-        assertTrue(ConfigWriteContract.allowedCaller("com.tencent.mm"));
-        assertFalse(ConfigWriteContract.allowedCaller(null));
-        assertFalse(ConfigWriteContract.allowedCaller("com.tencent.mm.other"));
-        assertFalse(ConfigWriteContract.allowedCaller("cc.wechat.observatory"));
-    }
-
     @Test public void nonceMustBeCanonicalUuid() {
         assertTrue(ConfigWriteContract.validNonce(UUID.randomUUID().toString()));
         assertFalse(ConfigWriteContract.validNonce(null));
@@ -67,7 +60,7 @@ public class ConfigWriteContractTest {
     }
 
     @Test(expected = IllegalArgumentException.class)
-    public void oversizedInputIsRejectedBeforeAnIntentIsSent() throws Exception {
+    public void oversizedInputIsRejectedBeforeAnRpcIsSent() throws Exception {
         Map<String, Object> source = settings();
         source.put("api_key", new String(new char[4097]).replace('\0', 'x'));
         ConfigWriteContract.normalize(source);
