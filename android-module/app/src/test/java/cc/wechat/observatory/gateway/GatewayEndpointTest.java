@@ -10,12 +10,12 @@ import org.junit.Test;
 
 public final class GatewayEndpointTest {
     @Test
-    public void productionEndpointUsesHttps443AndKeepsBasePath() throws Exception {
-        GatewayEndpoint endpoint = GatewayEndpoint.parse(GatewayEndpoint.PRODUCTION_BASE_URL);
+    public void httpsEndpointUses443AndKeepsBasePath() throws Exception {
+        GatewayEndpoint endpoint = GatewayEndpoint.parse("https://example.test/observatory");
 
         assertTrue(endpoint.isTls());
         assertEquals(443, endpoint.port());
-        assertEquals("47.108.232.203", endpoint.hostHeader());
+        assertEquals("example.test", endpoint.hostHeader());
         assertEquals("/observatory/module/outbox/ws?device=phone-a",
                 endpoint.requestPath("/module/outbox/ws?device=phone-a"));
     }

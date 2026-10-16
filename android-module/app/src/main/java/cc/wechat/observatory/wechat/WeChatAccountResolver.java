@@ -2,29 +2,22 @@ package cc.wechat.observatory.wechat;
 
 import java.lang.reflect.Method;
 
-/** Read the current kernel's account, including MMKV-backed ConfigStorage on 8.0.78. */
+/** Read the current kernel's account with the binding for an explicitly verified APK version. */
 public final class WeChatAccountResolver {
-    // Verified against official APK bytecode; never probe arbitrary static factories.
-    private static final String[][] BINDINGS = {
-            {"gp0.j1", "x", "m"}, // 8.0.78
-            {"gm0.j1", "u", "l"}  // 8.0.74
-    };
-
     private WeChatAccountResolver() {
     }
 
-    public static RuntimeAccount resolve(ClassLoader loader) throws Exception {
-        for (String[] binding : BINDINGS) {
-            Class<?> kernel;
-            try {
-                kernel = Class.forName(binding[0], false, loader);
-            } catch (ClassNotFoundException ignored) {
-                continue;
-            }
-            Object storage = method(kernel, binding[1]).invoke(null);
-            return readStorage(storage, binding[2]);
-        }
-        throw new IllegalStateException("No verified current-account binding for this WeChat version");
+    public static RuntimeAccount resolve(ClassLoader loader, String versionName, long versionCode)
+            throws Exception {
+        return resolve(loader, WeChatVersionProfile.forVersion(versionName, versionCode));
+    }
+
+    public static RuntimeAccount resolve(ClassLoader loader, WeChatVersionProfile profile) throws Exception {
+        // Obfuscated names can be reused for unrelated classes. Never try another
+        // version's static factory when this version's binding is unavailable.
+        Class<?> kernel = Class.forName(profile.accountKernelClass, false, loader);
+        Object storage = method(kernel, profile.accountStorageMethod).invoke(null);
+        return readStorage(storage, profile.configGetterMethod);
     }
 
     static RuntimeAccount readStorage(Object storage, String getterName) throws Exception {

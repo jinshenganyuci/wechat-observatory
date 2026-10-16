@@ -27,7 +27,9 @@
 
 WeChat Observatory（微信看台）是一个通过 Android LSPosed 模块接入微信的网关控制台。手机模块负责在微信进程内观察消息、同步联系人、执行发送；服务端负责 API Key 身份、当前微信账号绑定、消息持久化、出站队列和 Web 管理台。
 
-当前 Android LSPosed 模块面向微信 Android `8.0.75` 适配。微信内部实现随版本变化，升级微信后需要重新验证消息观察、联系人同步、媒体上传和发送路径。
+此 fork 的 `0.1.13-wechat8079` 新增微信 Android **8.0.79 / 3200 arm64** 适配，已对目标 APK 做 DexSQL 静态核验；完整收发仍需实机验收。保留 8.0.74/3120、8.0.78/3180 的历史账号映射，其他版本明确拒绝注册。
+
+**服务端与模块需要一起升级。** 上游 main `31853e9` 不支持本模块要求的账户会话协议；只有更新 APK 仍无法使用。升级步骤、验证范围、日志与签名说明见 [8.0.79 兼容性说明](docs/compatibility/wechat-8079.md)。
 
 ```text
 微信消息 -> LSPosed 模块 -> 网关入库和实时推送 -> Web 管理台
@@ -69,7 +71,7 @@ docs                       详细文档
 - MySQL 8+，生产建议使用 MySQL
 - Android Studio / Android SDK，用于构建 LSPosed 模块
 - 已 Root 的 Android 手机、LSPosed、微信
-- 微信 Android `8.0.75`
+- 微信 Android `8.0.79 / 3200 arm64`（本次静态验证目标）
 
 ### 2. 启动服务端
 
@@ -139,9 +141,7 @@ npm run build
 
 ### 5. 构建 Android 模块
 
-当前仓库没有强制要求提交 Gradle Wrapper。推荐在发布前补充 Wrapper；没有 Wrapper 时，可用 Android Studio 打开 `android-module` 并执行 debug 构建。
-
-如果仓库已包含 Gradle Wrapper：
+仓库包含 Gradle 8.9 Wrapper；使用 JDK 17 和 Android SDK 35：
 
 ```powershell
 cd android-module
@@ -154,7 +154,7 @@ cd android-module
 
 在 Web 管理台生成 API Key，打开手机上的 **WeChat Observatory** 配置页，填写：
 
-- Observatory 服务地址，默认 `https://47.108.232.203/observatory`
+- 你自己的 Observatory 服务地址（无默认服务器）
 - Web 管理台生成的 API Key
 
 不要手动填写 `wxid`。模块会在微信进程内自动识别当前登录微信。
@@ -163,14 +163,15 @@ cd android-module
 
 ## Docker 部署
 
+本仓库的 `deploy/docker/docker-compose.yml` 是包含外部 `pd-wechat-gateway` 项目的联动栈，不能在仅克隆本仓库时直接整栈启动。
+
+独立部署可在仓库根目录构建 Observatory 镜像，然后在你已有的 Compose 中替换 Observatory 与迁移服务的镜像，保留原数据库卷、网络与环境变量：
+
 ```bash
-cp deploy/docker/.env.example deploy/docker/.env
-# 编辑 deploy/docker/.env，至少修改 BRIDGE_ADMIN_PASSWORD、MYSQL_PASSWORD 和 MYSQL_ROOT_PASSWORD
-docker compose -f deploy/docker/docker-compose.yml up -d --build
-curl -fsS http://127.0.0.1:8088/healthz
+docker build -t wechat-observatory:0.1.13-wechat8079 .
 ```
 
-更多说明见 [docs/deployment.md](docs/deployment.md)。
+从旧 main 升级必须先备份并执行数据库迁移，见 [本版本升级说明](docs/compatibility/wechat-8079.md)。不要用旧服务端镜像搭配新 APK。
 
 ## 常用 API
 
@@ -200,7 +201,6 @@ curl -H "X-Bridge-Password: your-admin-password" http://127.0.0.1:8088/api/api-k
 - Hook、自动化发送和异常行为可能带来账号风控风险。
 - 服务端管理台必须放在可信网络后，并设置强管理密码。
 - API Key 等同于手机模块访问凭证，泄露后应立即停用或删除。
-- 开源发布前请检查 `.env`、部署脚本、日志和截图中是否包含真实 IP、密码、手机号、微信号、wxid 或聊天内容。
 
 更多发布前检查见 [docs/security.md](docs/security.md) 和 [docs/open-source-checklist.md](docs/open-source-checklist.md)。
 

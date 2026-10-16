@@ -53,6 +53,7 @@ import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
 import cc.wechat.observatory.model.MessagePayload;
 import cc.wechat.observatory.util.BridgeLogger;
+import cc.wechat.observatory.util.HookInstallation;
 import cc.wechat.observatory.wechat.LocalMessageConfirmation;
 import cc.wechat.observatory.wechat.QueueSubmissionRetrier;
 import cc.wechat.observatory.wechat.OutboxDeliveryPacing;
@@ -61,6 +62,7 @@ import cc.wechat.observatory.wechat.RuntimeAccount;
 import cc.wechat.observatory.wechat.AccountSession;
 import cc.wechat.observatory.wechat.AccountDatabaseSelector;
 import cc.wechat.observatory.wechat.WeChatAccountResolver;
+import cc.wechat.observatory.wechat.WeChatVersionProfile;
 import cc.wechat.observatory.wechat.DeviceRole;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ExecutorService;
@@ -80,6 +82,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final AtomicBoolean WORKER_STARTED = new AtomicBoolean(false);
     private static final AtomicBoolean OUTBOX_WORKER_STARTED = new AtomicBoolean(false);
+    private static final AtomicBoolean DELAYED_WORKER_STARTED = new AtomicBoolean(false);
+    private static final HookInstallation HOOKS = new HookInstallation();
+    private static volatile String LAST_OBSERVATION_ERROR = "";
+    private static volatile String LAST_APPLICATION_HOOK_ERROR = "";
     private static volatile String LAST_READY_STATE = "";
     private static volatile String LAST_CLASSLOADER_STATE = "";
     private static volatile long LAST_CONTACT_SCAN_LOG_AT = 0L;
@@ -129,42 +135,100 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return; // Only the main process owns the logged-in account and its registration.
         }
 
+        log("module loaded version=" + BuildConfig.VERSION_NAME + "/" + BuildConfig.VERSION_CODE
+                + " process=" + lpparam.processName + " pid=" + android.os.Process.myPid());
+
+        // The initial loader may not contain WeChat's runtime dex yet. Always
+        // register lifecycle hooks before resolving any database hook target.
+        hookApplicationAttach(lpparam.classLoader);
+        hookWeChatApplication(lpparam.classLoader);
+        hookForeground();
+        startDelayedWorker(lpparam.classLoader, 20000L);
+    }
+
+    private static boolean hookOnce(final Method method, final XC_MethodHook callback) throws Throwable {
+        return HOOKS.installOnce(method, new HookInstallation.Action() {
+            @Override
+            public void install() {
+                method.setAccessible(true);
+                XposedBridge.hookMethod(method, callback);
+            }
+        });
+    }
+
+    private static synchronized void installObservationHook(ClassLoader classLoader) {
         try {
-            Class<?> sqliteDatabase = XposedHelpers.findClass("com.tencent.wcdb.database.SQLiteDatabase", lpparam.classLoader);
-            XposedHelpers.findAndHookMethod(
-                    sqliteDatabase,
-                    "insertWithOnConflict",
-                    String.class,
-                    String.class,
-                    ContentValues.class,
-                    int.class,
-                    new XC_MethodHook() {
+            Class<?> sqliteDatabase = XposedHelpers.findClass(
+                    "com.tencent.wcdb.database.SQLiteDatabase", classLoader);
+            Method insert = sqliteDatabase.getDeclaredMethod("insertWithOnConflict",
+                    String.class, String.class, ContentValues.class, int.class);
+            if (hookOnce(insert, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 3
+                            || !"message".equals(param.args[0])
+                            || !(param.args[2] instanceof ContentValues)) {
+                        return;
+                    }
+                    final Object database = param.thisObject;
+                    final Object[] arguments = param.args.clone();
+                    arguments[2] = new ContentValues((ContentValues) arguments[2]);
+                    final RuntimeAccount sourceAccount = CURRENT_ACCOUNT;
+                    INSERT_REPORTER.execute(new Runnable() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            final Object database = param.thisObject;
-                            final Object[] arguments = param.args.clone();
-                            if (arguments.length > 2 && arguments[2] instanceof ContentValues) {
-                                arguments[2] = new ContentValues((ContentValues) arguments[2]);
-                            }
-                            if (arguments.length > 0 && "message".equals(arguments[0])) {
-                                final RuntimeAccount sourceAccount = CURRENT_ACCOUNT;
-                                INSERT_REPORTER.execute(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        handleInsert(database, arguments, sourceAccount);
-                                    }
-                                });
-                            }
+                        public void run() {
+                            handleInsert(database, arguments, sourceAccount);
                         }
                     });
-            log("hooked WeChat WCDB access methods");
-            hookApplicationAttach(lpparam.classLoader);
-            hookWeChatApplication(lpparam.classLoader);
-            hookForeground();
+                }
+            })) {
+                log("hooked WeChat WCDB access methods using runtime classLoader");
+            }
+            LAST_OBSERVATION_ERROR = "";
         } catch (Throwable t) {
-            log("hook failed: " + t);
-            reportHookFailureLater("hook failed: " + t);
+            String error = "WCDB hook pending; will retry: " + shortError(t);
+            if (!error.equals(LAST_OBSERVATION_ERROR)) {
+                LAST_OBSERVATION_ERROR = error;
+                log(error);
+            }
         }
+    }
+
+    private static ClassLoader prepareRuntimeHooks(ClassLoader fallback) {
+        ClassLoader previous = WECHAT_CLASS_LOADER;
+        ClassLoader loader = runtimeClassLoader(fallback == null ? previous : fallback);
+        if (loader == null) {
+            loader = fallback;
+        }
+        WECHAT_CLASS_LOADER = loader;
+        if (previous != loader) {
+            CAPABILITY_REPORTED = false;
+        }
+        hookWeChatApplication(loader);
+        installObservationHook(loader);
+        return loader;
+    }
+
+    private static void onApplicationReady(Context context, ClassLoader loader, String stage) {
+        if (context != null) {
+            APP_CONTEXT = context;
+            try {
+                ClassLoader contextLoader = context.getClassLoader();
+                if (contextLoader != null) {
+                    loader = contextLoader;
+                }
+            } catch (Throwable t) {
+                log("context classLoader pending: " + shortError(t));
+            }
+        }
+        log(stage + "; start workers with runtime readiness checks");
+        // Hook failures are isolated from worker startup and network diagnostics.
+        try {
+            loader = prepareRuntimeHooks(loader);
+        } catch (Throwable t) {
+            log("runtime hook preparation failed; worker will retry: " + shortError(t));
+        }
+        startWorker(loader);
     }
 
     private static String shorten(String value, int maxLength) {
@@ -176,66 +240,58 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static void hookApplicationAttach(final ClassLoader classLoader) {
         try {
-            XposedHelpers.findAndHookMethod(
-                    Application.class,
-                    "attach",
-                    Context.class,
+            if (hookOnce(Application.class.getDeclaredMethod("attach", Context.class),
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             if (param.args != null && param.args.length > 0 && param.args[0] instanceof Context) {
-                                APP_CONTEXT = (Context) param.args[0];
+                                Context context = (Context) param.args[0];
                                 ClassLoader runtimeLoader = param.thisObject == null ? null : param.thisObject.getClass().getClassLoader();
-                                log("Application.attach captured context; start outbox worker");
-                                startWorker(runtimeLoader == null ? classLoader : runtimeLoader);
+                                onApplicationReady(context, runtimeLoader == null ? classLoader : runtimeLoader,
+                                        "Application.attach captured context");
                             }
                         }
-                    });
-            log("hooked Application.attach");
+                    })) {
+                log("hooked Application.attach");
+            }
         } catch (Throwable t) {
             log("hook Application.attach failed: " + t);
         }
     }
 
     private static void hookWeChatApplication(final ClassLoader classLoader) {
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.tencent.mm.app.MMApplicationLike",
-                    classLoader,
-                    "onBaseContextAttached",
-                    Context.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.args != null && param.args.length > 0 && param.args[0] instanceof Context) {
-                                APP_CONTEXT = (Context) param.args[0];
-                            }
-                            ClassLoader runtimeLoader = param.thisObject == null ? null : param.thisObject.getClass().getClassLoader();
-                            log("WeChat application init completed; start outbox worker");
-                            startWorker(runtimeLoader == null ? classLoader : runtimeLoader);
-                        }
-                    });
-            XposedHelpers.findAndHookMethod(
-                    "com.tencent.mm.app.MMApplicationLike",
-                    classLoader,
-                    "onCreate",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+        List<String> failures = new ArrayList<>();
+        for (final String name : new String[]{"onBaseContextAttached", "onCreate"}) {
+            try {
+                Class<?> applicationLike = XposedHelpers.findClass("com.tencent.mm.app.MMApplicationLike", classLoader);
+                Method method = "onCreate".equals(name) ? applicationLike.getDeclaredMethod(name)
+                        : applicationLike.getDeclaredMethod(name, Context.class);
+                if (hookOnce(method, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Context context = param.args != null && param.args.length > 0
+                                && param.args[0] instanceof Context ? (Context) param.args[0] : null;
+                        if (context == null) {
                             Object app = currentApplication();
-                            if (app instanceof Context) {
-                                APP_CONTEXT = (Context) app;
-                            }
-                            ClassLoader runtimeLoader = param.thisObject == null ? null : param.thisObject.getClass().getClassLoader();
-                            log("WeChat application onCreate completed; start outbox worker");
-                            startWorker(runtimeLoader == null ? classLoader : runtimeLoader);
+                            context = app instanceof Context ? (Context) app : null;
                         }
-                    });
-            log("hooked WeChat application init");
-            startDelayedWorker(classLoader, 20000L);
-        } catch (Throwable t) {
-            log("hook WeChat application init failed, start worker with readiness gate: " + t);
-            startWorker(classLoader);
+                        ClassLoader runtimeLoader = param.thisObject == null ? null : param.thisObject.getClass().getClassLoader();
+                        onApplicationReady(context, runtimeLoader == null ? classLoader : runtimeLoader,
+                                "WeChat application " + name + " completed");
+                    }
+                })) {
+                    log("hooked WeChat application " + name);
+                }
+            } catch (Throwable t) {
+                failures.add(name + ": " + shortError(t));
+            }
+        }
+        String error = failures.isEmpty() ? "" : "WeChat application hook pending; will retry: " + failures;
+        if (!error.equals(LAST_APPLICATION_HOOK_ERROR)) {
+            LAST_APPLICATION_HOOK_ERROR = error;
+            if (!error.isEmpty()) {
+                log(error);
+            }
         }
     }
 
@@ -246,7 +302,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
      */
     private static void hookForeground() {
         try {
-            XposedHelpers.findAndHookMethod(Activity.class, "onStart", new XC_MethodHook() {
+            hookOnce(Activity.class.getDeclaredMethod("onStart"), new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (STARTED_ACTIVITIES.incrementAndGet() != 1) {
@@ -262,7 +318,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedHelpers.findAndHookMethod(Activity.class, "onStop", new XC_MethodHook() {
+            hookOnce(Activity.class.getDeclaredMethod("onStop"), new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (STARTED_ACTIVITIES.decrementAndGet() <= 0) {
@@ -278,18 +334,27 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private static void startDelayedWorker(final ClassLoader classLoader, final long delayMs) {
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                if (!sleepOnce(delayMs)) {
-                    return;
+        if (!DELAYED_WORKER_STARTED.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    if (!sleepOnce(delayMs)) {
+                        return;
+                    }
+                    if (!WORKER_STARTED.get() || !OUTBOX_WORKER_STARTED.get()) {
+                        onApplicationReady(bridgeContext(), classLoader, "delayed worker fallback fired");
+                    }
                 }
-                log("delayed worker fallback fired");
-                startWorker(classLoader);
-            }
-        }, "wechat-observatory-delayed-start");
-        thread.setDaemon(true);
-        thread.start();
+            }, "wechat-observatory-delayed-start");
+            thread.setDaemon(true);
+            thread.start();
+        } catch (Throwable t) {
+            DELAYED_WORKER_STARTED.set(false);
+            log("start delayed worker failed: " + shortError(t));
+        }
     }
 
     private static void handleInsert(Object database, Object[] arguments, RuntimeAccount sourceAccount) {
@@ -359,27 +424,42 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private static void startWorker(final ClassLoader classLoader) {
+        startOutboxWorker(classLoader);
         if (!WORKER_STARTED.compareAndSet(false, true)) {
             return;
         }
-        startOutboxWorker(classLoader);
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                runWorker(classLoader);
-            }
-        }, "wechat-observatory-worker");
-        thread.setDaemon(true);
-        thread.start();
+        try {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        runWorker(classLoader);
+                    } finally {
+                        WORKER_STARTED.set(false);
+                    }
+                }
+            }, "wechat-observatory-worker");
+            thread.setDaemon(true);
+            thread.start();
+        } catch (Throwable t) {
+            WORKER_STARTED.set(false);
+            log("start worker failed: " + shortError(t));
+        }
     }
 
     private static void runWorker(ClassLoader classLoader) {
-        WECHAT_CLASS_LOADER = classLoader;
         while (true) {
-            BridgeConfig config = BridgeConfig.load(bridgeContext());
-            String stage = "startup";
+            BridgeConfig config = null;
+            String stage = "runtime-hooks";
             try {
+                classLoader = prepareRuntimeHooks(WECHAT_CLASS_LOADER == null ? classLoader : WECHAT_CLASS_LOADER);
+                stage = "config";
+                config = BridgeConfig.load(bridgeContext());
+                stage = "startup";
                 reportCapabilities(classLoader);
+                if (!isBlank(LAST_OBSERVATION_ERROR)) {
+                    reportDiagnostic(config, "hook", LAST_OBSERVATION_ERROR);
+                }
                 if (config.enabled && !isBlank(config.baseUrl) && !isBlank(config.apiKey)) {
                     reportStartupOnce(config);
                     stage = "identity";
@@ -412,7 +492,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 log("worker failed: " + t);
                 reportDiagnostic(config, stage, String.valueOf(t));
             }
-            if (!sleepOnce(Math.max(1000L, config.pollIntervalMs))) {
+            if (!sleepOnce(config == null ? 3000L : Math.max(1000L, config.pollIntervalMs))) {
                 return;
             }
         }
@@ -422,23 +502,39 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (!OUTBOX_WORKER_STARTED.compareAndSet(false, true)) {
             return;
         }
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                runOutboxWorker(classLoader);
-            }
-        }, "wechat-observatory-outbox");
-        thread.setDaemon(true);
-        thread.start();
-        startOutboxWatchdog();
+        try {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        runOutboxWorker(classLoader);
+                    } finally {
+                        OUTBOX_WORKER_STARTED.set(false);
+                    }
+                }
+            }, "wechat-observatory-outbox");
+            thread.setDaemon(true);
+            thread.start();
+        } catch (Throwable t) {
+            OUTBOX_WORKER_STARTED.set(false);
+            log("start outbox worker failed: " + shortError(t));
+        }
+        try {
+            startOutboxWatchdog();
+        } catch (Throwable t) {
+            OUTBOX_WATCHDOG_STARTED.set(false);
+            log("start outbox watchdog failed: " + shortError(t));
+        }
     }
 
     private static void runOutboxWorker(ClassLoader classLoader) {
         while (true) {
-            BridgeConfig config = BridgeConfig.load(bridgeContext());
+            BridgeConfig config = null;
             noteOutboxStage("loop");
             boolean completedOutboxItem = false;
             try {
+                classLoader = runtimeClassLoader(WECHAT_CLASS_LOADER == null ? classLoader : WECHAT_CLASS_LOADER);
+                config = BridgeConfig.load(bridgeContext());
                 if (config.enabled && !isBlank(config.baseUrl) && !isBlank(config.apiKey)) {
                     if (!bindRuntimeIdentity(config)) {
                         if (!sleepOnce(Math.max(3000L, config.pollIntervalMs))) {
@@ -470,7 +566,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 log("outbox worker failed: " + t);
                 reportDiagnostic(config, "outbox-worker", String.valueOf(t));
             }
-            long delay = OutboxDeliveryPacing.nextDelayMs(completedOutboxItem, config.pollIntervalMs);
+            long delay = config == null ? 3000L
+                    : OutboxDeliveryPacing.nextDelayMs(completedOutboxItem, config.pollIntervalMs);
             if (delay > 0 && !sleepOnce(delay)) {
                 return;
             }
@@ -504,6 +601,22 @@ public final class HookEntry implements IXposedHookLoadPackage {
         report.append(wechatVersion());
         report.append(" observation=").append(checkObservation(classLoader));
         report.append(" identity=").append(isBlank(CURRENT_WXID) ? "pending" : "ok");
+        try {
+            if (currentWeChatVersionProfile().is8079()) {
+                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(
+                        runtimeClassLoader(classLoader));
+                report.append(" send.adapter=8.0.79/3200 send.builder=")
+                        .append(pending == null ? "ready" : pending);
+                LAST_CAPABILITY_REPORT = report.toString();
+                log(LAST_CAPABILITY_REPORT);
+                return;
+            }
+        } catch (Throwable t) {
+            report.append(" send.unavailable=").append(shortError(t));
+            LAST_CAPABILITY_REPORT = report.toString();
+            log(LAST_CAPABILITY_REPORT);
+            return;
+        }
         report.append(" send.builder=").append(checkPath(classLoader,
                 new String[]{"w11.s1", "v51.s1"},
                 new String[]{"w11.r1", "v51.r1"},
@@ -524,6 +637,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     /** Why isWeChatReadyForSend() would pass or fail: registry slot and kernel flag. */
     private static String readinessDetail(ClassLoader classLoader) {
+        try {
+            if (currentWeChatVersionProfile().is8079()) {
+                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(classLoader);
+                return pending == null ? "8.0.79 ready" : pending;
+            }
+        } catch (Throwable t) {
+            return "verified adapter unavailable(" + shortError(t) + ")";
+        }
         StringBuilder detail = new StringBuilder("registrySlot=");
         try {
             Field field = findFieldAny(resolveClass(classLoader,
@@ -606,6 +727,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
         try {
             classLoader = runtimeClassLoader(classLoader);
             WECHAT_CLASS_LOADER = classLoader;
+            if (currentWeChatVersionProfile().is8079()) {
+                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(classLoader);
+                return readyState(pending == null, pending == null ? "8.0.79 ready" : pending);
+            }
             ensureWeChatRegistries(classLoader);
             if (!isStaticArraySlotReady(classLoader, new String[]{"fs.g", "qs.g"}, "f283324a", "a")) {
                 return readyState(false, "extension registry not initialized ["
@@ -807,6 +932,22 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private static ClassLoader firstLoadable(List<ClassLoader> candidates) {
+        try {
+            if (currentWeChatVersionProfile().is8079()) {
+                for (ClassLoader candidate : candidates) {
+                    try {
+                        Class.forName("pp0.i1", false, candidate);
+                        Class.forName("f61.t1", false, candidate);
+                        return candidate;
+                    } catch (ClassNotFoundException ignored) {
+                        // A reused legacy class name must not select this loader.
+                    }
+                }
+                return null;
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
         for (ClassLoader candidate : candidates) {
             for (String name : NETSCENE_NAMES) {
                 try {
@@ -915,9 +1056,21 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private static RuntimeAccount resolveCurrentAccount() throws Exception {
+        WeChatVersionProfile profile = currentWeChatVersionProfile();
         ClassLoader loader = runtimeClassLoader(WECHAT_CLASS_LOADER == null
                 ? HookEntry.class.getClassLoader() : WECHAT_CLASS_LOADER);
-        return WeChatAccountResolver.resolve(loader);
+        return WeChatAccountResolver.resolve(loader, profile);
+    }
+
+    private static WeChatVersionProfile currentWeChatVersionProfile() throws Exception {
+        Context context = bridgeContext();
+        if (context == null) {
+            throw new IllegalStateException("WeChat application context is not ready");
+        }
+        PackageInfo info = context.getPackageManager().getPackageInfo(WECHAT_PACKAGE, 0);
+        long versionCode = android.os.Build.VERSION.SDK_INT >= 28
+                ? info.getLongVersionCode() : info.versionCode;
+        return WeChatVersionProfile.forVersion(info.versionName, versionCode);
     }
 
     private static boolean isCurrentAccount(final RuntimeAccount account) {
@@ -2610,7 +2763,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                 }
                             });
                             if (!queued) {
-                                log("w11.r1 queue busy; keep same request wxid=" + targetWxid
+                                log("send builder queue busy; keep same request wxid=" + targetWxid
                                         + " msgType=" + prepared.msgType
                                         + " msgId=" + prepared.chatRecordId
                                         + " attempt=" + attempts[0] + "/" + SEND_QUEUE_MAX_ATTEMPTS);
@@ -2643,10 +2796,31 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                 + SEND_QUEUE_MAX_ATTEMPTS + " attempts and local message did not reach a terminal status; local msg id="
                                 + prepared.chatRecordId);
             }
-            log("sendText queued via w11.r1 builder wxid=" + targetWxid
+            log("sendText queued via send builder wxid=" + targetWxid
                     + " msgType=" + prepared.msgType
                     + " msgId=" + prepared.chatRecordId
                     + " attempts=" + attempts[0]);
+            if (prepared.requiresLocalConfirmation) {
+                // 8.0.79's execute() only schedules the NetScene. A successful
+                // queue submission must not produce a successful outbox ACK.
+                SendResult result = cc.wechat.observatory.wechat.QueuedMessageConfirmation.await(
+                        prepared.chatRecordId,
+                        new LocalMessageConfirmation.StatusReader() {
+                            @Override
+                            public int readStatus() throws Exception {
+                                return readLocalMessageStatus(prepared.chatRecordId, account);
+                            }
+                        },
+                        new LocalMessageConfirmation.Sleeper() {
+                            @Override
+                            public void sleep(long delayMillis) throws InterruptedException {
+                                Thread.sleep(delayMillis);
+                            }
+                        }, SEND_STATUS_MAX_CHECKS, SEND_QUEUE_RETRY_DELAY_MS);
+                log("8.0.79 queued message confirmation msgId=" + prepared.chatRecordId
+                        + " result=" + (result.ok ? "sent" : result.error));
+                return result;
+            }
             return SendResult.sent(prepared.chatRecordId);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -2707,6 +2881,19 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         if (isBlank(wxid) || isBlank(text)) {
             return PreparedTextSend.completed(SendResult.failed("wxid and text are required"));
+        }
+
+        try {
+            if (currentWeChatVersionProfile().is8079()) {
+                cc.wechat.observatory.wechat.WeChat8079SendAdapter.PreparedSend prepared =
+                        cc.wechat.observatory.wechat.WeChat8079SendAdapter.prepare(classLoader, wxid, text);
+                return PreparedTextSend.builder(prepared.request, prepared.chatRecordId, prepared.msgType, true);
+            }
+        } catch (Throwable t) {
+            // Preparing a builder can already insert a local row. Never try a
+            // second send path after a failure in the version-specific adapter.
+            return PreparedTextSend.completed(SendResult.failed(
+                    "Verified WeChat send adapter unavailable: " + shortError(t)));
         }
 
         int msgType = resolveMessageType(classLoader, wxid);
@@ -3164,20 +3351,28 @@ public final class HookEntry implements IXposedHookLoadPackage {
         private final Object builderRequest;
         private final long chatRecordId;
         private final int msgType;
+        private final boolean requiresLocalConfirmation;
 
-        private PreparedTextSend(SendResult result, Object builderRequest, long chatRecordId, int msgType) {
+        private PreparedTextSend(SendResult result, Object builderRequest, long chatRecordId, int msgType,
+                                 boolean requiresLocalConfirmation) {
             this.result = result;
             this.builderRequest = builderRequest;
             this.chatRecordId = chatRecordId;
             this.msgType = msgType;
+            this.requiresLocalConfirmation = requiresLocalConfirmation;
         }
 
         private static PreparedTextSend completed(SendResult result) {
-            return new PreparedTextSend(result, null, 0L, 0);
+            return new PreparedTextSend(result, null, 0L, 0, false);
         }
 
         private static PreparedTextSend builder(Object request, long chatRecordId, int msgType) {
-            return new PreparedTextSend(null, request, chatRecordId, msgType);
+            return builder(request, chatRecordId, msgType, false);
+        }
+
+        private static PreparedTextSend builder(Object request, long chatRecordId, int msgType,
+                                                boolean requiresLocalConfirmation) {
+            return new PreparedTextSend(null, request, chatRecordId, msgType, requiresLocalConfirmation);
         }
     }
 
@@ -3456,25 +3651,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static void reportStartupOnce(BridgeConfig config) {
         if (STARTUP_REPORTED.compareAndSet(false, true)) {
             reportDiagnostic(config, "startup", isBlank(LAST_CAPABILITY_REPORT) ? "module started" : LAST_CAPABILITY_REPORT);
-        }
-    }
-
-    /** The WCDB hook failing means no worker ever starts, so report it from its own thread. */
-    private static void reportHookFailureLater(final String message) {
-        try {
-            Thread thread = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    if (!sleepOnce(20000L)) {
-                        return;
-                    }
-                    reportDiagnostic(BridgeConfig.load(bridgeContext()), "hook", message);
-                }
-            }, "wechat-observatory-hook-report");
-            thread.setDaemon(true);
-            thread.start();
-        } catch (Throwable ignored) {
-            // Diagnostics must never affect the module.
         }
     }
 
