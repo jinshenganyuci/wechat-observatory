@@ -1,0 +1,301 @@
+{
+  "schema": 1,
+  "status": "static_checks_passed",
+  "validation_scope": "APK definitions, decoded bytecode, compiled resources and layout only; no phone or LSPosed runtime validation",
+  "apk": {
+    "filename": "weixin8079android3200_0x28004f30_arm64_1.apk",
+    "sha256": "f2a725bc04302ad218a563533ae79356e66b64aa711b275bc919a8d432f7e15d",
+    "bytes": 285284760,
+    "package": "com.tencent.mm",
+    "version_name": "8.0.79",
+    "version_code": 3200
+  },
+  "tool": {
+    "name": "LSPosed/DexSQL",
+    "version": "dexsql 0.1.0"
+  },
+  "definition_queries": [
+    "SELECT method_descriptor,access_flags,file_id,method_idx FROM class_methods WHERE method_descriptor IN ('Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;->onCreate(Landroid/os/Bundle;)V','Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;->getLayoutId()I','Lcom/tencent/mm/ui/MMActivity;->onActivityResult(IILandroid/content/Intent;)V','Lcom/tencent/mm/ui/vas/VASActivity;->startActivityForResult(Landroid/content/Intent;ILandroid/os/Bundle;)V','Lcom/tencent/mm/ui/vas/VASActivity;->callOnActivityResult(IILandroid/content/Intent;)V','Lcom/tencent/mm/ui/vas/VASCommonFragment;->onActivityResult(IILandroid/content/Intent;)V','Landroidx/fragment/app/Fragment;->startActivityForResult(Landroid/content/Intent;ILandroid/os/Bundle;)V','Landroidx/fragment/app/FragmentManager;->launchStartActivityForResult(Landroidx/fragment/app/Fragment;Landroid/content/Intent;ILandroid/os/Bundle;)V','Landroidx/fragment/app/FragmentManager;->attachController(Landroidx/fragment/app/v0;Landroidx/fragment/app/s0;Landroidx/fragment/app/Fragment;)V','Landroidx/activity/result/e;->a(Ljava/lang/Object;Lz2/m;)V','Landroidx/activity/e;->b(ILh/b;Ljava/lang/Object;Lz2/m;)V','Lh/f;->a(Landroid/content/Context;Ljava/lang/Object;)Landroid/content/Intent;','Lh/b;->b(Landroid/content/Context;Ljava/lang/Object;)Lh/a;','Lz2/a;->b(Landroid/app/Activity;Landroid/content/Intent;ILandroid/os/Bundle;)V','Lzt5/c;->g(Landroid/content/Intent;)V','Lzt5/c;->c(Landroid/content/Intent;)Z','Lzt5/d;-><clinit>()V') ORDER BY method_descriptor",
+    "SELECT method_descriptor FROM class_methods WHERE class_descriptor='Lcom/tencent/mm/plugin/setting/ui/setting_new/MainSettingsUI;' ORDER BY method_descriptor",
+    "SELECT descriptor FROM classes WHERE descriptor='Lcom/tencent/mm/plugin/setting/ui/setting/SettingsUI;'",
+    "SELECT long_value FROM method_using_numbers WHERE method='Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;->getLayoutId()I'"
+  ],
+  "class_hierarchy": [
+    {
+      "descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/MainSettingsUI;",
+      "superclass_descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;",
+      "superclass_descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingUI;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingUI;",
+      "superclass_descriptor": "Lcom/tencent/mm/plugin/mvvmbase/BaseMvvmActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/plugin/mvvmbase/BaseMvvmActivity;",
+      "superclass_descriptor": "Lcom/tencent/mm/ui/vas/VASActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/ui/vas/VASActivity;",
+      "superclass_descriptor": "Lcom/tencent/mm/ui/vas/VASActivityJava;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/ui/vas/VASActivityJava;",
+      "superclass_descriptor": "Lcom/tencent/mm/ui/MMActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/ui/MMActivity;",
+      "superclass_descriptor": "Lcom/tencent/mm/ui/MMFragmentActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/ui/MMFragmentActivity;",
+      "superclass_descriptor": "Lcom/tencent/mm/ui/component/glocom/GloUIComponentActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/ui/component/glocom/GloUIComponentActivity;",
+      "superclass_descriptor": "Lcom/tencent/mm/ui/component/UIComponentActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/ui/component/UIComponentActivity;",
+      "superclass_descriptor": "Landroidx/appcompat/app/AppCompatActivity;"
+    },
+    {
+      "descriptor": "Landroidx/appcompat/app/AppCompatActivity;",
+      "superclass_descriptor": "Landroidx/fragment/app/FragmentActivity;"
+    },
+    {
+      "descriptor": "Landroidx/fragment/app/FragmentActivity;",
+      "superclass_descriptor": "Landroidx/activity/ComponentActivity;"
+    },
+    {
+      "descriptor": "Landroidx/activity/ComponentActivity;",
+      "superclass_descriptor": "Landroidx/core/app/ComponentActivity;"
+    },
+    {
+      "descriptor": "Landroidx/core/app/ComponentActivity;",
+      "superclass_descriptor": "Lcom/tencent/mm/hellhoundlib/activities/HellActivity;"
+    },
+    {
+      "descriptor": "Lcom/tencent/mm/hellhoundlib/activities/HellActivity;",
+      "superclass_descriptor": "Landroid/app/Activity;"
+    }
+  ],
+  "main_declared_methods": [
+    "Lcom/tencent/mm/plugin/setting/ui/setting_new/MainSettingsUI;-><init>()V",
+    "Lcom/tencent/mm/plugin/setting/ui/setting_new/MainSettingsUI;->r7()Ljava/lang/String;",
+    "Lcom/tencent/mm/plugin/setting/ui/setting_new/MainSettingsUI;->superImportUIComponents(Ljava/util/HashSet;)V"
+  ],
+  "legacy_settings_ui_definition_count": 0,
+  "method_definitions": [
+    {
+      "method_descriptor": "Landroidx/activity/e;->b(ILh/b;Ljava/lang/Object;Lz2/m;)V",
+      "access_flags": 1,
+      "file_id": 7,
+      "method_idx": 4799,
+      "smali_sha256": "97c3b6668c27f715fe7c585efe220dfde85a33ff5caa9a901aa3bd544d1948e4"
+    },
+    {
+      "method_descriptor": "Landroidx/activity/result/e;->a(Ljava/lang/Object;Lz2/m;)V",
+      "access_flags": 1,
+      "file_id": 7,
+      "method_idx": 4831,
+      "smali_sha256": "340babd5edafc7be1757384bdd818291a5c42c5e31679d5d08ad51749ac5af66"
+    },
+    {
+      "method_descriptor": "Landroidx/fragment/app/Fragment;->startActivityForResult(Landroid/content/Intent;ILandroid/os/Bundle;)V",
+      "access_flags": 1,
+      "file_id": 7,
+      "method_idx": 7306,
+      "smali_sha256": "c10f9acbd5553546a7346a31779d6260cbae8e9b2e642f0da8b5b2097865c7d2"
+    },
+    {
+      "method_descriptor": "Landroidx/fragment/app/FragmentManager;->attachController(Landroidx/fragment/app/v0;Landroidx/fragment/app/s0;Landroidx/fragment/app/Fragment;)V",
+      "access_flags": 1,
+      "file_id": 7,
+      "method_idx": 7373,
+      "smali_sha256": "ef573ced9bb3838f31e3e8eb0914af64c309f56c8e06fc7ae9dc39468b25305a"
+    },
+    {
+      "method_descriptor": "Landroidx/fragment/app/FragmentManager;->launchStartActivityForResult(Landroidx/fragment/app/Fragment;Landroid/content/Intent;ILandroid/os/Bundle;)V",
+      "access_flags": 1,
+      "file_id": 7,
+      "method_idx": 7454,
+      "smali_sha256": "b87ba19bfe94c43cdf0e1d2be002fa163461948eb88d02eb33fc775dcb5f2a12"
+    },
+    {
+      "method_descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;->getLayoutId()I",
+      "access_flags": 1,
+      "file_id": 16,
+      "method_idx": 14148,
+      "smali_sha256": "cd2ba5817d12af9f281eaa8668a0cfa5953f5f69b219eee18a97d2aab51a159f"
+    },
+    {
+      "method_descriptor": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;->onCreate(Landroid/os/Bundle;)V",
+      "access_flags": 1,
+      "file_id": 16,
+      "method_idx": 14149,
+      "smali_sha256": "b8e0518bedd6b56bfedf1eba5dc4995228eb5a534a9b0c6f3e3ada8b02d4eff9"
+    },
+    {
+      "method_descriptor": "Lcom/tencent/mm/ui/MMActivity;->onActivityResult(IILandroid/content/Intent;)V",
+      "access_flags": 1,
+      "file_id": 5,
+      "method_idx": 35902,
+      "smali_sha256": "1227f8b454b8b4cca95adb564fea86f8bf3817341ef152eb40b16a56ccf9e565"
+    },
+    {
+      "method_descriptor": "Lcom/tencent/mm/ui/vas/VASActivity;->callOnActivityResult(IILandroid/content/Intent;)V",
+      "access_flags": 1,
+      "file_id": 5,
+      "method_idx": 39552,
+      "smali_sha256": "a27038cdabe9a8ba49f3bcc683f69ccda768986909f0d55d5dd077defbf206d3"
+    },
+    {
+      "method_descriptor": "Lcom/tencent/mm/ui/vas/VASActivity;->startActivityForResult(Landroid/content/Intent;ILandroid/os/Bundle;)V",
+      "access_flags": 1,
+      "file_id": 5,
+      "method_idx": 39681,
+      "smali_sha256": "c3b9ccc8c2d06ebda87e52ab7a428b4714cbf0fb91dec8725af7e0e4f239d464"
+    },
+    {
+      "method_descriptor": "Lcom/tencent/mm/ui/vas/VASCommonFragment;->onActivityResult(IILandroid/content/Intent;)V",
+      "access_flags": 1,
+      "file_id": 5,
+      "method_idx": 39740,
+      "smali_sha256": "234d53bab8b85ff0a6729f3232d7d10b69233da9a00b7c2476bcda6eb5ab5a01"
+    },
+    {
+      "method_descriptor": "Lh/b;->b(Landroid/content/Context;Ljava/lang/Object;)Lh/a;",
+      "access_flags": 1,
+      "file_id": 7,
+      "method_idx": 52748,
+      "smali_sha256": "4923db2b128a973a5b72cc0fe5ea8942afca63d5648d243c8296eb70d76da2d7"
+    },
+    {
+      "method_descriptor": "Lh/f;->a(Landroid/content/Context;Ljava/lang/Object;)Landroid/content/Intent;",
+      "access_flags": 1,
+      "file_id": 1,
+      "method_idx": 31504,
+      "smali_sha256": "87d1e14b0ee31c40fa7626c72efcb7c2e814c56d4487395f1dd0673f38036921"
+    },
+    {
+      "method_descriptor": "Lz2/a;->b(Landroid/app/Activity;Landroid/content/Intent;ILandroid/os/Bundle;)V",
+      "access_flags": 9,
+      "file_id": 7,
+      "method_idx": 64752,
+      "smali_sha256": "5a804cdd78464df1f9da2086bcd91a956047b0988dc955529e0763602b545fa7"
+    },
+    {
+      "method_descriptor": "Lzt5/c;->c(Landroid/content/Intent;)Z",
+      "access_flags": 17,
+      "file_id": 4,
+      "method_idx": 65309,
+      "smali_sha256": "3a7d8433c6cdf6d421c4f89af4173f06b2eab108eab5f2525af676b18ab5f4e6"
+    },
+    {
+      "method_descriptor": "Lzt5/c;->g(Landroid/content/Intent;)V",
+      "access_flags": 17,
+      "file_id": 4,
+      "method_idx": 65313,
+      "smali_sha256": "49a40e65d3e85d306260fca07a4a9574b2c3e726ad9139cc7c5910a8ee40e64d"
+    },
+    {
+      "method_descriptor": "Lzt5/d;-><clinit>()V",
+      "access_flags": 65545,
+      "file_id": 4,
+      "method_idx": 65314,
+      "smali_sha256": "f8a53ca0ab87dbe3fe7c1f0b85ab5c911b295e4fede26adcca919293e936e7c9"
+    }
+  ],
+  "hook_contract": {
+    "entry_class": "Lcom/tencent/mm/plugin/setting/ui/setting_new/MainSettingsUI;",
+    "lifecycle_owner": "Lcom/tencent/mm/plugin/setting/ui/setting_new/base/BaseSettingPrefUI;",
+    "lifecycle_method": "onCreate(Landroid/os/Bundle;)V",
+    "access_flags": 1,
+    "main_overrides_on_create": false,
+    "layout_method": "getLayoutId()I",
+    "layout_id": "0x7f0e1384",
+    "nearest_result_owner": "Lcom/tencent/mm/ui/MMActivity;",
+    "result_method": "onActivityResult(IILandroid/content/Intent;)V"
+  },
+  "resources": [
+    {
+      "resource_id": "0x7f0e1384",
+      "resource_name": "com.tencent.mm:layout/ep9",
+      "value": "r/p/ep9.xml"
+    },
+    {
+      "resource_id": "0x7f0a49f7",
+      "resource_name": "com.tencent.mm:id/jlw",
+      "value": "false"
+    },
+    {
+      "resource_id": "0x7f0a49f6",
+      "resource_name": "com.tencent.mm:id/jlv",
+      "value": "false"
+    },
+    {
+      "resource_id": "0x7f0a58e0",
+      "resource_name": "com.tencent.mm:id/lqa",
+      "value": "false"
+    }
+  ],
+  "layout": {
+    "apk_path": "r/p/ep9.xml",
+    "decoded_xml_sha256": "33c9c9e4f0a2619702bd1bf8372eed41c5d35f61d4c39170281f8d963b2328d3",
+    "root": {
+      "type": "RelativeLayout",
+      "id": "0x7f0a49f7"
+    },
+    "column": {
+      "type": "LinearLayout",
+      "id": "0x7f0a49f6",
+      "orientation": "vertical",
+      "direct_child_of_root": true
+    },
+    "list_container": {
+      "type": "RelativeLayout",
+      "column_child_index": 1,
+      "layout_weight": 1.0
+    },
+    "recycler": {
+      "type": "com.tencent.mm.view.recyclerview.WxRecyclerView",
+      "id": "0x7f0a58e0",
+      "direct_child_of_list_container": true
+    },
+    "insertion_point": "New sibling immediately before weighted list container"
+  },
+  "bytecode_findings": [
+    {
+      "method": "Lcom/tencent/mm/ui/vas/VASActivity;->startActivityForResult(Landroid/content/Intent;ILandroid/os/Bundle;)V",
+      "finding": "External activity path forwards to its Fragment; catches and logs Fragment launch exceptions, so the caller must time out absent results."
+    },
+    {
+      "method": "Lcom/tencent/mm/ui/vas/VASCommonFragment;->onActivityResult(IILandroid/content/Intent;)V",
+      "finding": "Forwards original requestCode/resultCode/Intent through VASActivity.callOnActivityResult to MMActivity.onActivityResult."
+    },
+    {
+      "method": "Landroidx/fragment/app/FragmentManager;->launchStartActivityForResult(Landroidx/fragment/app/Fragment;Landroid/content/Intent;ILandroid/os/Bundle;)V",
+      "finding": "Launches through registered ActivityResultLauncher synchronously; bookkeeping contains fragment identity and request code."
+    },
+    {
+      "method": "Landroidx/activity/e;->b(ILh/b;Ljava/lang/Object;Lz2/m;)V",
+      "finding": "The StartActivityForResult h/f contract inherits h/b synchronous-result=null, returns the input Intent, and uses z2/a.b to call Activity.startActivityForResult immediately."
+    },
+    {
+      "method": "Lzt5/c;->c(Landroid/content/Intent;)Z",
+      "finding": "Large-Intent disk-transfer eligibility tests component class against zt5/d.b names. cc.wechat.observatory.ConfigWriteActivity matches none."
+    }
+  ],
+  "runtime_guards_expected": [
+    "Exact version name 8.0.79 and code 3200",
+    "Exact MainSettingsUI class before insertion",
+    "Validate layout ID, resource package/type/name, root/column/list parent hierarchy and positive list weight",
+    "Post insertion to main view queue; check Activity lifecycle; unique row tag prevents duplicates",
+    "Match pending Activity, request code and random nonce before consuming a result",
+    "No private WeChat storage or SharedPreferences used by configuration editor"
+  ],
+  "runtime_validation_performed": false
+}

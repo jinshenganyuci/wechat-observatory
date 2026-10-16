@@ -2,11 +2,22 @@ package cc.wechat.observatory;
 
 import android.content.Context;
 import android.util.AtomicFile;
+import android.util.Xml;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 
 import cc.wechat.observatory.wechat.AccountSessionAllocator;
@@ -17,6 +28,7 @@ public final class ModuleConfigStore {
     private static final String INSTALLATION = "__installation_id";
     private static final String HIGH_WATERMARK = "__reserved_through";
     private static final long SESSION_BLOCK_SIZE = 1_000_000L;
+    private static final int MAX_LEGACY_XML_BYTES = 256 * 1024;
 
     private ModuleConfigStore() { }
 
@@ -82,7 +94,8 @@ public final class ModuleConfigStore {
     }
 
     private static AtomicFile file(Context context) throws IOException {
-        if (!"cc.wechat.observatory".equals(context.getPackageName())) {
+        if (!"cc.wechat.observatory".equals(context.getPackageName())
+                || context.getApplicationInfo().uid != android.os.Process.myUid()) {
             throw new IOException("Configuration requires the module context");
         }
         File directory = context.getNoBackupFilesDir();
@@ -96,20 +109,140 @@ public final class ModuleConfigStore {
         AtomicFile file = file(context);
         Properties state = new Properties();
         // openRead also restores AtomicFile's backup after an interrupted write.
-        try (InputStream input = file.openRead()) { state.load(input); }
+        try (InputStream input = file.openRead()) { loadProperties(input, state); }
         catch (java.io.FileNotFoundException missing) {
             if (file.getBaseFile().exists() || new File(file.getBaseFile() + ".bak").exists()) throw missing;
             // One-time migration precedes deletion of legacy copies. Never
             // import these sources again once the private store exists.
-            java.util.Map<String, ?> legacy = context.getSharedPreferences("bridge_config", Context.MODE_PRIVATE).getAll();
-            for (String key : BridgeConfigProvider.CONFIG_KEYS) {
-                Object value = legacy.get(key);
-                if (value instanceof String) state.setProperty(key, (String) value);
+            try {
+                Map<String, ?> legacy = context.getSharedPreferences("bridge_config", Context.MODE_PRIVATE).getAll();
+                state.putAll(legacySnapshot(legacy, () -> readPrivateLegacy(context)));
+            } catch (RuntimeException invalid) {
+                throw new IOException("Legacy configuration unavailable", invalid);
             }
             state.setProperty(REVISION, UUID.randomUUID().toString());
             writeState(context, state);
         }
         return state;
+    }
+
+    interface LegacySource {
+        Map<String, ?> read() throws IOException;
+    }
+
+    static Properties legacySnapshot(Map<String, ?> current, LegacySource privateSource) throws IOException {
+        if (current == null) throw new IOException("Legacy configuration unavailable");
+        // Any current snapshot is authoritative, including a revision-only clear.
+        Map<String, ?> selected = current.isEmpty() ? privateSource.read() : current;
+        Properties migrated = new Properties();
+        for (String key : BridgeConfigProvider.CONFIG_KEYS) {
+            Object value = selected.get(key);
+            if (value instanceof String) migrated.setProperty(key, (String) value);
+        }
+        return migrated;
+    }
+
+    private static Map<String, ?> readPrivateLegacy(Context context) throws IOException {
+        File data = new File(context.getApplicationInfo().dataDir).getCanonicalFile();
+        File xml = new File(data, "shared_prefs/bridge_config.xml");
+        File backup = new File(xml + ".bak");
+        // Android's legacy SharedPreferences restores the backup first after an
+        // interrupted write. Read it without renaming or changing either source.
+        File source = backup.exists() ? backup : xml;
+        if (!source.getCanonicalPath().equals(source.getAbsolutePath())) {
+            throw new IOException("Legacy configuration path changed");
+        }
+        if (!source.exists()) return new HashMap<>();
+        byte[] contents;
+        try (InputStream input = new FileInputStream(source);
+             ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (bytes.size() + count > MAX_LEGACY_XML_BYTES) {
+                    throw new IOException("Legacy configuration exceeds size limit");
+                }
+                bytes.write(buffer, 0, count);
+            }
+            contents = bytes.toByteArray();
+        }
+        try {
+            XmlPullParser parser = Xml.newPullParser();
+            parser.setInput(new ByteArrayInputStream(contents), "UTF-8");
+            return parseLegacyXml(parser);
+        } catch (XmlPullParserException invalid) {
+            throw new IOException("Invalid legacy configuration XML", invalid);
+        } finally {
+            Arrays.fill(contents, (byte) 0);
+        }
+    }
+
+    /** Accept only the string map emitted by the old module; never expand a DTD. */
+    static Map<String, String> parseLegacyXml(XmlPullParser parser) throws IOException {
+        try { parser.setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false); }
+        catch (XmlPullParserException unsupported) {
+            // Older kXML does not expose this optional feature and already has
+            // it disabled. An implementation that keeps it enabled is unsafe.
+            if (parser.getFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL)) {
+                throw new IOException("Cannot disable legacy XML declarations", unsupported);
+            }
+        }
+        Map<String, String> result = new HashMap<>();
+        Set<String> names = new HashSet<>();
+        boolean opened = false;
+        boolean closed = false;
+        String key = null;
+        StringBuilder value = new StringBuilder();
+        try {
+            while (true) {
+                int token = parser.nextToken();
+                if (token == XmlPullParser.END_DOCUMENT) break;
+                if (token == XmlPullParser.DOCDECL) throw new IOException("Legacy XML declarations are not allowed");
+                if (token == XmlPullParser.START_TAG) {
+                    if (!opened && parser.getDepth() == 1 && "map".equals(parser.getName())
+                            && parser.getAttributeCount() == 0) {
+                        opened = true;
+                    } else if (opened && !closed && parser.getDepth() == 2
+                            && "string".equals(parser.getName()) && parser.getAttributeCount() == 1
+                            && "name".equals(parser.getAttributeName(0))) {
+                        key = parser.getAttributeValue(0);
+                        if (key == null || key.length() > 128 || !names.add(key)) {
+                            throw new IOException("Invalid legacy preference name");
+                        }
+                        value.setLength(0);
+                    } else throw new IOException("Unsupported legacy preference structure");
+                } else if (token == XmlPullParser.END_TAG) {
+                    if (parser.getDepth() == 2 && key != null && "string".equals(parser.getName())) {
+                        result.put(key, value.toString());
+                        key = null;
+                        value.setLength(0);
+                    } else if (parser.getDepth() == 1 && opened && "map".equals(parser.getName())) {
+                        closed = true;
+                    } else throw new IOException("Invalid legacy preference structure");
+                } else if (token == XmlPullParser.TEXT || token == XmlPullParser.CDSECT
+                        || token == XmlPullParser.ENTITY_REF || token == XmlPullParser.IGNORABLE_WHITESPACE) {
+                    String text = parser.getText();
+                    if (text == null) throw new IOException("Unresolved legacy XML entity");
+                    if (key == null) {
+                        if (!text.trim().isEmpty()) throw new IOException("Unexpected legacy XML text");
+                    } else {
+                        if (value.length() + text.length() > 16384) throw new IOException("Legacy preference value too long");
+                        value.append(text);
+                    }
+                }
+            }
+        } catch (XmlPullParserException invalid) {
+            throw new IOException("Invalid legacy configuration XML", invalid);
+        }
+        if (!opened || !closed || key != null) throw new IOException("Incomplete legacy configuration XML");
+        return result;
+    }
+
+    static void loadProperties(InputStream input, Properties destination) throws IOException {
+        try { destination.load(input); }
+        catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid private configuration encoding", invalid);
+        }
     }
 
     private static void writeState(Context context, Properties state) throws IOException {
@@ -125,7 +258,7 @@ public final class ModuleConfigStore {
             // Android AtomicFile logs some rename errors instead of throwing.
             // Do not expose a session range unless its durable state reads back.
             Properties confirmed = new Properties();
-            try (InputStream input = file.openRead()) { confirmed.load(input); }
+            try (InputStream input = file.openRead()) { loadProperties(input, confirmed); }
             if (!state.equals(confirmed)) throw new IOException("Configuration commit verification failed");
         } catch (IOException | RuntimeException failure) {
             if (output != null) file.failWrite(output);

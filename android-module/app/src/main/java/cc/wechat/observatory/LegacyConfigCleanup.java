@@ -164,7 +164,12 @@ final class LegacyConfigCleanup {
 
     private static final FileAccess ANDROID_FILES = file -> {
         try {
-            Os.unlink(file.getAbsolutePath());
+            // Public SDK exposes remove(), which can also remove an empty
+            // directory; refuse directories explicitly before calling it.
+            if (OsConstants.S_ISDIR(Os.lstat(file.getAbsolutePath()).st_mode)) {
+                throw new IOException("legacy config path is a directory");
+            }
+            Os.remove(file.getAbsolutePath());
         } catch (ErrnoException error) {
             if (error.errno != OsConstants.ENOENT && error.errno != OsConstants.ENOTDIR) {
                 throw new IOException("legacy file deletion failed", error);
