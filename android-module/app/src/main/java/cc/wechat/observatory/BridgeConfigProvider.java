@@ -1,19 +1,8 @@
 package cc.wechat.observatory;
 
-import android.content.ContentProvider;
-import android.content.ContentValues;
-import android.content.Context;
-import android.content.SharedPreferences;
-import android.database.Cursor;
-import android.database.MatrixCursor;
-import android.net.Uri;
-
-import java.util.Map;
-
-public final class BridgeConfigProvider extends ContentProvider {
-    static final String PREFS_NAME = "bridge_config";
-    static final String STATUS_PREFS_NAME = "bridge_status";
-    static final String AUTHORITY = "cc.wechat.observatory.config";
+/** Key names retained for the module UI and shell configuration command. No exported provider. */
+final class BridgeConfigProvider {
+    private BridgeConfigProvider() { }
     static final String[] CONFIG_KEYS = new String[]{
             "enabled",
             "bridge_url",
@@ -30,68 +19,4 @@ public final class BridgeConfigProvider extends ContentProvider {
             "stale_message_replay_limit"
     };
 
-    @Override
-    public boolean onCreate() {
-        return true;
-    }
-
-    @Override
-    public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
-        Context context = getContext();
-        MatrixCursor cursor = new MatrixCursor(new String[]{"key", "value"});
-        if (context == null) {
-            return cursor;
-        }
-
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        Map<String, ?> all = prefs.getAll();
-        for (String key : CONFIG_KEYS) {
-            Object value = all.get(key);
-            if (value != null) {
-                cursor.addRow(new Object[]{key, String.valueOf(value)});
-            }
-        }
-        return cursor;
-    }
-
-    @Override
-    public String getType(Uri uri) {
-        return "vnd.android.cursor.dir/vnd.cc.wechat.observatory.config";
-    }
-
-    @Override
-    public Uri insert(Uri uri, ContentValues values) {
-        return null;
-    }
-
-    @Override
-    public int delete(Uri uri, String selection, String[] selectionArgs) {
-        return 0;
-    }
-
-    @Override
-    public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
-        // The hooked WeChat process reports whether this phone is active or on standby.
-        Context context = getContext();
-        if (context == null || values == null || uri == null || !"/status".equals(uri.getPath())) {
-            return 0;
-        }
-        String state = values.getAsString("state");
-        if (!"active".equals(state) && !"standby".equals(state)) {
-            return 0;
-        }
-        String detail = values.getAsString("detail");
-        if (detail == null) {
-            detail = "";
-        } else if (detail.length() > 200) {
-            detail = detail.substring(0, 200);
-        }
-        Long updatedAt = values.getAsLong("updated_at");
-        context.getSharedPreferences(STATUS_PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putString("state", state)
-                .putString("detail", detail)
-                .putLong("updated_at", updatedAt == null ? System.currentTimeMillis() : updatedAt)
-                .apply();
-        return 1;
-    }
 }

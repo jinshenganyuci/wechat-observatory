@@ -1,35 +1,54 @@
 package cc.wechat.observatory.config;
 
 import android.content.Context;
-import android.database.Cursor;
-import android.net.Uri;
-import android.os.Environment;
-import android.content.SharedPreferences;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.lang.reflect.Method;
 import java.util.Locale;
 import java.util.Properties;
-import java.util.Map;
 
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.util.BridgeLogger;
 import cc.wechat.observatory.util.Strings;
 import cc.wechat.observatory.wechat.RuntimeAccount;
-import de.robv.android.xposed.XSharedPreferences;
 
 public final class BridgeConfig {
     public static final int DEFAULT_CONTACT_SYNC_LIMIT = 10000;
     public static final long DEFAULT_STALE_MESSAGE_GRACE_MS = 15L * 60L * 1000L;
     public static final int DEFAULT_STALE_MESSAGE_REPLAY_LIMIT = 500;
 
-    private static final String CONFIG_PROVIDER_URI = "content://cc.wechat.observatory.config/config";
-    private static final String MODULE_PACKAGE = "cc.wechat.observatory";
-    private static final String PREFS_NAME = "bridge_config";
-    private static final String LOCAL_TMP_CONFIG = "/data/local/tmp/wechat-observatory/config.properties";
-    private static volatile long lastConfigLogAt = 0L;
-    private static volatile long lastProviderConfigLogAt = 0L;
+    private static volatile long lastConfigLogAt;
+    private static Properties runtimeSettings = new Properties();
+    private static boolean runtimeLoaded;
+
+    /** Ephemeral snapshot supplied by the module-owned foreground activity. */
+    public static synchronized void acceptRuntimeSettings(Properties values) {
+        Properties next = new Properties();
+        if (values != null) next.putAll(values);
+        for (String key : new String[]{"__installation_id", "__generation_start", "__generation_limit"}) {
+            String existing = runtimeSettings.getProperty(key);
+            if (existing != null) next.setProperty(key, existing);
+        }
+        runtimeSettings = next;
+        runtimeLoaded = true;
+    }
+
+    public static synchronized boolean isRuntimeLoaded() { return runtimeLoaded; }
+
+    public static synchronized boolean hasRuntimeSession() {
+        return runtimeSettings.containsKey("__installation_id")
+                && runtimeSettings.containsKey("__generation_start")
+                && runtimeSettings.containsKey("__generation_limit");
+    }
+
+    public static synchronized void clearRuntimeSettings() {
+        runtimeSettings.clear();
+        runtimeLoaded = false;
+    }
+
+    public static synchronized Properties readSettingsForEditor(Context ignored) {
+        Properties copy = new Properties();
+        copy.putAll(runtimeSettings);
+        return copy;
+    }
 
     public boolean enabled;
     public String baseUrl;
@@ -71,9 +90,8 @@ public final class BridgeConfig {
         config.nickname = "";
         config.pollIntervalMs = longSetting(properties, "poll_interval_ms", 1000L);
         config.pollLimit = (int) longSetting(properties, "poll_limit", 20L);
-        // HTTP polling re-reads the current wxid on every cycle and is more
-        // tolerant of WeChat replacing its account database while running.
-        config.outboxWebSocketEnabled = booleanSetting(properties, "outbox_websocket_enabled", false);
+        // WebSocket is the primary reply channel; explicit 0 retains HTTP-only mode.
+        config.outboxWebSocketEnabled = booleanSetting(properties, "outbox_websocket_enabled", true);
         config.contactSyncIntervalMs = longSetting(properties, "contact_sync_interval_ms", 600000L);
         config.contactSyncLimit = (int) longSetting(properties, "contact_sync_limit", DEFAULT_CONTACT_SYNC_LIMIT);
         config.includeChatrooms = booleanSetting(properties, "contact_include_chatrooms", true);
@@ -86,200 +104,8 @@ public final class BridgeConfig {
     }
 
     private static Properties readProperties(Context context) {
-        return ConfigSources.firstAvailable(
-                () -> readProviderProperties(context),
-                BridgeConfig::readXposedPreferences,
-                () -> readPackagePreferences(context),
-                BridgeConfig::readLocalTmpProperties,
-                BridgeConfig::readExternalProperties);
-    }
-
-    private static Properties readExternalProperties() {
-        Properties properties = new Properties();
-        File root = Environment.getExternalStorageDirectory();
-        File[] candidates = new File[]{
-                new File(LOCAL_TMP_CONFIG),
-                new File(root, "Android/media/cc.wechat.observatory/config.properties"),
-                new File(root, "Download/wechat-observatory/config.properties")
-        };
-        for (File file : candidates) {
-            if (!file.isFile()) {
-                continue;
-            }
-            try {
-                try (FileInputStream input = new FileInputStream(file)) {
-                    properties.load(input);
-                }
-                return properties;
-            } catch (Throwable t) {
-                BridgeLogger.log("read config failed from " + file.getAbsolutePath() + ": " + t);
-            }
-        }
-        return properties;
-    }
-
-    private static Properties readPackagePreferences(Context context) {
-        Properties properties = new Properties();
-        if (context == null) {
-            return properties;
-        }
-        try {
-            Context moduleContext = context.createPackageContext(
-                    MODULE_PACKAGE,
-                    Context.CONTEXT_IGNORE_SECURITY);
-            SharedPreferences prefs = moduleContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            Map<String, ?> all = prefs.getAll();
-            if (all == null || all.isEmpty()) {
-                return properties;
-            }
-            for (Map.Entry<String, ?> entry : all.entrySet()) {
-                if (!Strings.isBlank(entry.getKey()) && entry.getValue() != null) {
-                    properties.setProperty(entry.getKey(), String.valueOf(entry.getValue()));
-                }
-            }
-            BridgeLogger.log("read config from package preferences keys=" + properties.size());
-        } catch (Throwable t) {
-            logProviderConfigOnce("read config from package preferences failed: " + Strings.shortError(t));
-        }
-        return properties;
-    }
-
-    private static Properties readLocalTmpProperties() {
-        Properties properties = new Properties();
-        File mirror = new File(LOCAL_TMP_CONFIG);
-        if (!mirror.isFile()) {
-            return properties;
-        }
-        try {
-            try (FileInputStream input = new FileInputStream(mirror)) {
-                properties.load(input);
-            }
-            if (!properties.isEmpty()) {
-                logProviderConfigOnce("read config from local tmp keys=" + properties.size());
-            }
-        } catch (Throwable t) {
-            logProviderConfigOnce("read config from local tmp failed: " + Strings.shortError(t));
-        }
-        return properties;
-    }
-
-    private static Properties readXposedPreferences() {
-        Properties properties = new Properties();
-        try {
-            XSharedPreferences prefs = new XSharedPreferences(MODULE_PACKAGE, PREFS_NAME);
-            prefs.reload();
-            Map<String, ?> all = prefs.getAll();
-            if (all == null || all.isEmpty()) {
-                return properties;
-            }
-            for (Map.Entry<String, ?> entry : all.entrySet()) {
-                if (!Strings.isBlank(entry.getKey()) && entry.getValue() != null) {
-                    properties.setProperty(entry.getKey(), String.valueOf(entry.getValue()));
-                }
-            }
-            logProviderConfigOnce("read config from xshared preferences keys=" + properties.size());
-        } catch (Throwable t) {
-            logProviderConfigOnce("read config from xshared preferences failed: " + Strings.shortError(t));
-        }
-        return properties;
-    }
-
-    private static Properties readProviderProperties(Context context) {
-        Properties properties = new Properties();
-        if (context == null) {
-            logProviderConfigOnce("read config from provider skipped: no context");
-            return properties;
-        }
-        Context moduleContext = moduleContext(context);
-        if (moduleContext != null) {
-            readProviderPropertiesFromContext(moduleContext, properties, "module");
-        }
-        if (!properties.isEmpty()) {
-            return properties;
-        }
-        readProviderPropertiesFromContext(context, properties, "process");
-        if (!properties.isEmpty()) {
-            return properties;
-        }
-        Context systemContext = systemContext();
-        if (systemContext != null && systemContext != context) {
-            readProviderPropertiesFromContext(systemContext, properties, "system");
-        }
-        return properties;
-    }
-
-    private static Context moduleContext(Context context) {
-        if (context == null) {
-            return null;
-        }
-        try {
-            return context.createPackageContext(MODULE_PACKAGE, Context.CONTEXT_IGNORE_SECURITY);
-        } catch (Throwable t) {
-            logProviderConfigOnce("create module context failed: " + Strings.shortError(t));
-            return null;
-        }
-    }
-
-    private static void readProviderPropertiesFromContext(Context context, Properties properties, String source) {
-        if (context == null || properties == null) {
-            return;
-        }
-        Cursor cursor = null;
-        try {
-            cursor = context.getContentResolver().query(
-                    Uri.parse(CONFIG_PROVIDER_URI),
-                    new String[]{"key", "value"},
-                    null,
-                    null,
-                    null);
-            if (cursor == null) {
-                logProviderConfigOnce("read config from provider returned null cursor");
-                return;
-            }
-            int keyIndex = cursor.getColumnIndex("key");
-            int valueIndex = cursor.getColumnIndex("value");
-            if (keyIndex < 0 || valueIndex < 0) {
-                return;
-            }
-            while (cursor.moveToNext()) {
-                String key = cursor.getString(keyIndex);
-                String value = cursor.getString(valueIndex);
-                if (!Strings.isBlank(key) && value != null) {
-                    properties.setProperty(key, value);
-                }
-            }
-            if (!properties.isEmpty()) {
-                logProviderConfigOnce("read config from " + source + " provider keys=" + properties.size());
-            }
-        } catch (Throwable t) {
-            logProviderConfigOnce("read config from " + source + " provider failed: " + Strings.shortError(t));
-        } finally {
-            if (cursor != null) {
-                try {
-                    cursor.close();
-                } catch (Throwable ignored) {
-                }
-            }
-        }
-    }
-
-    private static Context systemContext() {
-        try {
-            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
-            Method current = activityThreadClass.getDeclaredMethod("currentActivityThread");
-            Object thread = current.invoke(null);
-            if (thread == null) {
-                return null;
-            }
-            Method getSystemContext = activityThreadClass.getDeclaredMethod("getSystemContext");
-            Object value = getSystemContext.invoke(thread);
-            if (value instanceof Context) {
-                return (Context) value;
-            }
-        } catch (Throwable t) {
-            logProviderConfigOnce("get system context failed: " + Strings.shortError(t));
-        }
-        return null;
+        // No disk or IPC from WeChat. The module activity owns persistent data.
+        return readSettingsForEditor(context);
     }
 
     private static void logConfigOnce(BridgeConfig config, Properties properties) {
@@ -288,9 +114,9 @@ public final class BridgeConfig {
             return;
         }
         lastConfigLogAt = now;
-        BridgeLogger.log("config loaded keys=" + properties.size()
+        BridgeLogger.log("config loaded keys=" + businessKeyCount(properties)
                 + " enabled=" + config.enabled
-                + " baseUrl=" + (Strings.isBlank(config.baseUrl) ? "<empty>" : config.baseUrl)
+                + " baseUrl=" + (Strings.isBlank(config.baseUrl) ? "<empty>" : "<set>")
                 + " device=" + config.device
                 + " selfWxid=" + (Strings.isBlank(config.selfWxid) ? "<empty>" : config.selfWxid)
                 + " apiKey=" + (Strings.isBlank(config.apiKey) ? "<empty>" : "<set>")
@@ -299,13 +125,12 @@ public final class BridgeConfig {
                 + " includeChatrooms=" + config.includeChatrooms);
     }
 
-    private static void logProviderConfigOnce(String message) {
-        long now = System.currentTimeMillis();
-        if (now - lastProviderConfigLogAt < 30000L) {
-            return;
+    private static int businessKeyCount(Properties properties) {
+        int count = 0;
+        for (String key : properties.stringPropertyNames()) {
+            if (!key.startsWith("__")) count++;
         }
-        lastProviderConfigLogAt = now;
-        BridgeLogger.log(message);
+        return count;
     }
 
     private static String setting(Properties properties, String name, String fallback) {
