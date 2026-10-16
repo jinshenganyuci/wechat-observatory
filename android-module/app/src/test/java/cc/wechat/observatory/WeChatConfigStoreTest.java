@@ -4,6 +4,10 @@ import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.ApplicationInfo;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 import android.util.AtomicFile;
 
 import org.junit.After;
@@ -15,6 +19,8 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.annotation.Implements;
 import org.robolectric.annotation.LooperMode;
 
 import java.io.File;
@@ -23,6 +29,12 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -40,7 +52,7 @@ import static org.junit.Assert.*;
 
 /** Exercise real files and Android's AtomicFile, including both backup implementations. */
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = {23, 35})
+@Config(manifest = Config.NONE, sdk = {23, 35}, shadows = WeChatConfigStoreTest.RealFileOs.class)
 @LooperMode(LooperMode.Mode.PAUSED)
 public class WeChatConfigStoreTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
@@ -60,6 +72,19 @@ public class WeChatConfigStoreTest {
     }
 
     @After public void clearRuntime() { BridgeConfig.clearRuntimeSettings(); }
+
+    @Test public void filesystemAdapterPreservesMissingPathsAndSymbolicLinkTypes() throws Exception {
+        ErrnoException missing = assertThrows(ErrnoException.class, () -> Os.lstat(main.getAbsolutePath()));
+        assertEquals(OsConstants.ENOENT, missing.errno);
+        File destination = temporary.newFolder("adapter-directory");
+        File link = new File(data, "adapter-link");
+        Files.createSymbolicLink(link.toPath(), destination.toPath());
+        assertTrue(OsConstants.S_ISLNK(Os.lstat(link.getAbsolutePath()).st_mode));
+        assertTrue(OsConstants.S_ISDIR(Os.lstat(destination.getAbsolutePath()).st_mode));
+        Os.remove(link.getAbsolutePath());
+        assertFalse(Files.exists(link.toPath(), LinkOption.NOFOLLOW_LINKS));
+        assertTrue(destination.isDirectory());
+    }
 
     @Test public void missingConfigurationNeverCreatesEvenTheFrameworkDirectory() throws Exception {
         assertTrue(WeChatConfigStore.read(context).isEmpty());
@@ -357,6 +382,42 @@ public class WeChatConfigStoreTest {
         char[] chars = new char[count];
         Arrays.fill(chars, character);
         return new String(chars);
+    }
+
+    /**
+     * Robolectric 4.14.1 ShadowLinux/ShadowPosix delegate lstat to stat, and
+     * ShadowOsConstants.getMode returns mode=0 for missing paths instead of
+     * ENOENT; File.isDirectory/isFile also follows links. Adapt only these OS
+     * calls to the real test filesystem. AtomicFile and the store stay intact.
+     */
+    @Implements(value = Os.class, minSdk = 21)
+    public static final class RealFileOs {
+        @Implementation public static StructStat lstat(String path) throws ErrnoException {
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(Paths.get(path),
+                        BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                int mode = attributes.isSymbolicLink() ? OsConstants.S_IFLNK
+                        : attributes.isDirectory() ? OsConstants.S_IFDIR
+                        : attributes.isRegularFile() ? OsConstants.S_IFREG : 0;
+                return new StructStat(0, 0, mode, 1, android.os.Process.myUid(), 0, 0,
+                        attributes.size(), 0, attributes.lastModifiedTime().toMillis() / 1000,
+                        0, 0, 0);
+            } catch (IOException failure) {
+                throw new ErrnoException("lstat", errno(failure), failure);
+            }
+        }
+
+        @Implementation public static void remove(String path) throws ErrnoException {
+            try { Files.delete(Paths.get(path)); }
+            catch (IOException failure) { throw new ErrnoException("remove", errno(failure), failure); }
+        }
+
+        private static int errno(IOException failure) {
+            if (failure instanceof NoSuchFileException) return OsConstants.ENOENT;
+            if (failure instanceof AccessDeniedException) return OsConstants.EACCES;
+            if (failure instanceof DirectoryNotEmptyException) return OsConstants.ENOTEMPTY;
+            return OsConstants.EIO;
+        }
     }
 
     /** Simulate only Context paths; filesystem operations and AtomicFile remain real. */
