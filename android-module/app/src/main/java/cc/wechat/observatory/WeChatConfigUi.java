@@ -3,22 +3,27 @@ package cc.wechat.observatory;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.view.ContextThemeWrapper;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -284,44 +289,42 @@ public final class WeChatConfigUi {
         final AlertDialog dialog;
         final EditText url;
         final EditText key;
-        final CheckBox enabled;
-        final CheckBox websocket;
+        final Switch enabled;
+        final Switch websocket;
         final TextView status;
 
         Session(Activity activity, Map<String, String> snapshot) {
             this.owner = new WeakReference<>(activity);
             this.snapshot = snapshot;
-            LinearLayout fields = new LinearLayout(activity);
+            Context ui = dialogContext(activity);
+            LinearLayout fields = new LinearLayout(ui);
             fields.setOrientation(LinearLayout.VERTICAL);
             int padding = Math.round(20 * activity.getResources().getDisplayMetrics().density);
             fields.setPadding(padding, padding / 2, padding, padding);
             fields.setSaveEnabled(false);
             fields.setSaveFromParentEnabled(false);
             if (Build.VERSION.SDK_INT >= 26) fields.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
-            url = input(activity, fields, "服务地址", snapshot.get("bridge_url"), false);
-            key = input(activity, fields, "API Key", snapshot.get("api_key"), true);
-            enabled = new CheckBox(activity);
-            enabled.setText("启用网关");
-            enabled.setChecked(ConfigWriteContract.isOn(snapshot.get("enabled"), true));
-            enabled.setSaveEnabled(false);
-            fields.addView(enabled);
-            websocket = new CheckBox(activity);
-            websocket.setText("实时 WebSocket");
-            websocket.setChecked(ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
-            websocket.setSaveEnabled(false);
-            fields.addView(websocket);
-            status = new TextView(activity);
+            url = input(ui, fields, "服务地址", snapshot.get("bridge_url"), false);
+            key = input(ui, fields, "API Key", snapshot.get("api_key"), true);
+            enabled = toggle(ui, fields, "启用网关",
+                    ConfigWriteContract.isOn(snapshot.get("enabled"), true));
+            websocket = toggle(ui, fields, "实时 WebSocket",
+                    ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
+            status = new TextView(ui);
+            status.setTextSize(13);
+            status.setAlpha(0.75f);
+            status.setPadding(0, dp(ui, 12), 0, dp(ui, 4));
             status.setText(HookEntry.runtimeStatusText()
-                    + "\n微信每次进程启动后首次进入前台，会短暂打开模块读取配置；无需让模块一直在后台运行。保存后返回微信，高级配置沿用现有值。");
+                    + "\n保存后生效，无需保持 Observatory 后台。");
             status.setSaveEnabled(false);
             fields.addView(status);
-            ScrollView scroll = new ScrollView(activity);
+            ScrollView scroll = new ScrollView(ui);
             scroll.setSaveEnabled(false);
             scroll.setSaveFromParentEnabled(false);
             scroll.addView(fields);
-            dialog = new AlertDialog.Builder(activity).setTitle("Observatory 网关")
+            dialog = new AlertDialog.Builder(ui).setTitle("Observatory 网关")
                     .setView(scroll).setPositiveButton("保存", null).setNegativeButton("关闭", null)
-                    .setNeutralButton("清除配置", (ignored, which) -> new AlertDialog.Builder(activity)
+                    .setNeutralButton("清除配置", (ignored, which) -> new AlertDialog.Builder(ui)
                             .setMessage("清除模块保存的网关地址和 API Key？")
                             .setNegativeButton("取消", null)
                             .setPositiveButton("清除", (confirmation, button) ->
@@ -363,11 +366,68 @@ public final class WeChatConfigUi {
         }
     }
 
-    private static EditText input(Activity activity, LinearLayout parent, String label, String value, boolean password) {
-        TextView title = new TextView(activity);
+    private static Context dialogContext(Activity activity) {
+        boolean dark = (activity.getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        // A resource-id ContextThemeWrapper overlays the host theme. Start with
+        // an empty Theme instead, so WeChat's compound-button backgrounds and
+        // other widget styles cannot leak into the settings dialog.
+        Resources.Theme theme = activity.getResources().newTheme();
+        theme.applyStyle(dark ? android.R.style.Theme_Material_Dialog_Alert
+                : android.R.style.Theme_Material_Light_Dialog_Alert, true);
+        return new ContextThemeWrapper(activity, theme);
+    }
+
+    private static Switch toggle(Context ui, LinearLayout parent, String label, boolean checked) {
+        LinearLayout row = new LinearLayout(ui);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(ui, 56));
+        row.setSaveEnabled(false);
+        row.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+
+        TextView title = new TextView(ui);
+        title.setText(label);
+        title.setTextSize(16);
+        title.setPadding(0, dp(ui, 8), dp(ui, 16), dp(ui, 8));
+        title.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        Switch control = new Switch(ui);
+        control.setShowText(false);
+        control.setContentDescription(label);
+        control.setChecked(checked);
+        control.setSaveEnabled(false);
+        control.setSaveFromParentEnabled(false);
+        control.setBackground(null);
+        control.setBackgroundTintList(null);
+        control.setPadding(0, 0, 0, 0);
+        control.setMinimumWidth(0);
+        control.setMinWidth(0);
+        control.setMinimumHeight(dp(ui, 48));
+        control.setSwitchMinWidth(dp(ui, 52));
+        // Only the text column expands. The native thumb and track keep their
+        // system dimensions, with a full-height touch target and checked state.
+        row.addView(control, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setOnClickListener(view -> {
+            if (control.isEnabled()) control.performClick();
+        });
+        row.setFocusable(false);
+        parent.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return control;
+    }
+
+    private static int dp(Context context, int value) {
+        return Math.round(value * context.getResources().getDisplayMetrics().density);
+    }
+
+    private static EditText input(Context ui, LinearLayout parent, String label, String value, boolean password) {
+        TextView title = new TextView(ui);
         title.setText(label);
         parent.addView(title);
-        EditText field = new EditText(activity);
+        EditText field = new EditText(ui);
         field.setSingleLine(true);
         field.setInputType(InputType.TYPE_CLASS_TEXT | (password
                 ? InputType.TYPE_TEXT_VARIATION_PASSWORD : InputType.TYPE_TEXT_VARIATION_URI));
