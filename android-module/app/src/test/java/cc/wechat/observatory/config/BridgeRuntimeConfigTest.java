@@ -97,6 +97,26 @@ public class BridgeRuntimeConfigTest {
         assertFalse(BridgeConfig.hasRuntimeSession());
     }
 
+    @Test public void recreatedPublicFileReplacesOldInstallationAndRange() {
+        BridgeConfig.acceptRuntimeSettings(initialSnapshot());
+        Properties recreated = initialSnapshot();
+        recreated.setProperty("__installation_id", "0a5a192f-e850-49bc-9a51-17bb021a10be");
+        recreated.setProperty("__generation_start", "1");
+        recreated.setProperty("__generation_limit", "1000000");
+        BridgeConfig.acceptRuntimeSettings(recreated);
+        Properties current = BridgeConfig.readSettingsForEditor(null);
+        assertEquals(recreated.getProperty("__installation_id"), current.getProperty("__installation_id"));
+        assertEquals("1", current.getProperty("__generation_start"));
+    }
+
+    @Test public void newInstallationCannotBorrowTheOldReservedRange() {
+        BridgeConfig.acceptRuntimeSettings(initialSnapshot());
+        Properties invalid = new Properties();
+        invalid.setProperty("__installation_id", "0a5a192f-e850-49bc-9a51-17bb021a10be");
+        assertThrows(IllegalArgumentException.class, () -> BridgeConfig.acceptRuntimeSettings(invalid));
+        assertEquals(INSTANCE, BridgeConfig.readSettingsForEditor(null).getProperty("__installation_id"));
+    }
+
     @Test public void reservationMetadataDoesNotChangeBusinessSignature() {
         Properties first = initialSnapshot();
         Properties second = initialSnapshot();

@@ -19,13 +19,19 @@ public final class BridgeConfig {
     private static Properties runtimeSettings = new Properties();
     private static boolean runtimeLoaded;
 
-    /** Ephemeral snapshot supplied by the module-owned Binder service. */
+    /** Ephemeral snapshot loaded from the public configuration file. */
     public static synchronized void acceptRuntimeSettings(Properties values) {
         Properties next = new Properties();
         if (values != null) next.putAll(values);
-        for (String key : new String[]{"__installation_id", "__generation_start", "__generation_limit"}) {
-            String existing = runtimeSettings.getProperty(key);
-            if (existing != null) next.setProperty(key, existing);
+        String previousId = runtimeSettings.getProperty("__installation_id", "");
+        String nextId = next.getProperty("__installation_id", previousId);
+        if (previousId.equals(nextId)) {
+            for (String key : new String[]{"__installation_id", "__generation_start", "__generation_limit"}) {
+                String existing = runtimeSettings.getProperty(key);
+                if (existing != null) next.setProperty(key, existing);
+            }
+        } else if (!next.containsKey("__generation_start") || !next.containsKey("__generation_limit")) {
+            throw new IllegalArgumentException("New configuration identity needs a reserved session range");
         }
         runtimeSettings = next;
         runtimeLoaded = true;
@@ -104,7 +110,7 @@ public final class BridgeConfig {
     }
 
     private static Properties readProperties(Context context) {
-        // No disk or IPC on the message path. The module service owns persistent data.
+        // No disk or IPC on the message path. File snapshots are loaded by the settings client.
         return readSettingsForEditor(context);
     }
 

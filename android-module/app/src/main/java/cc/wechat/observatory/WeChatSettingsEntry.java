@@ -1,6 +1,7 @@
 package cc.wechat.observatory;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
@@ -59,6 +60,7 @@ public final class WeChatSettingsEntry {
             throw new IllegalStateException("settings page is not an Activity");
         }
         final Binding binding = Binding.resolve(main, base, Bundle.class);
+        installDirectoryResult(main);
         return INSTALLATIONS.installOnce(binding.onCreate, () -> {
             XposedBridge.hookMethod(binding.onCreate, new XC_MethodHook() {
                 @Override
@@ -87,6 +89,31 @@ public final class WeChatSettingsEntry {
             });
             BridgeLogger.log("settings entry hook installed for WeChat 8.0.79/3200");
         });
+    }
+
+    private static void installDirectoryResult(Class<?> main) throws Throwable {
+        Method result = null;
+        for (Class<?> type = main; type != null; type = type.getSuperclass()) {
+            try {
+                result = type.getDeclaredMethod("onActivityResult", int.class, int.class, Intent.class);
+                break;
+            } catch (NoSuchMethodException inherited) { }
+        }
+        if (result == null) throw new IllegalStateException("settings result callback missing");
+        final Method method = result;
+        INSTALLATIONS.installOnce(method, () -> XposedBridge.hookMethod(method, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.thisObject == null || param.thisObject.getClass() != main) return;
+                try {
+                    if (WeChatConfigUi.onActivityResult((Activity) param.thisObject,
+                            (Integer) param.args[0], (Integer) param.args[1], (Intent) param.args[2])) {
+                        param.setResult(null); // Only consume our own pending directory request.
+                    }
+                } catch (Throwable failure) {
+                    BridgeLogger.log("directory result failed: " + failure.getClass().getSimpleName());
+                }
+            }
+        }));
     }
 
     private static void addEntry(Activity activity, Callback callback) {

@@ -137,6 +137,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final AtomicBoolean CLEANED_LEGACY_SESSION = new AtomicBoolean();
     private static final AtomicBoolean REMOVAL_RECEIVER_INSTALLED = new AtomicBoolean();
     private static volatile long LAST_CONFIG_LOAD_ATTEMPT;
+    private static volatile boolean MODULE_REMOVED;
     private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
     private static final Runnable CONFIG_LOADED = HookEntry::configurationChanged;
 
@@ -148,6 +149,23 @@ public final class HookEntry implements IXposedHookLoadPackage {
         Socket socket = ACTIVE_OUTBOX_SOCKET;
         if (socket != null) {
             try { socket.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    static synchronized void acceptConfiguration(Properties settings) {
+        Properties previous = BridgeConfig.readSettingsForEditor(null);
+        boolean changedIdentity = !previous.getProperty("__installation_id", "").equals(
+                settings.getProperty("__installation_id", ""));
+        previous.clear();
+        BridgeConfig.acceptRuntimeSettings(settings);
+        if (changedIdentity) {
+            SESSION_ALLOCATOR = null;
+            CURRENT_ACCOUNT = null;
+            REGISTERED_KEY = "";
+            REGISTERED_DEVICE = "";
+            LAST_REGISTER_SUCCESS_AT = 0L;
+            CAPABILITY_REPORTED = false;
+            configurationChanged();
         }
     }
 
@@ -287,7 +305,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     @Override public void onReceive(Context ignored, Intent intent) {
                         if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false) || intent.getData() == null
                                 || !"cc.wechat.observatory".equals(intent.getData().getSchemeSpecificPart())) return;
-                        ConfigServiceClient.moduleRemoved();
+                        MODULE_REMOVED = true;
+                        ConfigFileClient.moduleRemoved();
                         WeChatConfigUi.moduleRemoved();
                         BridgeConfig.clearRuntimeSettings();
                         CURRENT_ACCOUNT = null;
@@ -414,13 +433,13 @@ public final class HookEntry implements IXposedHookLoadPackage {
             });
             hookOnce(Activity.class.getDeclaredMethod("onPostResume"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof Activity) || BridgeConfig.hasRuntimeSession()) return;
+                    if (MODULE_REMOVED || !(param.thisObject instanceof Activity) || BridgeConfig.hasRuntimeSession()) return;
                     Activity activity = (Activity) param.thisObject;
                     long now = android.os.SystemClock.elapsedRealtime();
                     if (LAST_CONFIG_LOAD_ATTEMPT != 0 && now - LAST_CONFIG_LOAD_ATTEMPT < 30000L) return;
                     LAST_CONFIG_LOAD_ATTEMPT = now;
                     activity.getWindow().getDecorView().post(() -> {
-                        if (!activity.isFinishing() && !activity.isDestroyed() && !BridgeConfig.hasRuntimeSession()) {
+                        if (!MODULE_REMOVED && !activity.isFinishing() && !activity.isDestroyed() && !BridgeConfig.hasRuntimeSession()) {
                             try { WeChatConfigUi.load(activity, CONFIG_LOADED); }
                             catch (Throwable failure) {
                                 log("foreground configuration load failed: " + shortError(failure));

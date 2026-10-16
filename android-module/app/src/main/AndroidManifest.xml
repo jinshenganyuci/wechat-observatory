@@ -38,10 +38,6 @@
             </intent-filter>
         </activity>
 
-        <service
-            android:name=".ConfigService"
-            android:exported="true" />
-
         <receiver
             android:name=".BridgeConfigReceiver"
             android:permission="android.permission.DUMP"

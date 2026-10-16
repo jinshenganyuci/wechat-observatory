@@ -1,3 +1,5 @@
+> 当前 fork 0.1.17 使用公共目录配置。请按 [升级说明](../docs/compatibility/wechat-8079-0117.md) 先为模块授权并迁移，再为微信授权同一目录；无需保持模块后台。卸载后手动删除 `Documents/WeChatObservatory`。
+
 ﻿# WeChat Observatory LSPosed Module
 
 This is the companion module for `wechat-observatory`.

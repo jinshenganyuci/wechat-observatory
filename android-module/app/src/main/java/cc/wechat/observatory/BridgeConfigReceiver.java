@@ -34,7 +34,21 @@ public final class BridgeConfigReceiver extends BroadcastReceiver {
             }
             count++;
         }
-        ModuleConfigStore.SaveResult result = ModuleConfigStore.save(context, values);
-        Log.i(TAG, result.success ? "stored private bridge config keys=" + count : "bridge config save failed");
+        final int suppliedKeys = count;
+        PendingResult pending = goAsync();
+        Context application = context.getApplicationContext();
+        try {
+            new Thread(() -> {
+                try {
+                    ModuleConfigStore.SaveResult result = SharedConfigStore.save(application, values);
+                    Log.i(TAG, result.success ? "stored shared bridge config keys=" + suppliedKeys
+                            : "shared config save failed; grant the directory in module settings first");
+                } finally { values.clear(); pending.finish(); }
+            }, "Observatory shell configuration").start();
+        } catch (RuntimeException unavailable) {
+            values.clear();
+            pending.finish();
+            Log.i(TAG, "shared config worker unavailable");
+        }
     }
 }

@@ -36,6 +36,55 @@ public final class ModuleConfigStore {
         return publicSnapshot(readState(context));
     }
 
+    /** One-time export by the module process; preserve the already reserved generation ceiling. */
+    static synchronized Properties exportStateForSharedStorage(Context context) throws IOException {
+        Properties copy = new Properties();
+        copy.putAll(readState(context)); // file(context) enforces the module context and UID.
+        return copy;
+    }
+
+    private static AtomicFile migrationMarker(Context context) throws IOException {
+        // Resolve through the same module UID/context guard without loading old credentials.
+        return new AtomicFile(new File(file(context).getBaseFile().getParentFile(), "observatory-shared-migration"));
+    }
+
+    static synchronized boolean sharedMigrationComplete(Context context) throws IOException {
+        AtomicFile marker = migrationMarker(context);
+        byte[] expected = "public-config-v1\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        try (InputStream input = marker.openRead()) {
+            byte[] actual = new byte[expected.length + 1];
+            int total = 0;
+            int count;
+            while (total < actual.length && (count = input.read(actual, total, actual.length - total)) != -1) {
+                total += count;
+            }
+            if (total != expected.length || !Arrays.equals(expected, Arrays.copyOf(actual, total))) {
+                throw new IOException("Invalid public configuration migration marker");
+            }
+            return true;
+        } catch (java.io.FileNotFoundException missing) {
+            if (marker.getBaseFile().exists() || new File(marker.getBaseFile() + ".bak").exists()) throw missing;
+            return false;
+        }
+    }
+
+    static synchronized void markSharedMigrationComplete(Context context) throws IOException {
+        AtomicFile marker = migrationMarker(context);
+        FileOutputStream output = null;
+        try {
+            output = marker.startWrite();
+            output.write("public-config-v1\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            output.flush();
+            output.getFD().sync();
+            marker.finishWrite(output);
+            output = null;
+            if (!sharedMigrationComplete(context)) throw new IOException("Migration marker commit was not confirmed");
+        } catch (IOException | RuntimeException failure) {
+            if (output != null) marker.failWrite(output);
+            throw failure;
+        }
+    }
+
     /** Commit the whole reservation before exposing any generation to WeChat. */
     public static synchronized Properties loadForRuntime(Context context) throws IOException {
         Properties state = readState(context);

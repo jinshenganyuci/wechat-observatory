@@ -2,8 +2,11 @@ package cc.wechat.observatory;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import java.util.Properties;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -25,11 +28,14 @@ import java.util.Date;
 import org.json.JSONObject;
 import cc.wechat.observatory.gateway.ConnectionProbe;
 import java.util.Map;
+import java.lang.ref.WeakReference;
 
 import cc.wechat.observatory.config.BridgeConfig;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 
 public final class SettingsActivity extends Activity {
+    private static final int DIRECTORY_PERMISSION_REQUEST = 0x4f31;
+    private static final String SHARED_CONFIG_LOCATION = "Documents/WeChatObservatory/observatory.properties";
     private static final String DEFAULT_POLL_INTERVAL_MS = "1000";
     private static final String DEFAULT_POLL_LIMIT = "1";
     private static final String DEFAULT_OUTBOX_WEBSOCKET_ENABLED = "1";
@@ -60,6 +66,7 @@ public final class SettingsActivity extends Activity {
     }
 
     private static final ExecutorService CONFIG_WRITER = Executors.newSingleThreadExecutor();
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private final Map<String, EditText> fields = new LinkedHashMap<>();
     private TextView statusView;
@@ -68,8 +75,13 @@ public final class SettingsActivity extends Activity {
     private Properties configPreferences = new Properties();
     private Button testButton;
     private Button saveButton;
+    private Button permissionButton;
+    private Button cleanupButton;
     private int probeGeneration;
     private boolean probing;
+    private boolean configBusy;
+    private boolean configReady;
+    private boolean permissionPending;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,7 +99,8 @@ public final class SettingsActivity extends Activity {
     }
 
     private void showRuntimeStatus() {
-        if (statusView != null) statusView.setText("日常设置请进入微信 → 设置 → WeChat Observatory。配置只保存在本应用私有目录，卸载本应用时删除。");
+        if (statusView != null) statusView.setText("配置保存在当前用户的公共目录 " + SHARED_CONFIG_LOCATION
+                + "。微信和本应用各授权一次目录后即可使用，无需保持 Observatory 后台。");
     }
 
     private View createContentView() {
@@ -116,6 +129,12 @@ public final class SettingsActivity extends Activity {
         statusView.setTextSize(14);
         statusView.setPadding(0, 0, 0, dp(14));
         root.addView(statusView);
+
+        permissionButton = new Button(this);
+        permissionButton.setText("授权配置目录");
+        permissionButton.setAllCaps(false);
+        permissionButton.setOnClickListener(v -> requestDirectoryPermission());
+        root.addView(permissionButton);
 
         addField(root, "bridge_url", R.string.label_bridge_url, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addField(root, "api_key", R.string.label_api_key, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -153,40 +172,47 @@ public final class SettingsActivity extends Activity {
         saveButton = new Button(this);
         saveButton.setText(R.string.action_save);
         saveButton.setAllCaps(false);
-        saveButton.setOnClickListener(v -> saveValues());
+        saveButton.setOnClickListener(v -> saveValues(false));
         LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         saveParams.topMargin = dp(12);
         root.addView(saveButton, saveParams);
 
-        Button cleanup = new Button(this);
-        cleanup.setText("清理旧版配置副本");
-        cleanup.setAllCaps(false);
-        cleanup.setOnClickListener(v -> {
-            cleanup.setEnabled(false);
+        cleanupButton = new Button(this);
+        cleanupButton.setText("清理旧版配置副本");
+        cleanupButton.setAllCaps(false);
+        cleanupButton.setOnClickListener(v -> {
+            if (!configReady || configBusy || probing) return;
+            setConfigBusy(true);
             sharingStatus.setText("正在清理旧版副本；如需删除旧版 root 文件，系统可能请求 root 授权…");
             Context context = getApplicationContext();
+            WeakReference<SettingsActivity> owner = new WeakReference<>(this);
             CONFIG_WRITER.execute(() -> {
                 String cleanupResult;
                 try {
-                    ModuleConfigStore.read(context); // Migration must be durable before any old copy is deleted.
+                    SharedConfigStore.migratePrivate(context);
+                    Properties confirmed = SharedConfigStore.read(context);
+                    confirmed.clear(); // Verify the public copy before removing any legacy copies.
                     cleanupResult = LegacyConfigCleanup.cleanup(context, true);
                 } catch (java.io.IOException | RuntimeException failure) {
                     cleanupResult = "旧配置尚未安全迁移，已取消清理，请检查存储空间后重试。";
                 }
                 final String result = cleanupResult;
-                runOnUiThread(() -> {
-                    if (isFinishing() || isDestroyed()) return;
-                    sharingStatus.setText(result);
-                    cleanup.setEnabled(true);
+                MAIN.post(() -> {
+                    SettingsActivity target = live(owner);
+                    if (target == null) return;
+                    target.sharingStatus.setText(result);
+                    target.setConfigBusy(false);
                 });
             });
         });
-        root.addView(cleanup);
+        root.addView(cleanupButton);
 
         TextView footer = new TextView(this);
-        footer.setText(R.string.settings_restart_hint);
+        footer.setText("两端请选择系统文件选择器中的 Documents 或 Documents/WeChatObservatory。"
+                + "在此修改后，可到微信网关设置重新读取。连接测试不会发送消息。"
+                + "\n卸载后请删除 Documents/WeChatObservatory 文件夹。");
         footer.setTextSize(13);
         footer.setPadding(0, dp(12), 0, 0);
         root.addView(footer);
@@ -232,27 +258,117 @@ public final class SettingsActivity extends Activity {
     }
 
     private void loadValues() {
-        try { configPreferences = ModuleConfigStore.read(this); }
-        catch (java.io.IOException failure) {
-            sharingStatus.setText("配置读取失败，请检查存储空间。");
+        configReady = false;
+        if (!SharedConfigFiles.hasPermission(this)) {
+            configPreferences.clear();
+            applyValues(new Properties());
+            sharingStatus.setText("先点“授权配置目录”，在系统文件选择器中选择 Documents 或 Documents/WeChatObservatory，并允许访问。授权后才能读取、保存和测试。");
+            setConfigBusy(false);
             return;
         }
-        Properties prefs = configPreferences;
+        setConfigBusy(true);
+        sharingStatus.setText("正在读取公共目录配置…");
+        Context context = getApplicationContext();
+        WeakReference<SettingsActivity> owner = new WeakReference<>(this);
+        CONFIG_WRITER.execute(() -> {
+            Properties loaded = null;
+            String failureMessage = null;
+            try {
+                SharedConfigStore.migratePrivate(context);
+                loaded = SharedConfigStore.read(context);
+            } catch (java.io.IOException | RuntimeException failure) {
+                failureMessage = "公共目录配置读取或旧配置迁移失败，请检查目录授权和存储空间后重新授权；尚未覆盖现有配置。";
+            }
+            Properties result = loaded;
+            String error = failureMessage;
+            MAIN.post(() -> {
+                SettingsActivity target = live(owner);
+                if (target == null) {
+                    if (result != null) result.clear();
+                    return;
+                }
+                if (result == null) {
+                    target.sharingStatus.setText(error);
+                } else {
+                    target.configPreferences.clear();
+                    target.configPreferences = result;
+                    target.applyValues(result);
+                    target.configReady = true;
+                    target.showSharingStatus(false);
+                    target.connectionStatus.setText("尚未测试连接。保存配置不代表微信模块已注册。");
+                }
+                target.setConfigBusy(false);
+            });
+        });
+    }
+
+    private void applyValues(Properties prefs) {
         for (String key : BridgeConfigProvider.CONFIG_KEYS) {
             if (fields.containsKey(key)) {
                 setValue(key, prefs.getProperty(key, DEFAULTS.get(key)));
             }
         }
-        showSharingStatus(false);
+        maskSensitiveFields();
+    }
+
+    private void requestDirectoryPermission() {
+        if (configBusy || probing || permissionPending) return;
+        try {
+            permissionPending = true;
+            updateControls();
+            startActivityForResult(SharedConfigFiles.permissionIntent(), DIRECTORY_PERMISSION_REQUEST);
+        } catch (RuntimeException unavailable) {
+            permissionPending = false;
+            sharingStatus.setText("无法打开系统目录选择器，请确认系统文件应用可用后重试。");
+            updateControls();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != DIRECTORY_PERMISSION_REQUEST || !permissionPending) return;
+        permissionPending = false;
+        if (resultCode != RESULT_OK || data == null) {
+            sharingStatus.setText("已取消目录授权。请选择 Documents 或 Documents/WeChatObservatory 后允许访问。");
+            updateControls();
+            return;
+        }
+        setConfigBusy(true);
+        Context context = getApplicationContext();
+        WeakReference<SettingsActivity> owner = new WeakReference<>(this);
+        CONFIG_WRITER.execute(() -> {
+            String failureMessage = null;
+            try { SharedConfigFiles.acceptPermission(context, data); }
+            catch (java.io.IOException | RuntimeException failure) {
+                failureMessage = "目录授权失败。请只选择本机 Documents 或 Documents/WeChatObservatory，并允许读写。";
+            }
+            String error = failureMessage;
+            MAIN.post(() -> {
+                SettingsActivity target = live(owner);
+                if (target == null) return;
+                if (error != null) {
+                    target.sharingStatus.setText(error);
+                    target.setConfigBusy(false);
+                } else {
+                    // Loading migrates the private copy only when the public file is absent.
+                    target.loadValues();
+                }
+            });
+        });
     }
 
     private void showSharingStatus(boolean saved) {
         sharingStatus.setText(saved
-                ? "配置已保存在 Observatory 私有目录。请强行停止并重新打开微信使此处修改生效；以后可直接在微信设置中修改。"
-                : "配置由 Observatory 保存，微信启动后读取一次；划掉本应用不会中断微信内的通道。卸载本应用会删除配置。");
+                ? "配置已保存到 " + SHARED_CONFIG_LOCATION + "。请在微信中打开网关设置重新读取，无需保持本应用后台。"
+                : "已读取公共目录配置。微信需单独授权同一目录；划掉本应用不会中断微信内的通道。");
     }
 
-    private boolean saveValues() {
+    private void saveValues(boolean testAfterSave) {
+        if (!configReady || configBusy || probing || !SharedConfigFiles.hasPermission(this)) {
+            if (!SharedConfigFiles.hasPermission(this)) loadValues();
+            return;
+        }
         EditText bridgeUrlField = fields.get("bridge_url");
         String bridgeUrl = bridgeUrlField == null ? "" : bridgeUrlField.getText().toString().trim();
         try {
@@ -263,14 +379,14 @@ public final class SettingsActivity extends Activity {
                 bridgeUrlField.requestFocus();
             }
             Toast.makeText(this, R.string.error_bridge_url_invalid, Toast.LENGTH_LONG).show();
-            return false;
+            return;
         }
         if (bridgeUrlField != null) {
             bridgeUrlField.setText(bridgeUrl);
         }
 
         Properties values = new Properties();
-        values.putAll(configPreferences);
+        values.putAll(ConfigWriteContract.editorSnapshot(configPreferences));
         for (String key : BridgeConfigProvider.CONFIG_KEYS) {
             if ("enabled".equals(key)) {
                 values.setProperty(key, "1");
@@ -283,26 +399,55 @@ public final class SettingsActivity extends Activity {
                 else values.setProperty(key, value);
             }
         }
-        ModuleConfigStore.SaveResult saved = ModuleConfigStore.save(this, values);
-        if (!saved.success) {
-            connectionStatus.setText(saved.error);
-            return false;
-        }
-        configPreferences = values;
         maskSensitiveFields();
-        showSharingStatus(true);
-        connectionStatus.setText("配置已保存，连接尚未验证。请重启微信后测试连接。");
-        Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_LONG).show();
-        return true;
+        setConfigBusy(true);
+        connectionStatus.setText("正在保存公共目录配置…");
+        Context context = getApplicationContext();
+        WeakReference<SettingsActivity> owner = new WeakReference<>(this);
+        CONFIG_WRITER.execute(() -> {
+            Properties savedValues = null;
+            String failureMessage = null;
+            try {
+                savedValues = SharedConfigStore.saveAndLoad(context, values, false);
+            } catch (java.io.IOException | RuntimeException failure) {
+                failureMessage = "公共目录配置保存结果未确认，请检查目录授权和存储空间并重新读取后再修改。";
+            } finally { values.clear(); }
+            Properties result = savedValues;
+            String error = failureMessage;
+            MAIN.post(() -> {
+                SettingsActivity target = live(owner);
+                if (target == null) {
+                    if (result != null) result.clear();
+                    return;
+                }
+                if (result == null) {
+                    target.configReady = false;
+                    target.connectionStatus.setText(error == null ? "保存结果未确认，请重新授权目录并读取。" : error);
+                    target.setConfigBusy(false);
+                    return;
+                }
+                target.configPreferences.clear();
+                target.configPreferences = result;
+                target.applyValues(result);
+                target.showSharingStatus(true);
+                target.connectionStatus.setText("配置已保存，连接尚未验证。微信中打开网关设置可重新读取。");
+                target.setConfigBusy(false);
+                if (testAfterSave) target.beginConnectionTest(result.getProperty("bridge_url", ""),
+                        result.getProperty("api_key", ""));
+                else Toast.makeText(target, "公共目录配置已保存", Toast.LENGTH_SHORT).show();
+            });
+        });
     }
 
     private void testConnection() {
-        if (probing || !saveValues()) return;
-        final String address = fields.get("bridge_url").getText().toString().trim();
-        final String key = fields.get("api_key").getText().toString().trim();
+        saveValues(true);
+    }
+
+    private void beginConnectionTest(String address, String key) {
         final int generation = ++probeGeneration;
         setProbing(true);
         connectionStatus.setText("正在检查后端连接…");
+        WeakReference<SettingsActivity> owner = new WeakReference<>(this);
         new Thread(() -> {
             String report = "";
             try {
@@ -350,25 +495,45 @@ public final class SettingsActivity extends Activity {
                         : ConnectionProbe.describeFailure(error));
             }
             final String display = "检测时间：" + DateFormat.getDateTimeInstance().format(new Date()) + "\n" + report;
-            runOnUiThread(() -> {
-                if (generation != probeGeneration || isFinishing() || isDestroyed()) return;
-                connectionStatus.setText(display);
-                setProbing(false);
+            MAIN.post(() -> {
+                SettingsActivity target = live(owner);
+                if (target == null || generation != target.probeGeneration) return;
+                target.connectionStatus.setText(display);
+                target.setProbing(false);
             });
         }, "gateway-connection-test").start();
     }
 
     private void setProbing(boolean value) {
         probing = value;
-        testButton.setEnabled(!value);
         testButton.setText(value ? "正在测试…" : "保存并测试连接");
-        saveButton.setEnabled(!value);
-        for (EditText field : fields.values()) field.setEnabled(!value);
+        updateControls();
+    }
+
+    private void setConfigBusy(boolean value) {
+        configBusy = value;
+        updateControls();
+    }
+
+    private static SettingsActivity live(WeakReference<SettingsActivity> owner) {
+        SettingsActivity activity = owner.get();
+        return activity == null || activity.isFinishing() || activity.isDestroyed() ? null : activity;
+    }
+
+    private void updateControls() {
+        boolean idle = !configBusy && !probing && !permissionPending;
+        boolean editable = idle && configReady && SharedConfigFiles.hasPermission(this);
+        testButton.setEnabled(editable);
+        saveButton.setEnabled(editable);
+        cleanupButton.setEnabled(editable);
+        permissionButton.setEnabled(idle);
+        for (EditText field : fields.values()) field.setEnabled(editable);
     }
 
     @Override
     protected void onDestroy() {
         ++probeGeneration;
+        configPreferences.clear();
         super.onDestroy();
     }
 
