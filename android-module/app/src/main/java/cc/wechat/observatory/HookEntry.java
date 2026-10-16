@@ -5,7 +5,11 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.app.Activity;
 import android.app.Application;
-import android.net.Uri;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
+import java.util.Properties;
+import cc.wechat.observatory.wechat.AccountSessionAllocator;
 import android.widget.Toast;
 import android.os.Handler;
 import android.os.Looper;
@@ -51,12 +55,14 @@ import javax.net.ssl.SSLSocketFactory;
 import cc.wechat.observatory.config.BridgeConfig;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
+import cc.wechat.observatory.gateway.OutboxReconnectPolicy;
 import cc.wechat.observatory.model.MessagePayload;
 import cc.wechat.observatory.util.BridgeLogger;
 import cc.wechat.observatory.util.HookInstallation;
 import cc.wechat.observatory.wechat.LocalMessageConfirmation;
 import cc.wechat.observatory.wechat.QueueSubmissionRetrier;
 import cc.wechat.observatory.wechat.OutboxDeliveryPacing;
+import cc.wechat.observatory.wechat.OutboxDeliveryCache;
 import cc.wechat.observatory.wechat.SendResult;
 import cc.wechat.observatory.wechat.RuntimeAccount;
 import cc.wechat.observatory.wechat.AccountSession;
@@ -91,6 +97,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile long LAST_CONTACT_SCAN_LOG_AT = 0L;
     private static volatile boolean CAPABILITY_REPORTED = false;
     private static volatile long LAST_WEBSOCKET_FAIL_LOG_AT = 0L;
+    private static final OutboxDeliveryCache OUTBOX_DELIVERIES = new OutboxDeliveryCache(512);
     private static volatile String CURRENT_WXID = "";
     private static volatile String REGISTERED_KEY = "";
     private static volatile String REGISTERED_DEVICE = "";
@@ -123,7 +130,36 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final AtomicInteger STARTED_ACTIVITIES = new AtomicInteger(0);
     private static volatile long BACKGROUND_SINCE = 0L;
     private static final long FOREGROUND_DEBOUNCE_MS = 1500L;
-    private static final String STATUS_PROVIDER_URI = "content://cc.wechat.observatory.config/status";
+    private static volatile AccountSessionAllocator SESSION_ALLOCATOR;
+    private static volatile Socket ACTIVE_OUTBOX_SOCKET;
+    private static volatile String RUNTIME_ROLE = "尚未注册";
+    private static final AtomicBoolean CLEANED_LEGACY_SESSION = new AtomicBoolean();
+    private static final AtomicBoolean REMOVAL_RECEIVER_INSTALLED = new AtomicBoolean();
+    private static volatile long LAST_CONFIG_LOAD_ATTEMPT;
+    private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
+    private static final Runnable CONFIG_LOADED = HookEntry::configurationChanged;
+
+    public static String runtimeStatusText() {
+        return RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE;
+    }
+
+    public static void configurationChanged() {
+        Socket socket = ACTIVE_OUTBOX_SOCKET;
+        if (socket != null) {
+            try { socket.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    private static synchronized AccountSession allocateSession() {
+        if (SESSION_ALLOCATOR == null) {
+            Properties state = BridgeConfig.readSettingsForEditor(null);
+            SESSION_ALLOCATOR = new AccountSessionAllocator(state.getProperty("__installation_id", ""),
+                    Long.parseLong(state.getProperty("__generation_start", "0")),
+                    Long.parseLong(state.getProperty("__generation_limit", "0")));
+        }
+        return SESSION_ALLOCATOR.allocate();
+    }
+
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -206,12 +242,67 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         hookWeChatApplication(loader);
         installObservationHook(loader);
+        installSettingsEntry(loader);
         return loader;
+    }
+
+    private static void installSettingsEntry(ClassLoader loader) {
+        Context context = bridgeContext();
+        if (context == null) return;
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(WECHAT_PACKAGE, 0);
+            long code = android.os.Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+            WeChatSettingsEntry.install(loader, info.versionName, code, WeChatConfigUi::show);
+            LAST_SETTINGS_HOOK_ERROR = "";
+        } catch (Throwable failure) {
+            String error = shortError(failure);
+            if (!error.equals(LAST_SETTINGS_HOOK_ERROR)) {
+                LAST_SETTINGS_HOOK_ERROR = error;
+                log("WeChat settings entry pending: " + error);
+            }
+        }
+    }
+
+    private static void preparePrivateConfigRuntime(Context context) {
+        if (CLEANED_LEGACY_SESSION.compareAndSet(false, true)) {
+            try {
+                boolean deleted;
+                if (android.os.Build.VERSION.SDK_INT >= 24) {
+                    deleted = context.deleteSharedPreferences("observatory_account_sessions");
+                } else {
+                    File file = new File(context.getApplicationInfo().dataDir,
+                            "shared_prefs/observatory_account_sessions.xml");
+                    File backup = new File(file + ".bak");
+                    deleted = (!file.exists() || file.delete()) & (!backup.exists() || backup.delete());
+                }
+                if (!deleted) log("legacy account session file cleanup incomplete");
+            } catch (Throwable failure) { log("legacy account session cleanup failed: " + shortError(failure)); }
+        }
+        if (REMOVAL_RECEIVER_INSTALLED.compareAndSet(false, true)) {
+            try {
+                IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_REMOVED);
+                filter.addDataScheme("package");
+                BroadcastReceiver receiver = new BroadcastReceiver() {
+                    @Override public void onReceive(Context ignored, Intent intent) {
+                        if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false) || intent.getData() == null
+                                || !"cc.wechat.observatory".equals(intent.getData().getSchemeSpecificPart())) return;
+                        BridgeConfig.clearRuntimeSettings();
+                        CURRENT_ACCOUNT = null;
+                        SESSION_ALLOCATOR = null;
+                        RUNTIME_ROLE = "模块已卸载";
+                        configurationChanged();
+                    }
+                };
+                if (android.os.Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                else context.registerReceiver(receiver, filter);
+            } catch (Throwable failure) { log("module removal listener unavailable: " + shortError(failure)); }
+        }
     }
 
     private static void onApplicationReady(Context context, ClassLoader loader, String stage) {
         if (context != null) {
             APP_CONTEXT = context;
+            preparePrivateConfigRuntime(context);
             try {
                 ClassLoader contextLoader = context.getClassLoader();
                 if (contextLoader != null) {
@@ -316,6 +407,24 @@ public final class HookEntry implements IXposedHookLoadPackage {
                             log("WeChat opened on a standby phone; claiming the device binding");
                         }
                     }
+                }
+            });
+            hookOnce(Activity.class.getDeclaredMethod("onPostResume"), new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!(param.thisObject instanceof Activity) || BridgeConfig.hasRuntimeSession()) return;
+                    Activity activity = (Activity) param.thisObject;
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    if (LAST_CONFIG_LOAD_ATTEMPT != 0 && now - LAST_CONFIG_LOAD_ATTEMPT < 30000L) return;
+                    LAST_CONFIG_LOAD_ATTEMPT = now;
+                    activity.getWindow().getDecorView().post(() -> {
+                        if (!activity.isFinishing() && !activity.isDestroyed() && !BridgeConfig.hasRuntimeSession()) {
+                            try { WeChatConfigUi.load(activity, CONFIG_LOADED); }
+                            catch (Throwable failure) {
+                                log("foreground configuration load failed: " + shortError(failure));
+                                showToast("网关配置加载失败，请进入微信设置中的 Observatory 重试。");
+                            }
+                        }
+                    });
                 }
             });
             hookOnce(Activity.class.getDeclaredMethod("onStop"), new XC_MethodHook() {
@@ -528,6 +637,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private static void runOutboxWorker(ClassLoader classLoader) {
+        OutboxReconnectPolicy reconnect = new OutboxReconnectPolicy();
         while (true) {
             BridgeConfig config = null;
             noteOutboxStage("loop");
@@ -556,10 +666,22 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         noteOutboxStage("poll");
                         completedOutboxItem = pollOutbox(config, classLoader);
                         noteOutboxStage("idle");
-                    } else if (!runOutboxWebSocket(config, classLoader)) {
-                        noteOutboxStage("poll");
-                        completedOutboxItem = pollOutbox(config, classLoader);
-                        noteOutboxStage("idle");
+                    } else {
+                        reconnect.selectScope(config.signature + "\n" + outboxDeliveryScope(config));
+                        if (reconnect.shouldConnect(android.os.SystemClock.elapsedRealtime())) {
+                            if (runOutboxWebSocket(config, classLoader, reconnect)) {
+                                // Refresh configuration/session before any subsequent delivery.
+                                if (Thread.currentThread().isInterrupted()) return;
+                                continue;
+                            }
+                        }
+                        long now = android.os.SystemClock.elapsedRealtime();
+                        if (!FORCE_REREGISTER && !configChanged(config) && reconnect.shouldPollHttp(now)) {
+                            reconnect.polledHttp(now);
+                            noteOutboxStage("http-fallback");
+                            completedOutboxItem = pollOutbox(config, classLoader);
+                            noteOutboxStage("websocket-backoff");
+                        }
                     }
                 }
             } catch (Throwable t) {
@@ -1032,7 +1154,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     String target = config.baseUrl + "\n" + config.apiKey;
                     if (!detected.sameLogin(account) || !target.equals(account.registrationTarget)) {
                         account = detected;
-                        account.session = AccountSession.allocate(bridgeContext());
+                        account.session = allocateSession();
                         account.registrationTarget = target;
                         CURRENT_ACCOUNT = account;
                         log("current WeChat account wxid=" + account.wxid
@@ -1158,7 +1280,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             if (message.startsWith("bridge returned HTTP 409") && message.contains("account session conflict")) {
                 // This session can never be accepted again (older generation, revoked
                 // credential or reused identity). A fresh generation recovers.
-                runtimeAccount.session = AccountSession.allocate(bridgeContext());
+                runtimeAccount.session = allocateSession();
                 REGISTERED_KEY = "";
                 LAST_REGISTER_PROBLEM = "account session rejected by server; allocated a new session";
                 log(LAST_REGISTER_PROBLEM);
@@ -1290,21 +1412,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
         });
     }
 
-    /** Lets the module settings page show "active" or "standby" for this phone. */
+    /** Status stays in the same WeChat process as its settings UI. */
     private static void publishRoleStatus(String state, String detail) {
-        Context context = bridgeContext();
-        if (context == null) {
-            return;
-        }
-        try {
-            ContentValues values = new ContentValues();
-            values.put("state", state);
-            values.put("detail", detail == null ? "" : detail);
-            values.put("updated_at", System.currentTimeMillis());
-            context.getContentResolver().update(Uri.parse(STATUS_PROVIDER_URI), values, null, null);
-        } catch (Throwable t) {
-            log("publish module status failed: " + shortError(t));
-        }
+        RUNTIME_ROLE = ("active".equals(state) ? "已注册，本机服务中" : "备用设备")
+                + (isBlank(detail) ? "" : "：" + detail);
     }
 
     private static void syncContactsIfDue(BridgeConfig config) {
@@ -2388,19 +2499,26 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
 
-    private static boolean runOutboxWebSocket(BridgeConfig config, ClassLoader classLoader) {
-        if (!supportsWebSocket(config)) {
-            return false;
-        }
+    /** True means the caller must reload its config/session, never poll with the old one. */
+    private static boolean runOutboxWebSocket(BridgeConfig config, ClassLoader classLoader,
+                                            OutboxReconnectPolicy reconnect) {
+        reconnect.attemptingConnection();
         try {
-            websocketLoop(config, classLoader);
+            noteOutboxStage("websocket-connect");
+            websocketLoop(config, classLoader, reconnect);
         } catch (Throwable t) {
             logWebSocketFailure("outbox websocket unavailable: " + shortError(t));
         }
+        if (Thread.currentThread().isInterrupted() || FORCE_REREGISTER || configChanged(config)) {
+            reconnect.reset();
+            return true;
+        }
+        reconnect.failed(android.os.SystemClock.elapsedRealtime());
         return false;
     }
 
-    private static void websocketLoop(BridgeConfig config, ClassLoader classLoader) throws Exception {
+    private static void websocketLoop(BridgeConfig config, ClassLoader classLoader,
+                                      OutboxReconnectPolicy reconnect) throws Exception {
         GatewayEndpoint endpoint = GatewayEndpoint.parse(config.baseUrl);
         String host = endpoint.host();
         String hostHeader = endpoint.hostHeader();
@@ -2414,6 +2532,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         String key = Base64.encodeToString(nonce, Base64.NO_WRAP);
 
         try (Socket socket = openGatewaySocket(host, endpoint.port(), endpoint.isTls())) {
+            ACTIVE_OUTBOX_SOCKET = socket;
             socket.setSoTimeout(30000);
             InputStream input = socket.getInputStream();
             OutputStream output = socket.getOutputStream();
@@ -2427,15 +2546,21 @@ public final class HookEntry implements IXposedHookLoadPackage {
             output.write(request.getBytes(StandardCharsets.ISO_8859_1));
             output.flush();
             verifyWebSocketHandshake(input, key);
+            reconnect.connected(android.os.SystemClock.elapsedRealtime());
             log("outbox websocket connected host=" + hostHeader + " device=" + config.device);
+            noteOutboxStage("websocket-idle");
             writeWebSocketText(output, "{\"type\":\"poll\"}");
 
-            while (true) {
-                if (configChanged(config)) {
+            while (!Thread.currentThread().isInterrupted()) {
+                if (FORCE_REREGISTER || configChanged(config)) {
                     log("outbox websocket config or WeChat identity changed; reconnect");
                     return;
                 }
                 WebSocketFrame frame = readWebSocketFrame(input);
+                // read() may span an account/config change. Recheck before
+                // accepting a delivery or replying to its liveness probe.
+                if (Thread.currentThread().isInterrupted() || FORCE_REREGISTER || configChanged(config)) return;
+                noteOutboxStage("websocket-idle");
                 if (frame.opcode == 0x8) {
                     return;
                 }
@@ -2452,8 +2577,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 JSONObject root = new JSONObject(new String(frame.payload, StandardCharsets.UTF_8));
                 String type = root.optString("type", "");
                 if ("outbox".equals(type)) {
+                    noteOutboxStage("websocket-send");
                     JSONArray ackItems = handleOutboxItems(root.optJSONArray("items"), classLoader, config);
                     if (ackItems.length() > 0) {
+                        if (FORCE_REREGISTER || configChanged(config)) return;
                         JSONObject ackBody = new JSONObject();
                         ackBody.put("type", "ack");
                         JSONObject ack = new JSONObject();
@@ -2463,14 +2590,16 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         ack.put("account_session", config.runtimeAccount.session.id);
                         ack.put("items", ackItems);
                         ackBody.put("ack", ack);
+                        noteOutboxStage("websocket-ack");
                         writeWebSocketText(output, ackBody.toString());
+                        noteOutboxStage("websocket-idle");
                     }
                 } else if ("ready".equals(type)) {
                     log("outbox websocket ready");
                 } else if ("error".equals(type)) {
                     String error = root.optString("error", "");
                     log("outbox websocket server error: " + error);
-                    if (error.contains("account session conflict")) {
+                    if (error.contains("account session conflict") || error.contains("device session lease lost")) {
                         FORCE_REREGISTER = true;
                         return;
                     }
@@ -2505,11 +2634,21 @@ public final class HookEntry implements IXposedHookLoadPackage {
             }
             if (!config.selfWxid.equals(item.optString("owner_wxid", ""))
                     || !config.device.equals(item.optString("device", ""))
-                    || !isCurrentAccount(config.runtimeAccount)) {
+                    || FORCE_REREGISTER || configChanged(config)) {
                 throw new IllegalStateException("Outbox account scope changed");
             }
             long started = System.currentTimeMillis();
-            SendResult result = sendText(classLoader, wxid, text, config.runtimeAccount);
+            String scope = outboxDeliveryScope(config);
+            String createdAt = item.optString("created_at", "");
+            SendResult result = OUTBOX_DELIVERIES.get(scope, id, wxid, text, createdAt);
+            if (result == null) {
+                result = sendText(classLoader, wxid, text, config.runtimeAccount);
+                // Keep the result before writing its ACK so a reconnect cannot
+                // enqueue the same task again if the ACK was lost in transit.
+                OUTBOX_DELIVERIES.remember(scope, id, wxid, text, createdAt, result);
+            } else {
+                log("outbox replay cached delivery acknowledgement id=" + id);
+            }
             logSlowOutboxStage("send", id, started);
             JSONObject ack = new JSONObject();
             ack.put("id", id);
@@ -2523,6 +2662,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
             ackItems.put(ack);
         }
         return ackItems;
+    }
+
+    private static String outboxDeliveryScope(BridgeConfig config) {
+        AccountSession session = config.runtimeAccount.session;
+        return OutboxDeliveryCache.scope(config.baseUrl, config.apiKey, config.device,
+                config.selfWxid, session.instanceId, session.id);
     }
 
     private static void verifyWebSocketHandshake(InputStream input, String key) throws Exception {
@@ -2659,16 +2804,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         output.write(frame.toByteArray());
         output.flush();
-    }
-
-    private static boolean supportsWebSocket(BridgeConfig config) {
-        try {
-            GatewayEndpoint.parse(config.baseUrl);
-            return true;
-        } catch (Throwable t) {
-            logWebSocketFailure("outbox websocket URL unavailable: " + shortError(t));
-            return false;
-        }
     }
 
     private static Socket openGatewaySocket(String host, int port, boolean tls) throws Exception {

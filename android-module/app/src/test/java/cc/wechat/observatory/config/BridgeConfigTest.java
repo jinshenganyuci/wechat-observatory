@@ -27,7 +27,7 @@ public final class BridgeConfigTest {
         BridgeConfig config = BridgeConfig.fromProperties(new Properties());
 
         assertEquals("", config.baseUrl);
-        assertEquals(false, config.outboxWebSocketEnabled);
+        assertEquals(true, config.outboxWebSocketEnabled);
     }
 
     @Test
@@ -38,6 +38,14 @@ public final class BridgeConfigTest {
         BridgeConfig config = BridgeConfig.fromProperties(properties);
 
         assertEquals(true, config.outboxWebSocketEnabled);
+    }
+
+    @Test
+    public void explicitHttpOnlySettingRemainsRespected() {
+        Properties properties = new Properties();
+        properties.setProperty("outbox_websocket_enabled", "0");
+
+        assertEquals(false, BridgeConfig.fromProperties(properties).outboxWebSocketEnabled);
     }
 
     @Test
@@ -60,6 +68,19 @@ public final class BridgeConfigTest {
         assertNotEquals(
                 BridgeConfig.fromProperties(first).signature,
                 BridgeConfig.fromProperties(second).signature);
+    }
+
+    @Test
+    public void sharingRevisionDoesNotChangeBusinessConfigurationSignature() {
+        Properties properties = new Properties();
+        properties.setProperty("bridge_url", "https://example.test");
+        properties.setProperty("api_key", "test-key");
+        properties.setProperty("__bridge_write_revision", "first-save");
+        BridgeConfig before = BridgeConfig.fromProperties(properties);
+        properties.setProperty("__bridge_write_revision", "second-save");
+        BridgeConfig after = BridgeConfig.fromProperties(properties);
+        assertEquals(before.signature, after.signature);
+        assertEquals(before.apiKey, after.apiKey);
     }
 
     @Test

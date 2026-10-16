@@ -3,7 +3,7 @@ package cc.wechat.observatory;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
+import java.util.Properties;
 import android.util.Log;
 
 import java.util.Arrays;
@@ -20,9 +20,7 @@ public final class BridgeConfigReceiver extends BroadcastReceiver {
         if (context == null || intent == null || !ACTION_SET_CONFIG.equals(intent.getAction())) {
             return;
         }
-        SharedPreferences prefs = context.getSharedPreferences(BridgeConfigProvider.PREFS_NAME, Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = prefs.edit();
-        editor.clear();
+        Properties values = new Properties();
         int count = 0;
         for (String key : ALLOWED_KEYS) {
             if (!intent.hasExtra(key)) {
@@ -30,14 +28,13 @@ public final class BridgeConfigReceiver extends BroadcastReceiver {
             }
             String value = intent.getStringExtra(key);
             if (value == null || value.trim().isEmpty()) {
-                editor.remove(key);
+                values.remove(key);
             } else {
-                editor.putString(key, value.trim());
+                values.setProperty(key, value.trim());
             }
             count++;
         }
-        editor.commit();
-        BridgeConfigFiles.writeExternalMirror(context, prefs);
-        Log.i(TAG, "stored bridge config keys=" + count);
+        ModuleConfigStore.SaveResult result = ModuleConfigStore.save(context, values);
+        Log.i(TAG, result.success ? "stored private bridge config keys=" + count : "bridge config save failed");
     }
 }

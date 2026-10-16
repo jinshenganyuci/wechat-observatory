@@ -27,7 +27,9 @@
 
 WeChat Observatory（微信看台）是一个通过 Android LSPosed 模块接入微信的网关控制台。手机模块负责在微信进程内观察消息、同步联系人、执行发送；服务端负责 API Key 身份、当前微信账号绑定、消息持久化、出站队列和 Web 管理台。
 
-此 fork 的 `0.1.13-wechat8079` 新增微信 Android **8.0.79 / 3200 arm64** 适配，已对目标 APK 做 DexSQL 静态核验；完整收发仍需实机验收。保留 8.0.74/3120、8.0.78/3180 的历史账号映射，其他版本明确拒绝注册。
+此 fork 的 `0.1.14-wechat8079` 包含微信 Android **8.0.79 / 3200 arm64** 适配，已对目标 APK 做 DexSQL 静态核验；完整收发仍需实机验收。保留 8.0.74/3120、8.0.78/3180 的历史账号映射，其他版本明确拒绝注册。
+
+0.1.14 新增微信内设置入口、模块私有配置和默认 WebSocket 下发；划掉 Observatory 不影响已启动的微信通道。首次前台读取、旧副本清理及实机验证边界见 [升级说明](docs/compatibility/wechat-8079-0114.md)。
 
 **服务端与模块需要一起升级。** 上游 main `31853e9` 不支持本模块要求的账户会话协议；只有更新 APK 仍无法使用。升级步骤、验证范围、日志与签名说明见 [8.0.79 兼容性说明](docs/compatibility/wechat-8079.md)。
 
@@ -168,7 +170,7 @@ cd android-module
 独立部署可在仓库根目录构建 Observatory 镜像，然后在你已有的 Compose 中替换 Observatory 与迁移服务的镜像，保留原数据库卷、网络与环境变量：
 
 ```bash
-docker build -t wechat-observatory:0.1.13-wechat8079 .
+docker build -t wechat-observatory:0.1.14-wechat8079 .
 ```
 
 从旧 main 升级必须先备份并执行数据库迁移，见 [本版本升级说明](docs/compatibility/wechat-8079.md)。不要用旧服务端镜像搭配新 APK。

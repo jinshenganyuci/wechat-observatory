@@ -24,6 +24,18 @@ public final class ConfigSourcesTest {
         assertSame(disabled, ConfigSources.firstAvailable(() -> disabled, () -> stale));
     }
 
+    @Test public void publishedEmptySnapshotNeverRestoresOlderCredentials() {
+        Properties cleared = new Properties();
+        cleared.setProperty("__bridge_write_revision", "new-save");
+        Properties selected = ConfigSources.firstAvailable(() -> cleared, () -> {
+            fail("Published cleared settings must not read an older provider or disk mirror");
+            return null;
+        });
+        BridgeConfig config = BridgeConfig.fromProperties(selected);
+        assertEquals("", config.apiKey);
+        assertEquals("", config.baseUrl);
+    }
+
     @Test public void unavailableLiveSourceAllowsMirrorFallback() {
         Properties mirror = new Properties();
         mirror.setProperty("bridge_url", "https://example.test");

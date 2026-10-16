@@ -90,12 +90,12 @@ android-module/app/build/outputs/apk/debug/
 2. 在 LSPosed 中启用模块。
 3. 作用域选择微信 `com.tencent.mm`。
 4. 重启微信或重启手机。
-5. 打开手机桌面的 **WeChat Observatory**。
+5. 打开 **微信 → 我 → 设置 → WeChat Observatory**（8.0.79 / 3200）。首次启动会短暂读取模块私有配置。
 6. 填写 Observatory 服务地址；默认是
    `https://47.108.232.203/observatory`。HTTPS 地址使用 WSS 出站流，
    WebSocket 失败时自动回退到 HTTP 轮询。
 7. 填写 Web 管理台生成的 API Key。
-8. 保存配置并重启微信。
+8. 在微信内保存配置，连接会重建；如果从桌面 Observatory 修改配置，则强行停止并重新打开微信。升级旧版本后，在桌面应用执行一次“清理旧版配置副本”，查看清理结果。
 
 不要手动填写 `wxid`。模块会在微信进程内自动识别当前登录账号。
 

@@ -2,7 +2,7 @@ package cc.wechat.observatory;
 
 import android.app.Activity;
 import android.content.Context;
-import android.content.SharedPreferences;
+import java.util.Properties;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.Editable;
@@ -32,7 +32,7 @@ import cc.wechat.observatory.gateway.GatewayEndpoint;
 public final class SettingsActivity extends Activity {
     private static final String DEFAULT_POLL_INTERVAL_MS = "1000";
     private static final String DEFAULT_POLL_LIMIT = "1";
-    private static final String DEFAULT_OUTBOX_WEBSOCKET_ENABLED = "0";
+    private static final String DEFAULT_OUTBOX_WEBSOCKET_ENABLED = "1";
     private static final String DEFAULT_CONTACT_SYNC_INTERVAL_MS = "600000";
     private static final String DEFAULT_CONTACT_SYNC_LIMIT = String.valueOf(BridgeConfig.DEFAULT_CONTACT_SYNC_LIMIT);
     private static final String DEFAULT_CONTACT_INCLUDE_CHATROOMS = "1";
@@ -64,6 +64,8 @@ public final class SettingsActivity extends Activity {
     private final Map<String, EditText> fields = new LinkedHashMap<>();
     private TextView statusView;
     private TextView connectionStatus;
+    private TextView sharingStatus;
+    private Properties configPreferences = new Properties();
     private Button testButton;
     private Button saveButton;
     private int probeGeneration;
@@ -84,23 +86,8 @@ public final class SettingsActivity extends Activity {
         showRuntimeStatus();
     }
 
-    /** Shows whether this phone serves its Key or waits on standby (written by the WeChat process). */
     private void showRuntimeStatus() {
-        if (statusView == null) {
-            return;
-        }
-        SharedPreferences status = getSharedPreferences(BridgeConfigProvider.STATUS_PREFS_NAME, Context.MODE_PRIVATE);
-        String state = status.getString("state", "");
-        String detail = status.getString("detail", "");
-        long updatedAt = status.getLong("updated_at", 0L);
-        String time = updatedAt <= 0L ? "" : android.text.format.DateFormat.format("MM-dd HH:mm:ss", updatedAt).toString();
-        if ("standby".equals(state)) {
-            statusView.setText(getString(R.string.status_standby, detail, time));
-        } else if ("active".equals(state)) {
-            statusView.setText(getString(R.string.status_active, detail, time));
-        } else {
-            statusView.setText(R.string.status_unknown);
-        }
+        if (statusView != null) statusView.setText("日常设置请进入微信 → 设置 → WeChat Observatory。配置只保存在本应用私有目录，卸载本应用时删除。");
     }
 
     private View createContentView() {
@@ -133,6 +120,12 @@ public final class SettingsActivity extends Activity {
         addField(root, "bridge_url", R.string.label_bridge_url, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addField(root, "api_key", R.string.label_api_key, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         maskSensitiveFields();
+        sharingStatus = new TextView(this);
+        sharingStatus.setTextSize(14);
+        sharingStatus.setTextIsSelectable(true);
+        sharingStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        sharingStatus.setPadding(0, dp(14), 0, dp(8));
+        root.addView(sharingStatus);
         connectionStatus = new TextView(this);
         connectionStatus.setText("尚未测试连接。保存配置不代表微信模块已注册。");
         connectionStatus.setTextSize(15);
@@ -167,6 +160,31 @@ public final class SettingsActivity extends Activity {
         saveParams.topMargin = dp(12);
         root.addView(saveButton, saveParams);
 
+        Button cleanup = new Button(this);
+        cleanup.setText("清理旧版配置副本");
+        cleanup.setAllCaps(false);
+        cleanup.setOnClickListener(v -> {
+            cleanup.setEnabled(false);
+            sharingStatus.setText("正在清理旧版副本；如需删除旧版 root 文件，系统可能请求 root 授权…");
+            Context context = getApplicationContext();
+            CONFIG_WRITER.execute(() -> {
+                String cleanupResult;
+                try {
+                    ModuleConfigStore.read(context); // Migration must be durable before any old copy is deleted.
+                    cleanupResult = LegacyConfigCleanup.cleanup(context, true);
+                } catch (java.io.IOException | RuntimeException failure) {
+                    cleanupResult = "旧配置尚未安全迁移，已取消清理，请检查存储空间后重试。";
+                }
+                final String result = cleanupResult;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    sharingStatus.setText(result);
+                    cleanup.setEnabled(true);
+                });
+            });
+        });
+        root.addView(cleanup);
+
         TextView footer = new TextView(this);
         footer.setText(R.string.settings_restart_hint);
         footer.setTextSize(13);
@@ -185,6 +203,7 @@ public final class SettingsActivity extends Activity {
 
         EditText editText = new EditText(this);
         editText.setSingleLine(true);
+        editText.setSaveEnabled(false);
         editText.setInputType(inputType);
         editText.setTextSize(15);
         editText.setSelectAllOnFocus(false);
@@ -213,12 +232,24 @@ public final class SettingsActivity extends Activity {
     }
 
     private void loadValues() {
-        SharedPreferences prefs = getSharedPreferences(BridgeConfigProvider.PREFS_NAME, Context.MODE_PRIVATE);
+        try { configPreferences = ModuleConfigStore.read(this); }
+        catch (java.io.IOException failure) {
+            sharingStatus.setText("配置读取失败，请检查存储空间。");
+            return;
+        }
+        Properties prefs = configPreferences;
         for (String key : BridgeConfigProvider.CONFIG_KEYS) {
             if (fields.containsKey(key)) {
-                setValue(key, prefs.getString(key, DEFAULTS.get(key)));
+                setValue(key, prefs.getProperty(key, DEFAULTS.get(key)));
             }
         }
+        showSharingStatus(false);
+    }
+
+    private void showSharingStatus(boolean saved) {
+        sharingStatus.setText(saved
+                ? "配置已保存在 Observatory 私有目录。请强行停止并重新打开微信使此处修改生效；以后可直接在微信设置中修改。"
+                : "配置由 Observatory 保存，微信启动后读取一次；划掉本应用不会中断微信内的通道。卸载本应用会删除配置。");
     }
 
     private boolean saveValues() {
@@ -238,30 +269,28 @@ public final class SettingsActivity extends Activity {
             bridgeUrlField.setText(bridgeUrl);
         }
 
-        SharedPreferences prefs = getSharedPreferences(BridgeConfigProvider.PREFS_NAME, Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = prefs.edit();
+        Properties values = new Properties();
+        values.putAll(configPreferences);
         for (String key : BridgeConfigProvider.CONFIG_KEYS) {
             if ("enabled".equals(key)) {
-                editor.putString(key, "1");
+                values.setProperty(key, "1");
                 continue;
             }
             EditText field = fields.get(key);
             if (field != null) {
                 String value = field.getText().toString().trim();
-                if (value.isEmpty()) {
-                    editor.remove(key);
-                } else {
-                    editor.putString(key, value);
-                }
+                if (value.isEmpty()) values.remove(key);
+                else values.setProperty(key, value);
             }
         }
-        if (!editor.commit()) {
-            connectionStatus.setText("配置保存失败，请检查手机存储空间后重试。");
+        ModuleConfigStore.SaveResult saved = ModuleConfigStore.save(this, values);
+        if (!saved.success) {
+            connectionStatus.setText(saved.error);
             return false;
         }
-        Context appContext = getApplicationContext();
-        CONFIG_WRITER.execute(() -> BridgeConfigFiles.writeExternalMirror(appContext, prefs));
+        configPreferences = values;
         maskSensitiveFields();
+        showSharingStatus(true);
         connectionStatus.setText("配置已保存，连接尚未验证。请重启微信后测试连接。");
         Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_LONG).show();
         return true;
