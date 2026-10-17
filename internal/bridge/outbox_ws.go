@@ -264,13 +264,17 @@ func (s *HTTPServer) readOutboxWS(
 		case wsOpText:
 			var msg outboxWSMessage
 			if err := json.Unmarshal(payload, &msg); err != nil {
-				outgoing <- outboxWSMessage{Type: "error", Error: "invalid json: " + err.Error(), Time: time.Now().Unix()}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: "invalid json: " + err.Error(), Time: time.Now().Unix()}) {
+					return
+				}
 				continue
 			}
 			switch strings.ToLower(strings.TrimSpace(msg.Type)) {
 			case "ack":
 				if msg.Ack == nil {
-					outgoing <- outboxWSMessage{Type: "error", Error: "ack payload is required", Time: time.Now().Unix()}
+					if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: "ack payload is required", Time: time.Now().Unix()}) {
+						return
+					}
 					continue
 				}
 				msg.Ack.APIKey = apiKey
@@ -279,27 +283,47 @@ func (s *HTTPServer) readOutboxWS(
 				msg.Ack.AccountSession = accountSession
 				items, err := s.service.AckOutbox(withClientReceipt(ctx, receivedAt), *msg.Ack)
 				if err != nil {
-					outgoing <- outboxWSMessage{Type: "error", Error: err.Error(), Time: time.Now().Unix()}
+					if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: err.Error(), Time: time.Now().Unix()}) {
+						return
+					}
 					if isModuleAuthError(err) {
 						return
 					}
 					continue
 				}
 				publishClientReceipt(activity, receivedAt)
-				outgoing <- outboxWSMessage{Type: "ack", OK: true, Items: items, Time: time.Now().Unix()}
-				outgoing <- outboxWSMessage{Type: "wake"}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "ack", OK: true, Items: items, Time: time.Now().Unix()}) {
+					return
+				}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "wake"}) {
+					return
+				}
 			case "poll", "wake":
 				publishClientReceipt(activity, receivedAt)
 				publishClientReceipt(presence, receivedAt)
-				outgoing <- outboxWSMessage{Type: "wake"}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "wake"}) {
+					return
+				}
 			case "pong":
 				publishClientReceipt(activity, receivedAt)
 				publishClientReceipt(presence, receivedAt)
 				continue
 			default:
-				outgoing <- outboxWSMessage{Type: "error", Error: "unknown message type", Time: time.Now().Unix()}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: "unknown message type", Time: time.Now().Unix()}) {
+					return
+				}
 			}
 		}
+	}
+}
+
+// Stop a blocked response send when the connection closes.
+func sendOutboxWSMessage(ctx context.Context, outgoing chan<- outboxWSMessage, message outboxWSMessage) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case outgoing <- message:
+		return true
 	}
 }
 
@@ -316,10 +340,12 @@ func observeClientReceipts(ctx context.Context, cancel context.CancelFunc, recei
 			if ctx.Err() != nil {
 				return
 			}
-			if err := observe(ctx, receivedAt); err != nil {
+			if err := observe(ctx, receivedAt); isModuleAuthError(err) {
 				cancel()
 				return
 			}
+			// A storage failure is not evidence of a revoked session. Wait for
+			// the next actual receipt instead of inventing a new heartbeat time.
 		}
 	}
 }

@@ -32,7 +32,7 @@ import {
 } from "./api";
 import type { DeviceApiKey, DeviceModule, ModuleInstallation } from "./types";
 import { InstallationList, type InstallationNotice } from "@/components/InstallationList";
-import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, parseApiError } from "@/installations";
+import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, installationIsStandby, parseApiError } from "@/installations";
 import "../../admin/src/index.css";
 
 const PASSWORD_KEY = "wgc_device_admin_password";
@@ -194,7 +194,7 @@ function App() {
 
   const switchInstallation = async (installation: ModuleInstallation) => {
     const device = selectedDevice;
-    if (!credential || !device || installation.active || switchingInstallation !== null) return;
+    if (!credential || !device || !installationIsStandby(installation) || switchingInstallation !== null) return;
     if (!window.confirm(`确认切到 ${installationDisplayName(installation)}？目标手机下一次心跳时接管。`)) return;
     setSwitchingInstallation(installation.id);
     setInstallationNotice(null);
@@ -297,6 +297,7 @@ function App() {
                 </Button>
               </div>
               <InstallationList
+                compact
                 className="rounded-lg border p-3 md:col-span-2"
                 installations={selectedModule?.installations}
                 switchRequest={selectedModule?.switch_request}

@@ -331,11 +331,9 @@ func (s *Service) AckOutbox(ctx context.Context, req ModuleAckRequest) (items []
 		if _, err := req.Validate(s.cfg.DefaultDevice); err != nil {
 			return err
 		}
-		if receivedAt := clientReceipt(ctx); !receivedAt.IsZero() {
-			if err := s.observeClientPresenceLocked(ctx, req.APIKey, owner, req.AccountSession, receivedAt); err != nil {
-				return err
-			}
-		}
+		// Business ACK persistence must not depend on auxiliary presence writes.
+		// WS control frames and HTTP polls refresh installation presence; the
+		// ACK itself records its real receipt time in module runtime activity.
 		items, err = s.ackOutbox(ctx, req)
 		return err
 	})

@@ -23,7 +23,7 @@ export type ModuleStatus = {
   switch_request?: ModuleSwitchRequest;
 };
 
-/** One phone (installation) that used a device binding; the current phone is listed first. */
+/** An installation record; upgrades/reconfiguration can create records on the same phone. */
 export type ModuleInstallation = {
   id: number;
   short_id: string;
@@ -45,6 +45,23 @@ export type ModuleSwitchRequest = {
   installation_id: number;
   expires_at: string;
 };
+
+export type OutboxStatusItem = {
+  id: number;
+  device: string;
+  owner_wxid?: string;
+  wxid: string;
+  text: string;
+  status: string;
+  attempt_count: number;
+  last_error?: string;
+  created_at?: string;
+  updated_at?: string;
+  chat_record_id?: number;
+  lease_until?: string;
+};
+
+export type OutboxFilter = "active" | "failed" | "all";
 
 export type ApiKey = {
   code: string;

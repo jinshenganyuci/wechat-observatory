@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -47,10 +48,10 @@ func (s *Store) RecordActiveClientPresence(ctx context.Context, binding bridge.A
 	var enabled bool
 	if err := tx.QueryRowContext(ctx, `SELECT credential_id, auth_version, enabled FROM bridge_api_keys
 		WHERE code=? AND device=? FOR UPDATE`, apiKey, binding.Device).Scan(&credential, &version, &enabled); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+		if errors.Is(err, sql.ErrNoRows) {
+			return bridge.ErrAccountSession
 		}
-		return bridge.ErrAccountSession
+		return err
 	}
 	if !enabled || credential != binding.CredentialID || version != binding.AuthVersion {
 		return bridge.ErrAccountSession

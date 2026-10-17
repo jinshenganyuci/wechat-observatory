@@ -36,6 +36,7 @@ import {
   getApiKeys,
   getMessages,
   getModules,
+  getOutbox,
   openLiveEvents,
   parseLiveMessageEvent,
   publicPath,
@@ -61,9 +62,10 @@ import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { OutboxList } from "@/components/OutboxList";
 import { InstallationList, InstallationSwitchHint, type InstallationNotice } from "@/components/InstallationList";
-import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, parseApiError } from "@/installations";
-import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleInstallation, ModuleStatus, StoredMessage } from "@/types";
+import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, installationIsStandby, parseApiError } from "@/installations";
+import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleInstallation, ModuleStatus, StoredMessage, OutboxStatusItem, OutboxFilter } from "@/types";
 import "./index.css";
 
 const PASSWORD_KEY = "wgc_admin_password";
@@ -101,6 +103,14 @@ function App() {
   const [draft, setDraft] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [sending, setSending] = React.useState(false);
+  const sendInFlight = React.useRef(false);
+  const [outboxItems, setOutboxItems] = React.useState<OutboxStatusItem[]>([]);
+  const [outboxFilter, setOutboxFilter] = React.useState<OutboxFilter>("active");
+  const [outboxChatOnly, setOutboxChatOnly] = React.useState(false);
+  const [outboxNow, setOutboxNow] = React.useState(Date.now());
+  const [outboxError, setOutboxError] = React.useState("");
+  const [outboxLoading, setOutboxLoading] = React.useState(false);
+  const [submittedOutboxId, setSubmittedOutboxId] = React.useState<number>();
   const [savingAdmin, setSavingAdmin] = React.useState(false);
   const [newApiKey, setNewApiKey] = React.useState("");
   const [newApiKeyDevice, setNewApiKeyDevice] = React.useState("");
@@ -317,6 +327,51 @@ function App() {
     [adminPassword, selectedOwnerWxid, selectedGeneration]
   );
 
+  const refreshOutbox = React.useCallback(async () => {
+    if (!adminPassword || !selectedDevice || !selectedOwnerWxid) {
+      setOutboxItems([]);
+      return;
+    }
+    const wxid = outboxChatOnly ? selectedWxid : undefined;
+    if (outboxChatOnly && !wxid) { setOutboxItems([]); return; }
+    const ticket = accountScope.current.begin("outbox", selectedDevice, selectedOwnerWxid, wxid);
+    if (!ticket) return;
+    setOutboxLoading(true);
+    try {
+      const payload = await getOutbox({ password: adminPassword, device: selectedDevice,
+        ownerWxid: selectedOwnerWxid, wxid, status: outboxFilter });
+      if (!accountScope.current.matches(ticket)) return;
+      setOutboxItems((payload.items || []).filter((item) => belongsToAccount(item, selectedDevice, selectedOwnerWxid)
+        && (!wxid || item.wxid === wxid)));
+      const now = Date.parse(payload.server_time);
+      setOutboxNow(Number.isFinite(now) ? now : Date.now());
+      setOutboxError("");
+    } catch (error) {
+      if (!accountScope.current.matches(ticket)) return;
+      setOutboxError(`发送记录读取失败：${parseApiError(error, "请稍后刷新").message}`);
+    } finally {
+      if (accountScope.current.matches(ticket)) setOutboxLoading(false);
+    }
+  }, [adminPassword, selectedDevice, selectedOwnerWxid, selectedGeneration, selectedWxid, outboxChatOnly, outboxFilter]);
+
+  const refreshOutboxRef = React.useRef(refreshOutbox);
+  refreshOutboxRef.current = refreshOutbox;
+
+  const changeOutboxFilter = (filter: OutboxFilter) => {
+    if (filter === outboxFilter) return;
+    accountScope.current.invalidate("outbox");
+    setOutboxItems([]); setOutboxError(""); setOutboxFilter(filter);
+  };
+  const changeOutboxChatOnly = (value: boolean) => {
+    accountScope.current.invalidate("outbox");
+    setOutboxItems([]); setOutboxError(""); setOutboxChatOnly(value);
+  };
+
+  React.useEffect(() => {
+    setOutboxItems([]); setOutboxError("");
+    void refreshOutbox();
+  }, [refreshOutbox, submittedOutboxId]);
+
   const refreshAll = React.useCallback(async () => {
     setLoading(true);
     setNotice("正在连接服务端");
@@ -343,13 +398,14 @@ function App() {
       if (device && wxid) {
         await refreshMessages(device, wxid, ownerWxid);
       }
+      await refreshOutboxRef.current();
       setNotice(`已刷新 ${formatBeijingClock()}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "请求失败");
     } finally {
       setLoading(false);
     }
-  }, [adminPassword, refreshApiKeys, refreshContacts, refreshMessages, refreshModules, refreshRecentMessages, selectedDevice, selectedWxid]);
+  }, [adminPassword, refreshApiKeys, refreshContacts, refreshMessages, refreshModules, refreshRecentMessages, refreshOutbox, selectedDevice, selectedWxid]);
 
   React.useLayoutEffect(() => {
     loadedMessageChatRef.current = "";
@@ -361,6 +417,7 @@ function App() {
     setDraft("");
     setSendOpen(false);
     setSending(false);
+    setOutboxItems([]); setOutboxError(""); setOutboxLoading(false); setSubmittedOutboxId(undefined);
   }, [selectedScopeKey]);
 
   React.useEffect(() => {
@@ -429,9 +486,10 @@ function App() {
       void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch(() => undefined);
       void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch(() => undefined);
       void refreshModules().catch(() => undefined);
+      void refreshOutbox();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, refreshMessages, refreshModules, refreshRecentMessages, selectedDevice, selectedOwnerWxid, selectedWxid]);
+  }, [autoRefresh, refreshMessages, refreshModules, refreshRecentMessages, refreshOutbox, selectedDevice, selectedOwnerWxid, selectedWxid]);
 
   React.useEffect(() => {
     if (!adminPassword || !autoRefresh) {
@@ -476,6 +534,7 @@ function App() {
     setContacts([]);
     setMessages([]);
     setRecentMessages([]);
+    setOutboxItems([]); setOutboxError("");
     setSelectedWxid("");
     loadedMessageChatRef.current = "";
     pendingBottomScrollChatRef.current = "";
@@ -484,6 +543,7 @@ function App() {
   const selectChat = (wxid: string) => {
     pendingBottomScrollChatRef.current = wxid;
     accountScope.current.selectChat(wxid);
+    setOutboxItems([]); setOutboxError("");
     setSending(false);
     setDraft("");
     setSendOpen(false);
@@ -529,29 +589,28 @@ function App() {
   };
 
   const submitSend = async () => {
-    if (!selectedDevice || !selectedWxid || !draft.trim() || selectedModuleOffline) {
-	  if (selectedModuleOffline) setNotice("当前微信离线，不能创建发送任务");
-	  return;
-	}
-    const ticket = accountScope.current.begin("send", selectedDevice, selectedOwnerWxid);
+    if (sendInFlight.current) { setNotice("上一条请求仍在提交，请等待结果后再发送"); return; }
+    if (!adminPassword || !selectedDevice || !selectedWxid || !draft.trim() || selectedModuleOffline) {
+      if (selectedModuleOffline) setNotice("当前微信离线，不能创建发送任务");
+      return;
+    }
+    const ticket = accountScope.current.begin("send", selectedDevice, selectedOwnerWxid, selectedWxid);
     if (!ticket) return;
+    const sentDevice = selectedDevice, sentWxid = selectedWxid, submittedDraft = draft;
+    sendInFlight.current = true;
     setSending(true);
-    setNotice("正在加入发送队列");
+    setNotice("正在创建发送任务");
     try {
-      const sentDevice = selectedDevice;
-      const sentWxid = selectedWxid;
-      await sendText({
-        password: adminPassword,
-        device: sentDevice,
-        ownerWxid: selectedOwnerWxid,
-        accountGeneration: selectedGeneration,
-        wxid: sentWxid,
-        text: draft.trim()
-      });
+      const result = await sendText({ password: adminPassword, device: sentDevice, ownerWxid: selectedOwnerWxid,
+        accountGeneration: selectedGeneration, wxid: sentWxid, text: submittedDraft.trim() });
       if (!accountScope.current.matches(ticket)) return;
-      setDraft("");
+      if (!result.ok || !result.outbox_id) throw new Error("提交结果未确认，请先查看发送记录，避免重复提交");
+      setDraft((current) => current === submittedDraft ? "" : current);
       setSendOpen(false);
-      setNotice("消息已加入模块发送队列");
+      accountScope.current.invalidate("outbox");
+      setSubmittedOutboxId(result.outbox_id);
+      setOutboxFilter("all");
+      setNotice(`任务 #${result.outbox_id} 已创建，等待微信处理；结果见发送记录`);
       void refreshModules().catch(() => undefined);
       window.setTimeout(() => {
         if (!accountScope.current.matches(ticket)) return;
@@ -559,8 +618,13 @@ function App() {
         void refreshModules().catch(() => undefined);
       }, 800);
     } catch (error) {
-      if (accountScope.current.matches(ticket)) setNotice(error instanceof Error ? error.message : "发送失败");
+      if (accountScope.current.matches(ticket)) {
+        const info = parseApiError(error, "提交结果未确认");
+        setNotice(info.code ? info.message : `${info.message}。未确认任务是否创建，请先查看发送记录，避免重复提交。`);
+        void refreshOutbox();
+      }
     } finally {
+      sendInFlight.current = false;
       if (accountScope.current.matches(ticket)) setSending(false);
     }
   };
@@ -649,7 +713,7 @@ function App() {
   };
 
   const requestInstallationSwitch = async (device: string, installation: ModuleInstallation) => {
-    if (!adminPassword || !device || installation.active || switchingInstallation) return;
+    if (!adminPassword || !device || !installationIsStandby(installation) || switchingInstallation) return;
     const ok = window.confirm(`确认把设备 ${device} 切到 ${installationDisplayName(installation)}？目标手机下一次心跳时接管。`);
     if (!ok) return;
     setSwitchingInstallation({ device, id: installation.id });
@@ -729,7 +793,7 @@ function App() {
                 <Smartphone className="h-4 w-4" />
                 手机模块
               </CardTitle>
-              <Badge variant="secondary">{modules.length} 台</Badge>
+              <Badge variant="secondary">{modules.length} 个设备绑定</Badge>
             </CardHeader>
             <CardContent className="grid gap-2">
               {modules.length === 0 ? (
@@ -760,7 +824,12 @@ function App() {
                           <span>失败：{item.failed_outbox ?? 0}</span>
                         </div>
                       </button>
+                      <Button className="mx-3 mb-2" variant="outline" size="xs" onClick={() => {
+                        if (item.device !== selectedDevice) selectDevice(item.device);
+                        window.requestAnimationFrame(() => document.getElementById("send-records")?.scrollIntoView({ block: "start", behavior: "smooth" }));
+                      }}>查看发送记录</Button>
                       <InstallationList
+                        compact
                         className="border-t border-border/70 px-3 pb-3 pt-2"
                         installations={item.installations}
                         switchRequest={item.switch_request}
@@ -799,7 +868,7 @@ function App() {
         </aside>
 
         <section className="grid min-w-0 gap-4">
-          <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
             <MetricCard title="当前设备" value={selectedModule?.device || "-"} icon={<Smartphone className="h-4 w-4" />} />
             <MetricCard title="运行状态" value={statusText(selectedModule?.runtime_status)} icon={<Activity className="h-4 w-4" />} />
             <MetricCard title="发送成功" value={String(sentCount)} icon={<CheckCircle2 className="h-4 w-4" />} />
@@ -857,7 +926,7 @@ function App() {
                 </div>
 
                 {messageListActive ? (
-                  <div className="grid max-h-[620px] min-h-[420px] content-start gap-2 overflow-y-auto overflow-x-hidden pr-1">
+                  <div className="grid max-h-[300px] min-h-[120px] content-start gap-2 overflow-y-auto overflow-x-hidden pr-1 lg:max-h-[620px] lg:min-h-[420px]">
                     {visibleRecentMessages.length === 0 ? (
                       <EmptyState
                         icon={<MessageCircle className="h-5 w-5" />}
@@ -891,7 +960,7 @@ function App() {
                     )}
                   </div>
                 ) : (
-                <div className="grid max-h-[620px] min-h-[420px] content-start gap-2 overflow-y-auto overflow-x-hidden pr-1">
+                <div className="grid max-h-[300px] min-h-[120px] content-start gap-2 overflow-y-auto overflow-x-hidden pr-1 lg:max-h-[620px] lg:min-h-[420px]">
                   {visibleContacts.length === 0 ? (
                     <EmptyState
                       icon={<Users className="h-5 w-5" />}
@@ -978,7 +1047,7 @@ function App() {
                   onScroll={cancelPendingBottomScroll}
                   onTouchStart={cancelPendingBottomScroll}
                   onWheel={cancelPendingBottomScroll}
-                  className="grid h-[calc(100vh-492px)] min-h-[440px] content-start gap-3 overflow-y-auto overflow-x-hidden rounded-lg border bg-card p-3"
+                  className="grid h-[360px] min-h-[240px] content-start gap-3 overflow-y-auto overflow-x-hidden rounded-lg border bg-card p-3 lg:h-[calc(100vh-492px)] lg:min-h-[440px]"
                 >
                   {!selectedWxid ? (
                     <EmptyState icon={<MessageCircle className="h-5 w-5" />} text="请从好友列表选择一个对象" />
@@ -1008,18 +1077,25 @@ function App() {
                   />
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs text-muted-foreground">
-                      {selectedModuleOffline ? "当前微信离线，发送任务已清空" : pendingCount > 0 ? `待发送 ${pendingCount} 条` : failedCount > 0 ? `失败 ${failedCount} 条` : "发送队列空闲"}
+                      {selectedModuleOffline ? "当前微信离线，请查看发送记录确认任务状态" : pendingCount > 0 ? `待发送 ${pendingCount} 条` : failedCount > 0 ? `失败 ${failedCount} 条` : "发送队列空闲"}
                     </span>
                     <Button onClick={() => void submitSend()} disabled={sending || selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid || !draft.trim()}>
                       <Send className="h-4 w-4" />
-                      {sending ? "发送中" : "加入队列"}
+                      {sending ? "提交中" : "加入队列"}
                     </Button>
                   </div>
                 </div>
+                <OutboxList items={outboxItems} filter={outboxFilter} onFilter={changeOutboxFilter}
+                  chatOnly={outboxChatOnly} onChatOnly={changeOutboxChatOnly} hasChat={!!selectedWxid}
+                  now={outboxNow} error={outboxError} loading={outboxLoading} offline={selectedModuleOffline}
+                  enabled={!!adminPassword && !!selectedDevice && !!selectedOwnerWxid}
+                  onRefresh={() => void refreshOutbox()} contacts={contactByWxid} submittedId={submittedOutboxId} />
               </CardContent>
             </Card>
           </div>
 
+          <details className="rounded-lg border bg-card">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium">API Key 与设备管理</summary>
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -1154,7 +1230,10 @@ function App() {
               </div>
             </CardContent>
           </Card>
+          </details>
 
+          <details className="rounded-lg border bg-card">
+            <summary className="cursor-pointer px-4 py-3 text-sm font-medium">模块运行明细</summary>
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -1221,6 +1300,7 @@ function App() {
               </div>
             </CardContent>
           </Card>
+          </details>
         </section>
       </main>
 
@@ -1243,7 +1323,7 @@ function App() {
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder="输入要发送到微信的文本"
                 autoFocus
-                disabled={selectedModuleOffline}
+                disabled={selectedModuleOffline || sending}
               />
             </div>
           </div>
@@ -1253,7 +1333,7 @@ function App() {
             </Button>
             <Button type="button" onClick={() => void submitSend()} disabled={sending || selectedModuleOffline || !draft.trim()}>
               <Send className="h-4 w-4" />
-              {sending ? "发送中" : "加入队列"}
+              {sending ? "提交中" : "加入队列"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1385,14 +1465,14 @@ function ConnectionBadge({ connected, enabled }: { connected: boolean; enabled: 
     return (
       <Badge variant="secondary">
         <WifiOff className="mr-1 h-3.5 w-3.5" />
-        实时关闭
+        网页实时关闭
       </Badge>
     );
   }
   return (
     <Badge variant={connected ? "success" : "warning"}>
       {connected ? <Wifi className="mr-1 h-3.5 w-3.5" /> : <WifiOff className="mr-1 h-3.5 w-3.5" />}
-      {connected ? "实时已连接" : "实时待连接"}
+      {connected ? "网页已连接" : "网页连接中"}
     </Badge>
   );
 }

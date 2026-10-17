@@ -1,9 +1,10 @@
-import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleStatus, ModuleSwitchRequest, StoredMessage } from "@/types";
+import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleStatus, ModuleSwitchRequest, StoredMessage, OutboxStatusItem, OutboxFilter } from "@/types";
 
 type ApiOptions = {
   password: string;
   method?: "GET" | "POST" | "DELETE";
   body?: unknown;
+  timeoutMs?: number;
 };
 
 const OBSERVATORY_MOUNT = "/observatory";
@@ -22,16 +23,17 @@ async function requestJSON<T>(path: string, options: ApiOptions): Promise<T> {
   if (options.body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(publicPath(path), {
-    method: options.method ?? "GET",
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(text || `HTTP ${response.status}`);
-  }
-  return JSON.parse(text) as T;
+  const controller = new AbortController();
+  const timeout = options.timeoutMs ? window.setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
+  try {
+    const response = await fetch(publicPath(path), {
+      method: options.method ?? "GET", headers, signal: controller.signal,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body)
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
+    return JSON.parse(text) as T;
+  } finally { if (timeout !== undefined) window.clearTimeout(timeout); }
 }
 
 export async function getModules(password: string) {
@@ -166,6 +168,7 @@ export async function sendText(params: {
   return requestJSON<{ ok: boolean; outbox_id?: number }>("/api/send/text", {
     password: params.password,
     method: "POST",
+    timeoutMs: 20000,
     body: {
       device: params.device,
       owner_wxid: params.ownerWxid,
@@ -174,6 +177,14 @@ export async function sendText(params: {
       text: params.text
     }
   });
+}
+
+export async function getOutbox(params: {
+  password: string; device: string; ownerWxid: string; wxid?: string; status: OutboxFilter;
+}) {
+  const search = new URLSearchParams({ device: params.device, owner_wxid: params.ownerWxid, status: params.status, limit: "50" });
+  if (params.wxid) search.set("wxid", params.wxid);
+  return requestJSON<{ items: OutboxStatusItem[]; server_time: string }>(`/api/outbox?${search}`, { password: params.password, timeoutMs: 10000 });
 }
 
 export function openLiveEvents(password: string) {

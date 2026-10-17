@@ -41,3 +41,18 @@ test('shared peers only resolve against the selected owner and device', () => {
   assert.equal(belongsToAccount({ device: 'phone', owner_wxid: 'A' }, 'phone', 'A'), true);
   assert.equal(belongsToAccount({ device: 'phone' }, 'phone', ''), false);
 });
+
+test('outbox responses expire after filter, chat and account generation changes', () => {
+  const scope = new AccountScope();
+  scope.update('phone', 'A', 1);
+  scope.selectChat('friend');
+  const filtered = scope.begin('outbox', 'phone', 'A', 'friend');
+  scope.invalidate('outbox');
+  assert.equal(scope.matches(filtered), false);
+  const oldChat = scope.begin('outbox', 'phone', 'A', 'friend');
+  scope.selectChat('other');
+  assert.equal(scope.matches(oldChat), false);
+  const oldAccount = scope.begin('outbox', 'phone', 'A');
+  scope.update('phone', 'A', 3);
+  assert.equal(scope.matches(oldAccount), false);
+});
