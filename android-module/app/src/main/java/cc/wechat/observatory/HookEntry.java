@@ -57,6 +57,9 @@ import cc.wechat.observatory.config.ConfigOperationGuard;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
 import cc.wechat.observatory.gateway.OutboxReconnectPolicy;
+import cc.wechat.observatory.gateway.SocketWriteDeadline;
+import cc.wechat.observatory.util.MainThreadDispatcher;
+import cc.wechat.observatory.util.RuntimeConnectionMonitor;
 import cc.wechat.observatory.model.MessagePayload;
 import cc.wechat.observatory.util.BridgeLogger;
 import cc.wechat.observatory.util.HookInstallation;
@@ -133,6 +136,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final long FOREGROUND_DEBOUNCE_MS = 1500L;
     private static volatile AccountSessionAllocator SESSION_ALLOCATOR;
     private static volatile Socket ACTIVE_OUTBOX_SOCKET;
+    private static final java.util.concurrent.atomic.AtomicLong CONNECTION_REVISION =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final Object OUTBOX_WAKEUP = new Object();
+    private static volatile long CONFIG_REVISION;
+    private static volatile RuntimeConnectionMonitor CONNECTION_MONITOR;
     private static volatile String RUNTIME_ROLE = "尚未注册";
     private static final AtomicBoolean CLEANED_LEGACY_SESSION = new AtomicBoolean();
     private static final AtomicBoolean REMOVAL_RECEIVER_INSTALLED = new AtomicBoolean();
@@ -141,17 +149,34 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
 
     public static String runtimeStatusText() {
-        return RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE;
+        String status = RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE;
+        RuntimeConnectionMonitor monitor = CONNECTION_MONITOR;
+        if (monitor == null) return status;
+        try {
+            RuntimeConnectionMonitor.Snapshot state = monitor.snapshot();
+            String screen = state.interactive == null ? "未知" : state.interactive ? "亮屏" : "息屏";
+            String idle = state.deviceIdle == null ? "未知" : state.deviceIdle ? "是" : "否";
+            String network = "validated".equals(state.networkState) ? "已连接"
+                    : "none".equals(state.networkState) ? "无连接"
+                    : "available_unvalidated".equals(state.networkState) ? "待验证" : "未知";
+            return status + "\n屏幕：" + screen + " · 系统休眠：" + idle + "\n网络：" + network;
+        } catch (Throwable ignored) { return status; }
     }
 
     public static void configurationChanged() {
-        Socket socket = ACTIVE_OUTBOX_SOCKET;
+        final Socket socket;
+        synchronized (OUTBOX_WAKEUP) {
+            CONNECTION_REVISION.incrementAndGet();
+            socket = ACTIVE_OUTBOX_SOCKET;
+            OUTBOX_WAKEUP.notifyAll();
+        }
         if (socket != null) {
             try { socket.close(); } catch (IOException ignored) { }
         }
     }
 
     static synchronized void acceptConfiguration(Properties settings) {
+        CONFIG_REVISION++;
         Properties previous = BridgeConfig.readSettingsForEditor(null);
         boolean changedIdentity = !previous.getProperty("__installation_id", "").equals(
                 settings.getProperty("__installation_id", ""));
@@ -332,6 +357,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (context != null) {
             APP_CONTEXT = context;
             preparePrivateConfigRuntime(context);
+            prepareConnectionMonitor(context);
             loadPrivateConfiguration(context);
             try {
                 ClassLoader contextLoader = context.getClassLoader();
@@ -350,6 +376,24 @@ public final class HookEntry implements IXposedHookLoadPackage {
             log("runtime hook preparation failed; worker will retry: " + shortError(t));
         }
         startWorker(loader);
+    }
+
+    private static void prepareConnectionMonitor(Context context) {
+        try {
+            CONNECTION_MONITOR = RuntimeConnectionMonitor.install(context, (reason, snapshot) -> {
+                if (MODULE_REMOVED || !BridgeConfig.load(context).enabled) return;
+                log("connection recovery event=" + reason + " " + snapshot.diagnostic());
+                configurationChanged();
+            });
+        } catch (Throwable failure) {
+            log("connection monitor unavailable: " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static String connectionDiagnostic() {
+        RuntimeConnectionMonitor monitor = CONNECTION_MONITOR;
+        try { return monitor == null ? "power/network=unknown" : monitor.snapshot().diagnostic(); }
+        catch (Throwable ignored) { return "power/network=unknown"; }
     }
 
     /** Load at process startup, including background launches with no Activity. */
@@ -682,8 +726,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static void runOutboxWorker(ClassLoader classLoader) {
         OutboxReconnectPolicy reconnect = new OutboxReconnectPolicy();
+        long observedRevision = CONNECTION_REVISION.get();
         while (true) {
             BridgeConfig config = null;
+            long revision = CONNECTION_REVISION.get();
+            if (revision != observedRevision) {
+                observedRevision = revision;
+                reconnect.reset();
+            }
             noteOutboxStage("loop");
             boolean completedOutboxItem = false;
             try {
@@ -734,8 +784,19 @@ public final class HookEntry implements IXposedHookLoadPackage {
             }
             long delay = config == null ? 3000L
                     : OutboxDeliveryPacing.nextDelayMs(completedOutboxItem, config.pollIntervalMs);
-            if (delay > 0 && !sleepOnce(delay)) {
+            if (delay > 0 && !waitOutboxRetry(delay, observedRevision)) {
                 return;
+            }
+        }
+    }
+
+    private static boolean waitOutboxRetry(long millis, long revision) {
+        synchronized (OUTBOX_WAKEUP) {
+            if (revision != CONNECTION_REVISION.get()) return true;
+            try { OUTBOX_WAKEUP.wait(millis); return true; }
+            catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
             }
         }
     }
@@ -1174,51 +1235,48 @@ public final class HookEntry implements IXposedHookLoadPackage {
     }
 
     private static boolean bindRuntimeIdentity(final BridgeConfig config) {
+        final RuntimeAccount observedAccount = CURRENT_ACCOUNT;
+        final long revision = CONFIG_REVISION;
         try {
-            return callOnMainThread(new Callable<Boolean>() {
-                @Override
-                public Boolean call() throws Exception {
-                    // Configuration results are applied on this same main thread.
-                    // Do not publish an identity for a worker's obsolete snapshot.
-                    if (!currentConfigurationAllows(config)) return false;
-                    RuntimeAccount detected;
-                    try {
-                        detected = resolveCurrentAccount();
-                    } catch (Exception e) {
-                        // Only the serialized main-thread resolver invalidates a binding.
-                        // A delayed worker failure must not clear a newer successful one.
-                        // Short read failures (kernel busy, WeChat restarting its UI) keep
-                        // the session so the server does not see a new generation and
-                        // cancel queued replies; a persistent failure drops the binding.
-                        if (ROLE.identityFailed(System.currentTimeMillis())) {
-                            CURRENT_ACCOUNT = null;
-                            CURRENT_WXID = "";
-                        }
-                        throw e;
-                    }
-                    ROLE.identityResolved();
-                    RuntimeAccount account = CURRENT_ACCOUNT;
-                    String target = config.baseUrl + "\n" + config.apiKey;
-                    if (!detected.sameLogin(account) || !target.equals(account.registrationTarget)) {
-                        account = detected;
-                        account.session = allocateSession();
-                        account.registrationTarget = target;
-                        CURRENT_ACCOUNT = account;
-                        log("current WeChat account wxid=" + account.wxid
-                                + " nickname=" + account.nickname + " path=" + account.mainDatabasePath);
-                    }
-                    CURRENT_WXID = account.wxid;
-                    config.runtimeAccount = account;
-                    config.selfWxid = account.wxid;
-                    config.nickname = isBlank(detected.nickname) ? account.wxid : detected.nickname;
-                    return true;
+            // Only resolve on the UI thread. A timed-out read must never publish
+            // a late identity/session or clear a newer configuration.
+            RuntimeAccount detected = new MainThreadDispatcher(new Handler(Looper.getMainLooper()))
+                    .readOnly(HookEntry::resolveCurrentAccount);
+            synchronized (HookEntry.class) {
+                if (revision != CONFIG_REVISION || CURRENT_ACCOUNT != observedAccount
+                        || !currentConfigurationAllows(config)) return false;
+                ROLE.identityResolved();
+                RuntimeAccount account = CURRENT_ACCOUNT;
+                String target = config.baseUrl + "\n" + config.apiKey;
+                if (!detected.sameLogin(account) || !target.equals(account.registrationTarget)) {
+                    account = detected;
+                    account.session = allocateSession();
+                    account.registrationTarget = target;
+                    CURRENT_ACCOUNT = account;
+                    log("current WeChat account wxid=" + account.wxid
+                            + " nickname=" + account.nickname + " path=" + account.mainDatabasePath);
                 }
-            });
+                CURRENT_WXID = account.wxid;
+                config.runtimeAccount = account;
+                config.selfWxid = account.wxid;
+                config.nickname = isBlank(detected.nickname) ? account.wxid : detected.nickname;
+                return true;
+            }
         } catch (Throwable t) {
+            synchronized (HookEntry.class) {
+                if (revision != CONFIG_REVISION || CURRENT_ACCOUNT != observedAccount
+                        || !currentConfigurationAllows(config)) return false;
+                // Transient main-thread stalls retain the current session. Only
+                // sustained identity failures invalidate it, as before.
+                if (ROLE.identityFailed(System.currentTimeMillis())) {
+                    CURRENT_ACCOUNT = null;
+                    CURRENT_WXID = "";
+                }
+            }
             LAST_ACCOUNT_ERROR = shortError(t);
             if (System.currentTimeMillis() - LAST_ACCOUNT_ERROR_AT > 60000L) {
                 LAST_ACCOUNT_ERROR_AT = System.currentTimeMillis();
-                log("current account pending: " + shortError(t));
+                log("current account pending: " + shortError(t) + " " + connectionDiagnostic());
             }
             return false;
         }
@@ -1247,12 +1305,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return false;
         }
         try {
-            return callOnMainThread(new Callable<Boolean>() {
-                @Override
-                public Boolean call() throws Exception {
-                    return CURRENT_ACCOUNT == account && account.sameLogin(resolveCurrentAccount());
-                }
-            });
+            boolean matches = new MainThreadDispatcher(new Handler(Looper.getMainLooper()))
+                    .readOnly(() -> CURRENT_ACCOUNT == account && account.sameLogin(resolveCurrentAccount()));
+            return matches && CURRENT_ACCOUNT == account;
         } catch (Throwable t) {
             return false;
         }
@@ -2559,15 +2614,16 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static boolean runOutboxWebSocket(BridgeConfig config, ClassLoader classLoader,
                                             OutboxReconnectPolicy reconnect) {
         final AccountSession connectionSession = config.runtimeAccount.session;
+        final long connectionRevision = CONNECTION_REVISION.get();
         reconnect.attemptingConnection();
         try {
             noteOutboxStage("websocket-connect");
             websocketLoop(config, classLoader, reconnect);
         } catch (Throwable t) {
-            logWebSocketFailure("outbox websocket unavailable: " + shortError(t));
+            logWebSocketFailure("outbox websocket unavailable: " + shortError(t) + " " + connectionDiagnostic());
         }
-        if (Thread.currentThread().isInterrupted() || FORCE_REREGISTER
-                || connectionSession != config.runtimeAccount.session || configChanged(config)) {
+        if (Thread.currentThread().isInterrupted() || connectionRevision != CONNECTION_REVISION.get()
+                || FORCE_REREGISTER || connectionSession != config.runtimeAccount.session || configChanged(config)) {
             reconnect.reset();
             return true;
         }
@@ -2579,6 +2635,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                       OutboxReconnectPolicy reconnect) throws Exception {
         requireCurrentConfiguration(config);
         final AccountSession streamSession = config.runtimeAccount.session;
+        final long connectionRevision = CONNECTION_REVISION.get();
         GatewayEndpoint endpoint = GatewayEndpoint.parse(config.baseUrl);
         String host = endpoint.host();
         String hostHeader = endpoint.hostHeader();
@@ -2592,11 +2649,15 @@ public final class HookEntry implements IXposedHookLoadPackage {
         String key = Base64.encodeToString(nonce, Base64.NO_WRAP);
 
         try (Socket socket = openGatewaySocket(host, endpoint.port(), endpoint.isTls())) {
-            ACTIVE_OUTBOX_SOCKET = socket;
-            socket.setSoTimeout(30000);
+            synchronized (OUTBOX_WAKEUP) {
+                // A recovery event cannot capture and close a replacement socket
+                // published for the new revision after it wakes this worker.
+                if (connectionRevision != CONNECTION_REVISION.get()) return;
+                ACTIVE_OUTBOX_SOCKET = socket;
+            }
             InputStream input = socket.getInputStream();
             OutputStream output = socket.getOutputStream();
-            if (streamSession != config.runtimeAccount.session || configChanged(config)) return;
+            if (!currentStreamAllows(config, streamSession, connectionRevision)) return;
             String request = "GET " + path + " HTTP/1.1\r\n"
                     + "Host: " + hostHeader + "\r\n"
                     + "Upgrade: websocket\r\n"
@@ -2604,31 +2665,35 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     + "Sec-WebSocket-Version: 13\r\n"
                     + "Sec-WebSocket-Key: " + key + "\r\n"
                     + "\r\n";
-            output.write(request.getBytes(StandardCharsets.ISO_8859_1));
-            output.flush();
+            SocketWriteDeadline.run(socket, () -> {
+                output.write(request.getBytes(StandardCharsets.ISO_8859_1));
+                output.flush();
+            });
             verifyWebSocketHandshake(input, key);
-            if (streamSession != config.runtimeAccount.session || configChanged(config)) return;
+            // Allow two 25-second server heartbeats plus scheduling margin.
+            // This is a dead-peer bound, not a guarantee of network access in Doze.
+            socket.setSoTimeout(65000);
+            if (!currentStreamAllows(config, streamSession, connectionRevision)) return;
             reconnect.connected(android.os.SystemClock.elapsedRealtime());
             log("outbox websocket connected host=" + hostHeader + " device=" + config.device);
             noteOutboxStage("websocket-idle");
-            writeWebSocketText(output, "{\"type\":\"poll\"}");
+            writeWebSocketText(socket, output, "{\"type\":\"poll\"}");
 
             while (!Thread.currentThread().isInterrupted()) {
-                if (FORCE_REREGISTER || streamSession != config.runtimeAccount.session || configChanged(config)) {
+                if (!currentStreamAllows(config, streamSession, connectionRevision)) {
                     log("outbox websocket config or WeChat identity changed; reconnect");
                     return;
                 }
                 WebSocketFrame frame = readWebSocketFrame(input);
                 // read() may span an account/config change. Recheck before
                 // accepting a delivery or replying to its liveness probe.
-                if (Thread.currentThread().isInterrupted() || FORCE_REREGISTER
-                        || streamSession != config.runtimeAccount.session || configChanged(config)) return;
+                if (!currentStreamAllows(config, streamSession, connectionRevision)) return;
                 noteOutboxStage("websocket-idle");
                 if (frame.opcode == 0x8) {
                     return;
                 }
                 if (frame.opcode == 0x9) {
-                    writeWebSocketFrame(output, 0xA, frame.payload);
+                    writeWebSocketFrame(socket, output, 0xA, frame.payload);
                     continue;
                 }
                 if (frame.opcode == 0xA) {
@@ -2654,7 +2719,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         ack.put("items", ackItems);
                         ackBody.put("ack", ack);
                         noteOutboxStage("websocket-ack");
-                        writeWebSocketText(output, ackBody.toString());
+                        writeWebSocketText(socket, output, ackBody.toString());
                         noteOutboxStage("websocket-idle");
                     }
                 } else if ("ready".equals(type)) {
@@ -2669,8 +2734,17 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 }
             }
         } finally {
-            ACTIVE_OUTBOX_SOCKET = null;
+            synchronized (OUTBOX_WAKEUP) { ACTIVE_OUTBOX_SOCKET = null; }
         }
+    }
+
+    // Control frames never wait for WeChat's UI thread. Business deliveries still
+    // perform a fresh kernel-account check in handleOutboxItems/sendText.
+    private static boolean currentStreamAllows(BridgeConfig config, AccountSession session, long revision) {
+        return !Thread.currentThread().isInterrupted() && !FORCE_REREGISTER
+                && revision == CONNECTION_REVISION.get()
+                && config.runtimeAccount != null && CURRENT_ACCOUNT == config.runtimeAccount
+                && session == config.runtimeAccount.session && currentConfigurationAllows(config);
     }
 
     private static boolean configChanged(BridgeConfig config) {
@@ -2847,11 +2921,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return value & 0xFF;
     }
 
-    private static void writeWebSocketText(OutputStream output, String text) throws Exception {
-        writeWebSocketFrame(output, 0x1, text.getBytes(StandardCharsets.UTF_8));
+    private static void writeWebSocketText(Socket socket, OutputStream output, String text) throws Exception {
+        writeWebSocketFrame(socket, output, 0x1, text.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void writeWebSocketFrame(OutputStream output, int opcode, byte[] payload) throws Exception {
+    private static void writeWebSocketFrame(Socket socket, OutputStream output, int opcode, byte[] payload) throws Exception {
         if (payload == null) {
             payload = new byte[0];
         }
@@ -2876,8 +2950,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
         for (int i = 0; i < payload.length; i++) {
             frame.write(payload[i] ^ mask[i % 4]);
         }
-        output.write(frame.toByteArray());
-        output.flush();
+        byte[] encoded = frame.toByteArray();
+        SocketWriteDeadline.run(socket, () -> {
+            output.write(encoded);
+            output.flush();
+        });
     }
 
     private static Socket openGatewaySocket(String host, int port, boolean tls) throws Exception {
@@ -3186,7 +3263,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
             return callable.call();
         }
         FutureTask<T> task = new FutureTask<>(callable);
-        new Handler(Looper.getMainLooper()).post(task);
+        if (!new Handler(Looper.getMainLooper()).post(task)) {
+            throw new java.util.concurrent.RejectedExecutionException("WeChat main thread rejected native send");
+        }
+        // Once a native send starts it may have side effects. Preserve its result;
+        // a blind timeout/retry could enqueue a duplicate message.
         return task.get();
     }
 
@@ -3906,7 +3987,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         long stale = System.currentTimeMillis() - LAST_OUTBOX_PROGRESS_AT;
                         if (stale > OUTBOX_STALL_REPORT_MS) {
                             reportDiagnostic(BridgeConfig.load(bridgeContext()), "outbox-stalled",
-                                    "reply delivery stalled at stage=" + LAST_OUTBOX_STAGE);
+                                    "reply delivery stalled at stage=" + LAST_OUTBOX_STAGE + " " + connectionDiagnostic());
                         }
                     } catch (Throwable ignored) {
                         // Diagnostics must never affect the module.

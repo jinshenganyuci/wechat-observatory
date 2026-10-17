@@ -6,9 +6,15 @@ It runs inside WeChat through LSPosed and posts message DB insert events to the
 gateway. The gateway stores WeChat events and queues admin-created send actions
 for the module to receive and send from inside the WeChat process.
 
-This fork targets WeChat for Android **8.0.79 / 3200 arm64**. See the [0.1.18 upgrade notes](../docs/compatibility/wechat-8079-0118.md).
+This fork targets WeChat for Android **8.0.79 / 3200 arm64**. See the [0.1.19 upgrade notes](../docs/compatibility/wechat-8079-0119.md).
 WeChat internals change between releases; validate message observation, contact
 sync, media upload, and text send after upgrading WeChat.
+
+Version 0.1.19 bounds read-only account queries and socket writes, keeps control
+heartbeats independent of UI-thread identity reads, and reconnects on network or
+power recovery events. Update the matching server too: real authenticated client
+receipts now refresh both presence views. This does not guarantee connectivity
+while Android suspends network access or freezes the WeChat main process.
 
 ## Hook Point
 
