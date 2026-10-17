@@ -73,6 +73,7 @@ public final class BridgeConfig {
     public long pollIntervalMs;
     public int pollLimit;
     public boolean outboxWebSocketEnabled;
+    public boolean backgroundRealtimeEnabled;
     public long contactSyncIntervalMs;
     public int contactSyncLimit;
     public boolean includeChatrooms;
@@ -104,6 +105,7 @@ public final class BridgeConfig {
         config.pollLimit = (int) longSetting(properties, "poll_limit", 20L);
         // WebSocket is the primary reply channel; explicit 0 retains HTTP-only mode.
         config.outboxWebSocketEnabled = booleanSetting(properties, "outbox_websocket_enabled", true);
+        config.backgroundRealtimeEnabled = "1".equals(setting(properties, "background_realtime_enabled", "0"));
         config.contactSyncIntervalMs = longSetting(properties, "contact_sync_interval_ms", 600000L);
         config.contactSyncLimit = (int) longSetting(properties, "contact_sync_limit", DEFAULT_CONTACT_SYNC_LIMIT);
         config.includeChatrooms = booleanSetting(properties, "contact_include_chatrooms", true);
@@ -205,6 +207,7 @@ public final class BridgeConfig {
                 "poll_interval_ms",
                 "poll_limit",
                 "outbox_websocket_enabled",
+                "background_realtime_enabled",
                 "contact_sync_interval_ms",
                 "contact_sync_limit",
                 "contact_include_chatrooms",

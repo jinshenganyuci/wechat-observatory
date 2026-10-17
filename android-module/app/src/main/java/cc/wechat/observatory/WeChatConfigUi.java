@@ -131,11 +131,7 @@ public final class WeChatConfigUi {
             session.finishSave("配置操作尚未完成，请稍后重试。");
             return;
         }
-        Map<String, String> values = session.snapshot;
-        values.put("bridge_url", session.url.getText().toString());
-        values.put("api_key", session.key.getText().toString());
-        values.put("enabled", session.enabled.isChecked() ? "1" : "0");
-        values.put("outbox_websocket_enabled", session.websocket.isChecked() ? "1" : "0");
+        Map<String, String> values = session.valuesForSave();
         Map<String, String> validated;
         try {
             validated = ConfigWriteContract.normalize(values);
@@ -146,7 +142,7 @@ public final class WeChatConfigUi {
         } catch (IllegalArgumentException invalid) {
             session.finishSave("配置内容无效或过长，请检查后重试。");
             return;
-        }
+        } finally { values.clear(); }
         launch(owner, session, null, false, validated, true);
     }
 
@@ -173,7 +169,10 @@ public final class WeChatConfigUi {
                 // have committed, so its old runtime must never keep sending.
                 HookEntry.acceptConfiguration(new Properties());
                 HookEntry.configurationChanged();
-                if (session != null) session.enabled.setChecked(false);
+                if (session != null) {
+                    session.enabled.setChecked(false);
+                    session.backgroundRealtime.setChecked(false);
+                }
             }
             boolean accepted = client.execute(loading, needsSession, validated, (response, error) -> {
                 if (removed) return;
@@ -247,6 +246,7 @@ public final class WeChatConfigUi {
         final EditText key;
         final Switch enabled;
         final Switch websocket;
+        final Switch backgroundRealtime;
         final TextView status;
 
         Session(Activity activity, Map<String, String> snapshot, String runtimeStatus) {
@@ -266,6 +266,15 @@ public final class WeChatConfigUi {
                     ConfigWriteContract.isOn(snapshot.get("enabled"), false));
             websocket = toggle(ui, fields, "实时 WebSocket",
                     ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
+            backgroundRealtime = toggle(ui, fields, "Oplus 息屏保护",
+                    "1".equals(snapshot.get("background_realtime_enabled")));
+            TextView protectionNotice = new TextView(ui);
+            protectionNotice.setText("仅适用于已适配的一加 / OPPO 系统。需启用 LSPosed 系统框架和电池应用作用域并重启；网关运行时阻止本机夜间自动断网，可能增加息屏耗电。");
+            protectionNotice.setTextSize(13);
+            protectionNotice.setAlpha(0.75f);
+            protectionNotice.setPadding(0, 0, 0, dp(ui, 8));
+            protectionNotice.setSaveEnabled(false);
+            fields.addView(protectionNotice);
             status = new TextView(ui);
             status.setTextSize(13);
             status.setAlpha(0.75f);
@@ -310,6 +319,16 @@ public final class WeChatConfigUi {
             return activity != null && !activity.isFinishing() && !activity.isDestroyed() && dialog.isShowing();
         }
 
+        Map<String, String> valuesForSave() {
+            Map<String, String> values = new LinkedHashMap<>(snapshot);
+            values.put("bridge_url", url.getText().toString());
+            values.put("api_key", key.getText().toString());
+            values.put("enabled", enabled.isChecked() ? "1" : "0");
+            values.put("outbox_websocket_enabled", websocket.isChecked() ? "1" : "0");
+            values.put("background_realtime_enabled", backgroundRealtime.isChecked() ? "1" : "0");
+            return values;
+        }
+
         void refreshSnapshot() {
             snapshot.clear();
             snapshot.putAll(ConfigWriteContract.editorSnapshot(BridgeConfig.readSettingsForEditor(null)));
@@ -317,6 +336,7 @@ public final class WeChatConfigUi {
             key.setText(snapshot.get("api_key"));
             enabled.setChecked(ConfigWriteContract.isOn(snapshot.get("enabled"), false));
             websocket.setChecked(ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
+            backgroundRealtime.setChecked("1".equals(snapshot.get("background_realtime_enabled")));
         }
 
         void clearSnapshot() {
@@ -325,6 +345,7 @@ public final class WeChatConfigUi {
             key.setText("");
             enabled.setChecked(false);
             websocket.setChecked(true);
+            backgroundRealtime.setChecked(false);
         }
 
         void setSaving(boolean saving) {
@@ -336,6 +357,7 @@ public final class WeChatConfigUi {
             key.setEnabled(!saving);
             enabled.setEnabled(!saving);
             websocket.setEnabled(!saving);
+            backgroundRealtime.setEnabled(!saving);
         }
 
         void finishSave(String message) {

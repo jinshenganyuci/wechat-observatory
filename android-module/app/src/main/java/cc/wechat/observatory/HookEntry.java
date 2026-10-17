@@ -58,6 +58,7 @@ import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
 import cc.wechat.observatory.gateway.OutboxReconnectPolicy;
 import cc.wechat.observatory.model.MessagePayload;
+import cc.wechat.observatory.realtime.RealtimeProtectionClient;
 import cc.wechat.observatory.util.BridgeLogger;
 import cc.wechat.observatory.util.MainThreadDispatcher;
 import cc.wechat.observatory.util.HookInstallation;
@@ -143,7 +144,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
 
     public static String runtimeStatusText() {
-        return RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE;
+        return RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE
+                + "\n" + RealtimeProtectionClient.statusText();
     }
 
     public static void configurationChanged() {
@@ -177,6 +179,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
             LAST_OUTBOX_STAGE = "disabled";
             configurationChanged();
         }
+        BridgeConfig config = BridgeConfig.load(APP_CONTEXT);
+        RealtimeProtectionClient.update(APP_CONTEXT, !MODULE_REMOVED && config.enabled
+                && config.outboxWebSocketEnabled && config.backgroundRealtimeEnabled
+                && !isBlank(config.apiKey) && !isBlank(config.baseUrl));
     }
 
     private static synchronized AccountSession allocateSession() {
@@ -319,6 +325,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         ConfigFileClient.moduleRemoved();
                         WeChatConfigUi.moduleRemoved();
                         synchronized (HookEntry.class) {
+                            RealtimeProtectionClient.update(APP_CONTEXT, false);
                             CONFIG_REVISION++;
                             BridgeConfig.clearRuntimeSettings();
                             CURRENT_ACCOUNT = null;

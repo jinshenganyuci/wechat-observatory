@@ -49,6 +49,33 @@ public final class BridgeConfigTest {
     }
 
     @Test
+    public void backgroundRealtimeProtectionRequiresExplicitOptInAndChangesSignature() {
+        Properties properties = new Properties();
+        properties.setProperty("api_key", "test-key");
+        BridgeConfig previousVersion = BridgeConfig.fromProperties(properties);
+        assertEquals(false, previousVersion.backgroundRealtimeEnabled);
+
+        properties.setProperty("background_realtime_enabled", "1");
+        BridgeConfig optedIn = BridgeConfig.fromProperties(properties);
+        assertEquals(true, optedIn.backgroundRealtimeEnabled);
+        assertNotEquals(previousVersion.signature, optedIn.signature);
+
+        properties.setProperty("background_realtime_enabled", "0");
+        BridgeConfig optedOut = BridgeConfig.fromProperties(properties);
+        assertEquals(false, optedOut.backgroundRealtimeEnabled);
+        assertNotEquals(optedIn.signature, optedOut.signature);
+    }
+
+    @Test
+    public void malformedProtectionValueCannotEnableSystemProtection() {
+        Properties properties = new Properties();
+        for (String value : new String[]{"true", "yes", "on", "2", "-1"}) {
+            properties.setProperty("background_realtime_enabled", value);
+            assertEquals(false, BridgeConfig.fromProperties(properties).backgroundRealtimeEnabled);
+        }
+    }
+
+    @Test
     public void invalidBridgeUrlCannotRedirectCredentialsToFallbackServer() {
         Properties properties = new Properties();
         properties.setProperty("bridge_url", "not-a-url");

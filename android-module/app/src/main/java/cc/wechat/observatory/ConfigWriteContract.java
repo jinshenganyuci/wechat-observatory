@@ -22,7 +22,7 @@ final class ConfigWriteContract {
     static final String FAILED = "failed";
     static final Set<String> KEYS = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
             "enabled", "bridge_url", "api_key", "poll_interval_ms", "poll_limit",
-            "outbox_websocket_enabled", "contact_sync_interval_ms", "contact_sync_limit",
+            "outbox_websocket_enabled", "background_realtime_enabled", "contact_sync_interval_ms", "contact_sync_limit",
             "contact_include_chatrooms", "media_upload_enabled", "media_upload_limit_bytes",
             "stale_message_grace_ms", "stale_message_replay_limit")));
 
@@ -62,12 +62,16 @@ final class ConfigWriteContract {
         String enabled = result.containsKey("enabled") ? result.get("enabled") : "1";
         String websocket = result.containsKey("outbox_websocket_enabled")
                 ? result.get("outbox_websocket_enabled") : "1";
+        String backgroundRealtime = result.containsKey("background_realtime_enabled")
+                ? result.get("background_realtime_enabled") : "0";
         if (!("0".equals(enabled) || "1".equals(enabled))
-                || !("0".equals(websocket) || "1".equals(websocket))) {
+                || !("0".equals(websocket) || "1".equals(websocket))
+                || !("0".equals(backgroundRealtime) || "1".equals(backgroundRealtime))) {
             throw new IllegalArgumentException("invalid switch value");
         }
         result.put("enabled", enabled);
         result.put("outbox_websocket_enabled", websocket);
+        result.put("background_realtime_enabled", backgroundRealtime);
         result.put("bridge_url", GatewayEndpoint.normalizeBaseUrl(result.get("bridge_url")));
         return result;
     }

@@ -1,5 +1,7 @@
 <resources>
     <string-array name="xposed_scope">
         <item>com.tencent.mm</item>
+        <item>android</item>
+        <item>com.oplus.battery</item>
     </string-array>
 </resources>
