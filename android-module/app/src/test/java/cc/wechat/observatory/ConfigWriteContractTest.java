@@ -33,6 +33,7 @@ public class ConfigWriteContractTest {
         assertEquals("test-key", result.get("api_key"));
         assertEquals("1", result.get("enabled"));
         assertEquals("1", result.get("outbox_websocket_enabled"));
+        assertEquals("0", result.get("background_realtime_enabled"));
         assertEquals("42", result.get("poll_limit"));
     }
 
@@ -43,6 +44,33 @@ public class ConfigWriteContractTest {
         Map<String, String> result = ConfigWriteContract.normalize(source);
         assertEquals("0", result.get("enabled"));
         assertEquals("0", result.get("outbox_websocket_enabled"));
+    }
+
+    @Test public void protectionPreferenceSurvivesEditorAndDisabledGatewaySave() throws Exception {
+        Map<String, Object> source = settings();
+        source.put("enabled", "0");
+        source.put("outbox_websocket_enabled", "0");
+        source.put("background_realtime_enabled", "1");
+        Properties saved = new Properties();
+        saved.putAll(ConfigWriteContract.normalize(source));
+        Map<String, String> edited = ConfigWriteContract.editorSnapshot(saved);
+        Map<String, String> result = ConfigWriteContract.normalize(edited);
+        // The explicit preference survives; registration still requires the
+        // gateway and WebSocket gates, checked by HookEntry.
+        assertEquals("1", result.get("background_realtime_enabled"));
+        assertEquals("0", result.get("enabled"));
+        assertEquals("0", result.get("outbox_websocket_enabled"));
+        edited.put("background_realtime_enabled", "0");
+        assertEquals("0", ConfigWriteContract.normalize(edited).get("background_realtime_enabled"));
+        assertTrue(ConfigWriteContract.editorSnapshot(new Properties()).isEmpty());
+    }
+
+    @Test public void protectionSwitchOnlyAcceptsZeroOrOne() {
+        for (String value : new String[]{"true", "yes", "on", "false", "2", "-1"}) {
+            Map<String, Object> source = settings();
+            source.put("background_realtime_enabled", value);
+            assertThrows(IllegalArgumentException.class, () -> ConfigWriteContract.normalize(source));
+        }
     }
 
     @Test(expected = IllegalArgumentException.class)

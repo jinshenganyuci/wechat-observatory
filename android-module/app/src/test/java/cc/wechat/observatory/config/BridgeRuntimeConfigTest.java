@@ -90,13 +90,17 @@ public class BridgeRuntimeConfigTest {
     }
 
     @Test public void missingOrDeletedFileIsLoadedAndDisabledWithoutAReservedIdentity() {
-        BridgeConfig.acceptRuntimeSettings(initialSnapshot());
+        Properties configured = initialSnapshot();
+        configured.setProperty("background_realtime_enabled", "1");
+        BridgeConfig.acceptRuntimeSettings(configured);
+        assertTrue(BridgeConfig.fromProperties(BridgeConfig.readSettingsForEditor(null)).backgroundRealtimeEnabled);
         BridgeConfig.acceptRuntimeSettings(new Properties());
         assertTrue(BridgeConfig.isRuntimeLoaded());
         assertFalse(BridgeConfig.hasRuntimeSession());
         assertTrue(BridgeConfig.readSettingsForEditor(null).isEmpty());
         BridgeConfig empty = BridgeConfig.fromProperties(BridgeConfig.readSettingsForEditor(null));
         assertFalse(empty.enabled);
+        assertFalse(empty.backgroundRealtimeEnabled);
         assertEquals("", empty.apiKey);
         assertEquals("", empty.baseUrl);
     }

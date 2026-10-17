@@ -23,6 +23,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Properties;
+
+import cc.wechat.observatory.config.BridgeConfig;
 
 import static org.junit.Assert.*;
 import static org.robolectric.Shadows.shadowOf;
@@ -47,6 +50,7 @@ public class WeChatConfigUiTest {
         if (dialog != null) dialog.dismiss();
         shadowOf(Looper.getMainLooper()).idle();
         controller.pause().stop().destroy();
+        BridgeConfig.clearRuntimeSettings();
     }
 
     @Test public void freshEditorStartsWithEmptyFieldsAndGatewayDisabled() throws Exception {
@@ -55,6 +59,7 @@ public class WeChatConfigUiTest {
         assertEquals("", field("url", EditText.class).getText().toString());
         assertEquals("", field("key", EditText.class).getText().toString());
         assertFalse(field("enabled", Switch.class).isChecked());
+        assertFalse(field("backgroundRealtime", Switch.class).isChecked());
         assertEquals("停用并删除配置", dialog.getButton(DialogInterface.BUTTON_NEUTRAL).getText().toString());
         assertNull("host switch backgrounds must stay isolated", field("enabled", Switch.class).getBackground());
     }
@@ -85,7 +90,44 @@ public class WeChatConfigUiTest {
         assertEquals("", field("url", EditText.class).getText().toString());
         assertEquals("", field("key", EditText.class).getText().toString());
         assertFalse(field("enabled", Switch.class).isChecked());
+        assertFalse(field("backgroundRealtime", Switch.class).isChecked());
         assertTrue(dialog.isShowing());
+    }
+
+    @Test public void protectionPreferenceLoadsAndSerializesAlongsideGatewayDisable() throws Exception {
+        Map<String, String> snapshot = configured();
+        open(snapshot);
+        assertTrue(field("backgroundRealtime", Switch.class).isChecked());
+        assertEquals("Oplus 息屏保护", field("backgroundRealtime", Switch.class).getContentDescription());
+
+        field("enabled", Switch.class).setChecked(false);
+        field("websocket", Switch.class).setChecked(false);
+        Map<String, String> values = valuesForSave();
+        Map<String, String> normalized = ConfigWriteContract.normalize(values);
+        assertEquals("0", normalized.get("enabled"));
+        assertEquals("0", normalized.get("outbox_websocket_enabled"));
+        assertEquals("1", normalized.get("background_realtime_enabled"));
+        assertEquals("unsaved controls must not overwrite the loaded snapshot", "1", snapshot.get("enabled"));
+
+        field("backgroundRealtime", Switch.class).setChecked(false);
+        assertEquals("0", valuesForSave().get("background_realtime_enabled"));
+    }
+
+    @Test public void refreshAndBusyStateCoverTheProtectionSwitch() throws Exception {
+        open(configured());
+        Properties saved = new Properties();
+        saved.setProperty("enabled", "0");
+        saved.setProperty("background_realtime_enabled", "0");
+        BridgeConfig.acceptRuntimeSettings(saved);
+        invoke("refreshSnapshot");
+        assertFalse(field("backgroundRealtime", Switch.class).isChecked());
+
+        Method setSaving = session.getClass().getDeclaredMethod("setSaving", boolean.class);
+        setSaving.setAccessible(true);
+        setSaving.invoke(session, true);
+        assertFalse(field("backgroundRealtime", Switch.class).isEnabled());
+        setSaving.invoke(session, false);
+        assertTrue(field("backgroundRealtime", Switch.class).isEnabled());
     }
 
     @Test public void unreadableConfigurationOffersDeleteAndCancelDoesNotStartFileClient() throws Exception {
@@ -140,6 +182,13 @@ public class WeChatConfigUiTest {
         method.invoke(session);
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, String> valuesForSave() throws Exception {
+        Method method = session.getClass().getDeclaredMethod("valuesForSave");
+        method.setAccessible(true);
+        return (Map<String, String>) method.invoke(session);
+    }
+
     private <T> T field(String name, Class<T> type) throws Exception {
         Field field = session.getClass().getDeclaredField(name);
         field.setAccessible(true);
@@ -151,6 +200,7 @@ public class WeChatConfigUiTest {
         values.put("bridge_url", "https://example.invalid/");
         values.put("api_key", "dummy-key");
         values.put("enabled", "1");
+        values.put("background_realtime_enabled", "1");
         return values;
     }
 }
