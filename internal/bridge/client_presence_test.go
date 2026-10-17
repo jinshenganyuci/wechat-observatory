@@ -301,3 +301,102 @@ func TestWebSocketPongsWhileAwaitingAckKeepInstallationAndRuntimeOnline(t *testi
 		t.Fatalf("live socket displaced: %v", err)
 	}
 }
+
+func TestTransientPresenceFailureKeepsConnectionAndUsesNextRealReceipt(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	receipts := make(chan time.Time, 1)
+	calls := make(chan time.Time, 3)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		count := 0
+		observeClientReceipts(ctx, cancel, receipts, func(_ context.Context, at time.Time) error {
+			calls <- at
+			count++
+			if count == 1 {
+				return errors.New("temporary DB failure")
+			}
+			return nil
+		})
+	}()
+	first := time.Now()
+	receipts <- first
+	<-calls
+	if ctx.Err() != nil {
+		t.Fatal("temporary presence error closed healthy transport")
+	}
+	latest := first.Add(time.Second)
+	publishClientReceipt(receipts, latest)
+	select {
+	case got := <-calls:
+		if !got.Equal(latest) {
+			t.Fatalf("retry invented receive time: %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("next actual receipt was not retried")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("presence worker did not cancel")
+	}
+}
+
+func TestOutboxMessageQueueSendStopsWhenConnectionCloses(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	queue := make(chan outboxWSMessage, 1)
+	queue <- outboxWSMessage{Type: "ack"}
+	done := make(chan bool, 1)
+	go func() { done <- sendOutboxWSMessage(ctx, queue, outboxWSMessage{Type: "wake"}) }()
+	cancel()
+	select {
+	case sent := <-done:
+		if sent {
+			t.Fatal("send to full queue succeeded after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled connection leaked blocked outgoing sender")
+	}
+}
+
+type failingPresencePersistence struct {
+	*fakePersistence
+	calls int
+}
+
+func (p *failingPresencePersistence) RecordActiveClientPresence(context.Context, AccountBinding, string, time.Time) error {
+	p.calls++
+	return errors.New("temporary presence storage failure")
+}
+
+func TestAckDoesNotDependOnAuxiliaryPresencePersistence(t *testing.T) {
+	s, clock := newClockedService(t)
+	a := phoneRegistration("a", "wxid_self", 1)
+	if _, err := s.RegisterModule(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	p := &failingPresencePersistence{fakePersistence: &fakePersistence{}}
+	s.persistence = p
+	id, err := s.SendText(t.Context(), SendTextRequest{Device: "phone-a", WxIDs: []string{"friend"}, Text: "ACK must survive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PollOutbox(t.Context(), ModulePollRequest{APIKey: a.APIKey, WxID: a.WxID, AccountSession: a.AccountSession}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(30 * time.Second)
+	if err := s.ObserveModuleClientActivity(t.Context(), a.APIKey, a.WxID, a.AccountSession, clock.Now()); err == nil || p.calls != 1 {
+		t.Fatal("presence failure setup did not exercise persistent writer")
+	}
+	req := ModuleAckRequest{APIKey: a.APIKey, WxID: a.WxID, AccountSession: a.AccountSession,
+		Items: []ModuleAckItem{{ID: id, Status: "sent", ChatRecordID: 12345}}}
+	items, err := s.AckOutbox(withClientReceipt(t.Context(), clock.Now()), req)
+	if err != nil || len(items) != 1 || items[0].Status != "sent" {
+		t.Fatalf("ACK failed despite successful task persistence: %+v %v", items, err)
+	}
+	if p.calls != 1 || len(p.outboundEvents) != 1 {
+		t.Fatalf("ACK depended on auxiliary presence: presence=%d events=%d", p.calls, len(p.outboundEvents))
+	}
+}

@@ -59,8 +59,11 @@ test("module rows list the binding's phones and request a switch to a standby ph
   await page.getByRole("button", { name: "连接刷新", exact: true }).click();
 
   const list = page.getByTestId("installation-list").first();
-  const rows = list.getByTestId("installation-row");
-  await expect(rows).toHaveCount(3);
+  const rows = list.locator('[data-testid="installation-row"]:visible');
+  await expect(rows).toHaveCount(2);
+  await expect(list.getByText("历史安装记录 · 1 条")).toBeVisible();
+  await expect(list.getByText("Pixel 7", { exact: true })).toBeHidden();
+  await rows.nth(0).getByText("连接详情", { exact: true }).click();
   await expect(rows.nth(0).getByText("在用", { exact: true })).toBeVisible();
   await expect(rows.nth(0).getByText("Xiaomi 2312DRAABC", { exact: true })).toBeVisible();
   await expect(rows.nth(0).getByText("Android 14 · 微信 8.0.50 · 模块 0.1.12", { exact: true })).toBeVisible();
@@ -69,7 +72,9 @@ test("module rows list the binding's phones and request a switch to a standby ph
   await expect(rows.nth(1).getByText("待命", { exact: true })).toBeVisible();
   await expect(rows.nth(1).getByText("旧版模块", { exact: true })).toBeVisible();
   await expect(rows.nth(1).getByText("#bbbb2222", { exact: true })).toBeVisible();
+  await list.getByText("历史安装记录 · 1 条").click();
   await expect(rows.nth(2).getByText("离线", { exact: true })).toBeVisible();
+  await expect(rows.nth(2).getByRole("button")).toHaveCount(0);
   await expect(page.getByText(HINT, { exact: true })).toBeVisible();
   // The detail table shows the same phones in compact form, without switch buttons.
   await expect(page.getByTestId("installation-list")).toHaveCount(2);
@@ -82,15 +87,7 @@ test("module rows list the binding's phones and request a switch to a standby ph
   await expect(rows.nth(1).getByText("切换中", { exact: true })).toBeVisible();
   await expect(list.getByText(/^切换请求有效至/)).toBeVisible();
 
-  switchReply = { status: 404, json: { ok: false, code: "installation_not_found", message: "installation not found" } };
-  await rows.nth(2).getByRole("button", { name: "切到这台手机" }).click();
-  await expect(list.getByText("installation not found", { exact: true })).toBeVisible();
-
-  switchReply = { status: 409, json: { ok: false, code: "installation_active", message: "installation already active" } };
-  await rows.nth(2).getByRole("button", { name: "切到这台手机" }).click();
-  await expect(list.getByText("这台手机已是在用手机，列表已刷新", { exact: true })).toBeVisible();
-  await expect(page.getByText("installation already active")).toHaveCount(0);
-  expect(switchCalls).toHaveLength(3);
+  expect(switchCalls).toHaveLength(1);
   expect(errors).toEqual([]);
 });
 

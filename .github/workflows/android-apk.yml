@@ -3,12 +3,13 @@ name: Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, fix/wechat-8079, fix/lsposed-shared-config, fix/settings-switch-layout]
+    branches: [main, fix/wechat-8079, fix/lsposed-shared-config, fix/settings-switch-layout, fix/outbox-delivery-status, fix/minimal-0118-baseline]
     paths:
       - 'android-module/**'
       - '.github/workflows/android-apk.yml'
       - 'internal/**'
       - 'cmd/**'
+      - 'web/**'
       - 'go.*'
 
 permissions:
@@ -47,7 +48,7 @@ jobs:
       - name: Verify and package
         run: |
           mkdir -p artifacts
-          cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.19-wechat8079-debug.apk
+          cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.21-wechat8079-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs artifacts/*.apk > artifacts/apk-verification.txt
           grep -F "Signer #1 certificate SHA-256 digest: 6b95e8c196f30a26b0f1dd0d9be43d08d2714cc0a2614dce2f33165043996f4e" artifacts/apk-verification.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging artifacts/*.apk > artifacts/apk-package.txt
@@ -82,6 +83,27 @@ jobs:
           --health-interval=10s --health-timeout=5s --health-retries=12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            web/admin/package-lock.json
+            web/device/package-lock.json
+      - name: Test and build both dashboards
+        run: |
+          npm ci --prefix web/admin
+          npm ci --prefix web/device
+          npm test --prefix web/admin
+          npm run build --prefix web/admin
+          npm run build --prefix web/device
+          git diff --exit-code -- internal/bridge/admin_dist internal/bridge/device_dist
+          test -z "$(git ls-files --others --exclude-standard internal/bridge/admin_dist internal/bridge/device_dist)"
+      - name: Test desktop and mobile delivery views
+        working-directory: web/admin
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:ui
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod

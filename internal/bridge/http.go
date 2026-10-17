@@ -53,6 +53,7 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.requireAdmin(s.events))
 	mux.HandleFunc("GET /api/stored-events", s.requireAdmin(s.storedEvents))
 	mux.HandleFunc("GET /api/messages", s.requireAdmin(s.messages))
+	mux.HandleFunc("GET /api/outbox", s.requireAdmin(s.outboxStatuses))
 	mux.HandleFunc("GET /api/live/events", s.requireAdmin(s.liveEvents))
 	mux.HandleFunc("GET /api/modules/status", s.requireAdmin(s.moduleStatuses))
 	mux.HandleFunc("POST /api/modules/{device}/switch", s.requireAdmin(s.switchModuleInstallation))
