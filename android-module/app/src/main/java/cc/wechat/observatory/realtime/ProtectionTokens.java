@@ -5,6 +5,7 @@ import android.os.RemoteException;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 /** Process-lifetime registrations only: no persisted UID list, timer or network state. */
 final class ProtectionTokens {
@@ -74,6 +75,40 @@ final class ProtectionTokens {
     synchronized void remove(IBinder token) {
         Entry entry = entries.get(token);
         if (entry != null) remove(entry);
+    }
+
+    synchronized boolean containsToken(IBinder token) { return entries.containsKey(token); }
+
+    /** Null means the caller is not entitled to our private return-value handshake. */
+    Boolean queryPolicy(Object registrationLock, RegistrationReader lookup,
+                        int callingUid, int callingPid, BooleanSupplier decision) {
+        // Never run the external thermal reader while already holding AMS's lock.
+        if (Thread.holdsLock(registrationLock)) return null;
+        synchronized (registrationLock) {
+            if (!validQuery(lookup.read(), callingUid, callingPid)) return null;
+            if (!hasLiveProtection()) return false;
+        }
+        boolean permitted = false;
+        try { permitted = decision != null && decision.getAsBoolean(); }
+        catch (Throwable unavailable) { /* Query failures never revoke existing registrations. */ }
+        synchronized (registrationLock) {
+            // Unregister, process death or module revocation may race the thermal read.
+            if (!validQuery(lookup.read(), callingUid, callingPid)) return null;
+            return permitted && hasLiveProtection();
+        }
+    }
+
+    private static boolean validQuery(Registration registration, int uid, int pid) {
+        return registration != null && registration.token != null && uid == 1000 && pid > 0
+                && registration.uid == uid && registration.pid == pid
+                && RealtimePolicyQuery.BATTERY.equals(registration.packageName)
+                && registration.privateMarker && registration.token.isBinderAlive();
+    }
+
+    private synchronized boolean hasLiveProtection() {
+        if (!policyAvailable || !moduleAvailable) return false;
+        for (Entry entry : entries.values()) if (entry.token.isBinderAlive()) return true;
+        return false;
     }
 
     synchronized boolean containsUid(int uid) {

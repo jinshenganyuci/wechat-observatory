@@ -16,6 +16,8 @@ import org.robolectric.annotation.Config;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -169,6 +171,124 @@ public class ProtectionTokensTest {
     @Test public void incompatibleFrameworkLayoutIsRejectedBeforeInstallingHooks() {
         assertThrows(ReflectiveOperationException.class, () -> new ReceiverRegistrationLookup(
                 FakeAms.class, Object.class, FakeReceiverList.class, FakeProcess.class, FakeFilter.class));
+    }
+
+    @Test public void queryNeedsActualPrivateSystemBatteryRegistrationAndMatchingPid() {
+        assertTrue(register(binder));
+        FakeBinder query = addQuery();
+        String nonce = actual(query).get(0).getCategory(0);
+        assertEquals(Boolean.TRUE, query(query, nonce, 1000, PID, () -> true));
+        assertNull(query(query, nonce, 101000, PID, () -> true));
+        assertNull(query(query, nonce, 1000, PID + 1, () -> true));
+        actual(query).app.info.packageName = "another.system.app";
+        assertNull(query(query, nonce, 1000, PID, () -> true));
+        actual(query).app.info.packageName = RealtimePolicyQuery.BATTERY;
+        actual(query).app.info.uid = 101000;
+        assertNull(query(query, nonce, 1000, PID, () -> true));
+        assertTrue(tokens.containsUid(UID));
+        assertEquals("queries never create protection/death registrations", 0, query.links);
+    }
+
+    @Test public void queryRejectsExportedWrongNonceExtraActionAndWrongActualBinder() {
+        assertTrue(register(binder));
+        FakeBinder query = addQuery();
+        FakeFilter filter = actual(query).get(0);
+        String nonce = filter.getCategory(0);
+        assertNull(query(query, nonce + "a", 1000, PID, () -> true));
+        filter.exported = true;
+        assertNull(query(query, nonce, 1000, PID, () -> true));
+        filter.exported = false;
+        filter.addAction("another.action");
+        assertNull(query(query, nonce, 1000, PID, () -> true));
+        actual(query).clear();
+        actual(query).add(new FakeFilter(RealtimePolicyQuery.ACTION, false));
+        actual(query).get(0).addCategory(nonce);
+        actual(query).receiver = new FakeBinder();
+        assertNull(query(query, nonce, 1000, PID, () -> true));
+        assertTrue(tokens.containsUid(UID));
+    }
+
+    @Test public void queryThermalReaderRunsOutsideAmsAndTokenLocksAndFailsClosed() {
+        assertTrue(register(binder));
+        FakeBinder query = addQuery();
+        String nonce = actual(query).get(0).getCategory(0);
+        AtomicBoolean observedUnlocked = new AtomicBoolean();
+        assertEquals(Boolean.TRUE, query(query, nonce, 1000, PID, () -> {
+            observedUnlocked.set(!Thread.holdsLock(ams) && !Thread.holdsLock(tokens));
+            return true;
+        }));
+        assertTrue(observedUnlocked.get());
+        assertEquals(Boolean.FALSE, query(query, nonce, 1000, PID, null));
+        assertEquals(Boolean.FALSE, query(query, nonce, 1000, PID, () -> { throw new IllegalStateException(); }));
+        assertTrue("a query failure never revokes existing protection", tokens.containsUid(UID));
+        synchronized (ams) {
+            assertNull(query(query, nonce, 1000, PID, () -> { fail("must not run under AMS"); return true; }));
+        }
+    }
+
+    @Test public void queryRechecksRevocationAndItsOwnUnregisterAfterThermalRead() {
+        assertTrue(register(binder));
+        FakeBinder query = addQuery();
+        String nonce = actual(query).get(0).getCategory(0);
+        assertNull(query(query, nonce, 1000, PID, () -> {
+            synchronized (ams) { ams.mBroadcastController.mRegisteredReceivers.remove(query); }
+            return true;
+        }));
+        assertTrue(tokens.containsUid(UID));
+        FakeBinder secondQuery = addQuery();
+        String secondNonce = actual(secondQuery).get(0).getCategory(0);
+        assertEquals(Boolean.FALSE, query(secondQuery, secondNonce, 1000, PID, () -> {
+            tokens.revokeModule();
+            return true;
+        }));
+        assertFalse(tokens.containsUid(UID));
+    }
+
+    @Test public void queryRequiresALiveProtectionTokenAndNeverCachesTheResult() {
+        FakeBinder query = addQuery();
+        String nonce = actual(query).get(0).getCategory(0);
+        AtomicBoolean thermalRead = new AtomicBoolean();
+        assertEquals(Boolean.FALSE, query(query, nonce, 1000, PID,
+                () -> { thermalRead.set(true); return true; }));
+        assertFalse("no thermal read is needed without a protected process", thermalRead.get());
+        assertTrue(register(binder));
+        assertEquals(Boolean.TRUE, query(query, nonce, 1000, PID, () -> true));
+        binder.alive = false; // Death delivery may lag the underlying binder becoming dead.
+        assertEquals(Boolean.FALSE, query(query, nonce, 1000, PID, () -> true));
+        assertEquals(0, query.links);
+    }
+
+    @Test public void bothActualRegistryReadsHoldAmsAndPolicyWithdrawalIsRechecked() {
+        assertTrue(register(binder));
+        FakeBinder query = addQuery();
+        String nonce = actual(query).get(0).getCategory(0);
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        assertEquals(Boolean.FALSE, tokens.queryPolicy(ams, () -> {
+            assertTrue(Thread.holdsLock(ams));
+            reads.incrementAndGet();
+            return lookup.findQuery(ams, query, nonce);
+        }, 1000, PID, () -> {
+            tokens.setPolicyAvailable(false);
+            return true;
+        }));
+        assertEquals(2, reads.get());
+    }
+
+    private Boolean query(FakeBinder receiver, String nonce, int uid, int pid,
+                          java.util.function.BooleanSupplier decision) {
+        return tokens.queryPolicy(ams, () -> lookup.findQuery(ams, receiver, nonce), uid, pid, decision);
+    }
+
+    private FakeBinder addQuery() {
+        FakeBinder query = new FakeBinder();
+        addActualRegistration(query, 1000);
+        FakeReceiverList row = actual(query);
+        row.app.info.packageName = RealtimePolicyQuery.BATTERY;
+        row.clear();
+        FakeFilter filter = new FakeFilter(RealtimePolicyQuery.ACTION, false);
+        filter.addCategory(RealtimePolicyQuery.ACTION + ".nonce." + UUID.randomUUID());
+        row.add(filter);
+        return query;
     }
 
     private boolean register(FakeBinder token) {

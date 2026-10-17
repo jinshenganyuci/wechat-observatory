@@ -43,6 +43,15 @@ final class ReceiverRegistrationLookup {
 
     /** Call while synchronized on AMS, exactly like BroadcastController itself. */
     ProtectionTokens.Registration find(Object ams, IBinder token) {
+        return find(ams, token, null);
+    }
+
+    ProtectionTokens.Registration findQuery(Object ams, IBinder token, String nonceCategory) {
+        if (nonceCategory == null) return null;
+        return find(ams, token, nonceCategory);
+    }
+
+    private ProtectionTokens.Registration find(Object ams, IBinder token, String nonceCategory) {
         try {
             Object registry = controller.get(ams);
             if (registry == null) return null;
@@ -57,8 +66,11 @@ final class ReceiverRegistrationLookup {
             if (application == null || application.uid != actualUid) return null;
             boolean marker = false;
             for (Object item : (List<?>) row) {
-                if (filterClass.isInstance(item) && privateMarker((IntentFilter) item)
-                        && !exported.getBoolean(item)) marker = true;
+                if (filterClass.isInstance(item) && !exported.getBoolean(item)) {
+                    IntentFilter filter = (IntentFilter) item;
+                    if (nonceCategory == null ? privateMarker(filter)
+                            : nonceCategory.equals(RealtimePolicyQuery.nonceCategory(filter))) marker = true;
+                }
             }
             return new ProtectionTokens.Registration(token, actualUid, pid.getInt(row), application.packageName, marker);
         } catch (ReflectiveOperationException | RuntimeException mismatch) {

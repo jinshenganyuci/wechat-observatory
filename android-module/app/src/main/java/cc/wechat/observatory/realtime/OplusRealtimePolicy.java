@@ -20,8 +20,12 @@ public final class OplusRealtimePolicy {
 
     private OplusRealtimePolicy() { }
 
+    static boolean isAuditedBuild() {
+        return Build.VERSION.SDK_INT == 36 && AUDITED_BUILD.equals(Build.FINGERPRINT);
+    }
+
     public static synchronized void install(ClassLoader loader) {
-        if (installed || FAILED.get() || Build.VERSION.SDK_INT != 36 || !AUDITED_BUILD.equals(Build.FINGERPRINT)) return;
+        if (installed || FAILED.get() || !isAuditedBuild()) return;
         List<XC_MethodHook.Unhook> hooks = new ArrayList<>();
         try {
             HansPolicyContract contract = new HansPolicyContract(
@@ -65,6 +69,10 @@ public final class OplusRealtimePolicy {
             if (!SystemProtectionRegistry.install(loader)) {
                 throw new IllegalStateException("Unsupported receiver lifecycle contract");
             }
+            SystemProtectionRegistry.setQueryDecisionSupplier(() -> {
+                try { return !FAILED.get() && contract.isThermallyUnrestricted(); }
+                catch (Throwable failure) { disable(failure); return false; }
+            });
             installed = true;
             SystemProtectionRegistry.setPolicyAvailable(true);
             XposedBridge.log("Observatory realtime: optional Hans policy ready; no UID registered yet");

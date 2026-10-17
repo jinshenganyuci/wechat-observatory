@@ -269,7 +269,7 @@ public final class WeChatConfigUi {
             backgroundRealtime = toggle(ui, fields, "Oplus 息屏保护",
                     "1".equals(snapshot.get("background_realtime_enabled")));
             TextView protectionNotice = new TextView(ui);
-            protectionNotice.setText("仅适用于已适配的一加 / OPPO 系统；需启用 LSPosed 系统框架作用域并重启，可能增加后台耗电。");
+            protectionNotice.setText("仅适用于已适配的一加 / OPPO 系统。需启用 LSPosed 系统框架和电池应用作用域并重启；网关运行时阻止本机夜间自动断网，可能增加息屏耗电。");
             protectionNotice.setTextSize(13);
             protectionNotice.setAlpha(0.75f);
             protectionNotice.setPadding(0, 0, 0, dp(ui, 8));

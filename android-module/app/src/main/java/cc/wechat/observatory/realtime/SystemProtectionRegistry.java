@@ -15,6 +15,7 @@ import android.os.UserHandle;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -26,6 +27,7 @@ public final class SystemProtectionRegistry {
     private static volatile boolean installed;
     private static boolean watchingPackages;
     private static ReceiverRegistrationLookup lookup;
+    private static volatile BooleanSupplier queryDecision = () -> false;
 
     private SystemProtectionRegistry() { }
 
@@ -34,6 +36,11 @@ public final class SystemProtectionRegistry {
 
     /** Only enable after every required, version-checked Hans hook was installed. */
     public static void setPolicyAvailable(boolean available) { TOKENS.setPolicyAvailable(available && installed); }
+
+    /** Read-only policy gate. Called outside AMS and token locks; unavailable means false. */
+    public static void setQueryDecisionSupplier(BooleanSupplier decision) {
+        queryDecision = decision == null ? () -> false : decision;
+    }
 
     public static synchronized boolean install(ClassLoader loader) {
         if (installed) return true;
@@ -56,11 +63,15 @@ public final class SystemProtectionRegistry {
             if (controllerService.getType() != ams) return false;
             hooks.add(XposedBridge.hookMethod(register, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!isMarkerRequest(param.args)) return;
+                    if (!isMarkerRequest(param.args) && !isPolicyQueryRequest(param.args)) return;
                     param.setObjectExtra("observatory.uid", Binder.getCallingUid());
                     param.setObjectExtra("observatory.pid", Binder.getCallingPid());
                 }
                 @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (installed && !param.hasThrowable() && isPolicyQueryRequest(param.args)) {
+                        answerPolicyQuery(param);
+                        return;
+                    }
                     if (!installed || !TOKENS.policyAvailable() || param.hasThrowable() || !isMarkerRequest(param.args)) return;
                     try {
                         Object uid = param.getObjectExtra("observatory.uid");
@@ -89,15 +100,18 @@ public final class SystemProtectionRegistry {
             hooks.add(XposedBridge.hookMethod(remove, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (param.hasThrowable() || param.args[0] == null) return;
+                    IBinder token = null;
                     try {
                         Object service = controllerService.get(param.thisObject);
-                        IBinder token = ((IInterface) actualReceiver.get(param.args[0])).asBinder();
+                        token = ((IInterface) actualReceiver.get(param.args[0])).asBinder();
+                        // Temporary queries and unrelated receivers never mutate protection state.
+                        if (!TOKENS.containsToken(token)) return;
                         synchronized (service) {
                             // Another registration of this binder must not be erased.
                             if (lookup.find(service, token) == null) TOKENS.remove(token);
                         }
                     } catch (Throwable unavailable) {
-                        TOKENS.revokeModule();
+                        if (token != null) TOKENS.remove(token);
                         logFailure("unregistration", unavailable);
                     }
                 }
@@ -120,6 +134,34 @@ public final class SystemProtectionRegistry {
                 && ReceiverRegistrationLookup.privateMarker((IntentFilter) args[5])
                 && args[8] instanceof Integer && (((Integer) args[8]) & Context.RECEIVER_NOT_EXPORTED) != 0
                 && (((Integer) args[8]) & Context.RECEIVER_EXPORTED) == 0;
+    }
+
+    private static boolean isPolicyQueryRequest(Object[] args) {
+        return args.length == 9 && RealtimePolicyQuery.BATTERY.equals(args[1])
+                && args[4] instanceof IInterface && args[5] instanceof IntentFilter
+                && RealtimePolicyQuery.nonceCategory((IntentFilter) args[5]) != null
+                && args[8] instanceof Integer && (((Integer) args[8]) & Context.RECEIVER_NOT_EXPORTED) != 0
+                && (((Integer) args[8]) & Context.RECEIVER_EXPORTED) == 0;
+    }
+
+    private static void answerPolicyQuery(XC_MethodHook.MethodHookParam param) {
+        try {
+            Object uid = param.getObjectExtra("observatory.uid");
+            Object pid = param.getObjectExtra("observatory.pid");
+            if (!(uid instanceof Integer) || !(pid instanceof Integer)) return;
+            IBinder token = ((IInterface) param.args[4]).asBinder();
+            String nonce = RealtimePolicyQuery.nonceCategory((IntentFilter) param.args[5]);
+            Boolean active = TOKENS.queryPolicy(param.thisObject,
+                    () -> lookup.findQuery(param.thisObject, token, nonce),
+                    (Integer) uid, (Integer) pid, queryDecision);
+            if (active != null) {
+                // Return only this fresh request's nonce and boolean; never broadcast it.
+                param.setResult(new Intent(RealtimePolicyQuery.ACTION).addCategory(nonce)
+                        .putExtra(RealtimePolicyQuery.ACTIVE, active.booleanValue()));
+            }
+        } catch (Throwable unavailable) {
+            // A read-only query must not revoke or create a WeChat protection token.
+        }
     }
 
     /** -1 means the registration must retain normal system power policy. */

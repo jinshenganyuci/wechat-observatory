@@ -23,8 +23,8 @@ android {
         applicationId "cc.wechat.observatory"
         minSdk 23
         targetSdk 35
-        versionCode 24
-        versionName "0.1.22-rc2-oplus"
+        versionCode 25
+        versionName "0.1.22-rc3-oplus"
     }
 
     testOptions {
