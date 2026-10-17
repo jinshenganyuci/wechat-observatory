@@ -26,6 +26,7 @@ type Config struct {
 	InstanceID          string
 	SessionTTL          time.Duration
 	PollInterval        time.Duration
+	OutboxTrace         bool
 	ModuleOfflineAfter  time.Duration
 	ModuleTakeoverAfter time.Duration
 	OfflineOutboxSweep  time.Duration
@@ -97,6 +98,10 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	cfg.MySQL.AutoMigrate = autoMigrate
+	cfg.OutboxTrace, err = getenvBool("BRIDGE_OUTBOX_TRACE", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	devices, err := parseDevices(os.Getenv("BRIDGE_DEVICES"))
 	if err != nil {

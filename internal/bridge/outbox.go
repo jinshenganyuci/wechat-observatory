@@ -106,6 +106,16 @@ func (o *MemoryOutbox) AckReplyActions(_ context.Context, req ModuleAckRequest) 
 	return out, nil
 }
 
+func (o *MemoryOutbox) ConfirmedReplyAcknowledgements(_ context.Context, req ModuleAckRequest) ([]ModuleOutboxItem, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	items := make([]ModuleOutboxItem, 0, len(o.items))
+	for _, item := range o.items {
+		items = append(items, item.ModuleOutboxItem)
+	}
+	return MatchingReplyAcknowledgements(items, req), nil
+}
+
 func (o *MemoryOutbox) CancelAccountOutbox(_ context.Context, device, keepOwner string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()

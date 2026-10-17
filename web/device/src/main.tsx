@@ -32,7 +32,7 @@ import {
 } from "./api";
 import type { DeviceApiKey, DeviceModule, ModuleInstallation } from "./types";
 import { InstallationList, type InstallationNotice } from "@/components/InstallationList";
-import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, parseApiError } from "@/installations";
+import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, installationIsStandby, moduleRuntimeStatus, parseApiError } from "@/installations";
 import "../../admin/src/index.css";
 
 const PASSWORD_KEY = "wgc_device_admin_password";
@@ -63,7 +63,7 @@ function App() {
 
   const credential = password.trim();
   const selectedModule = modules.find((item) => item.device === selectedDevice);
-  const onlineCount = modules.filter((item) => item.runtime_status === "online").length;
+  const onlineCount = modules.filter((item) => moduleRuntimeStatus(item) === "online").length;
   const enabledKeyCount = apiKeys.filter((item) => item.enabled !== false).length;
 
   React.useEffect(() => {
@@ -194,7 +194,7 @@ function App() {
 
   const switchInstallation = async (installation: ModuleInstallation) => {
     const device = selectedDevice;
-    if (!credential || !device || installation.active || switchingInstallation !== null) return;
+    if (!credential || !device || !installationIsStandby(installation) || switchingInstallation !== null) return;
     if (!window.confirm(`确认切到 ${installationDisplayName(installation)}？目标手机下一次心跳时接管。`)) return;
     setSwitchingInstallation(installation.id);
     setInstallationNotice(null);
@@ -264,7 +264,7 @@ function App() {
                       <strong className="block truncate text-sm">{item.device_nickname || item.device}</strong>
                       <small className="block truncate text-muted-foreground">{item.device}</small>
                     </span>
-                    <StatusBadge status={item.runtime_status} />
+                    <StatusBadge status={moduleRuntimeStatus(item)} />
                   </button>
                   <InstallationList compact className="border-t px-3 pb-3 pt-2" installations={item.installations} switchRequest={item.switch_request} />
                 </div>
@@ -286,7 +286,7 @@ function App() {
               <div className="grid gap-3 rounded-lg border bg-secondary/30 p-4 text-sm">
                 <Detail label="设备标识" value={selectedModule?.device || "-"} />
                 <Detail label="当前微信" value={selectedModule?.device_wxid || "未注册"} />
-                <Detail label="连接状态" value={statusText(selectedModule?.runtime_status)} />
+                <Detail label="连接状态" value={statusText(moduleRuntimeStatus(selectedModule))} />
                 <Detail label="最近活动" value={selectedModule?.last_seen_at ? `${formatBeijingTimeAgo(selectedModule.last_seen_at)} · ${formatBeijingDateTime(selectedModule.last_seen_at)}` : "-"} />
               </div>
               <div className="grid content-start gap-3">
@@ -297,6 +297,7 @@ function App() {
                 </Button>
               </div>
               <InstallationList
+                compact
                 className="rounded-lg border p-3 md:col-span-2"
                 installations={selectedModule?.installations}
                 switchRequest={selectedModule?.switch_request}

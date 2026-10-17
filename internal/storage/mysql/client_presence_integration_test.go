@@ -44,7 +44,7 @@ func TestClientPresenceMySQLIntegration(t *testing.T) {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
 		for _, table := range []string{"bridge_module_account_history", "bridge_module_account_current", "bridge_module_installations",
-			"bridge_module_switch_requests", "bridge_module_outbox", "bridge_module_runtime", "bridge_device_session_lease", "bridge_api_keys"} {
+			"bridge_module_switch_requests", "bridge_module_outbox", "bridge_module_runtime", "bridge_device_session_lease", "bridge_message_events", "bridge_api_keys"} {
 			if _, err := store.db.ExecContext(cleanup, "DELETE FROM "+table+" WHERE device=?", device); err != nil {
 				t.Error(err)
 			}
@@ -129,6 +129,31 @@ func TestClientPresenceMySQLIntegration(t *testing.T) {
 	}
 	if installed, runtime := readTimes(); !installed.Equal(received) || !runtime.Equal(received) {
 		t.Fatalf("out-of-order receipt rewound state: %v %v", installed, runtime)
+	}
+
+	// A lost ACK response can be retried after the task is terminal. Confirm
+	// precisely the committed result without changing it or creating an event.
+	id, err := s.SendText(ctx, bridge.SendTextRequest{Device: device, WxIDs: []string{"friend"}, Text: "idempotent ACK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items, err := s.PollOutbox(ctx, bridge.ModulePollRequest{APIKey: key, WxID: a.WxID, AccountSession: a.AccountSession}); err != nil || len(items) != 1 {
+		t.Fatalf("lease for ACK: %+v %v", items, err)
+	}
+	ack := bridge.ModuleAckRequest{APIKey: key, WxID: a.WxID, AccountSession: a.AccountSession,
+		Items: []bridge.ModuleAckItem{{ID: id, Status: "sent", ChatRecordID: id}}}
+	for i := 0; i < 2; i++ {
+		if items, err := s.AckOutbox(ctx, ack); err != nil || len(items) != 1 || items[0].ID != id {
+			t.Fatalf("ACK/retry %d: %+v %v", i, items, err)
+		}
+	}
+	ack.Items[0].Status = "failed"
+	if items, err := s.AckOutbox(ctx, ack); err != nil || len(items) != 0 {
+		t.Fatalf("conflicting terminal ACK confirmed: %+v %v", items, err)
+	}
+	var eventCount int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bridge_message_events WHERE device=?", device).Scan(&eventCount); err != nil || eventCount != 1 {
+		t.Fatalf("ACK retry duplicated outbound event: count=%d err=%v", eventCount, err)
 	}
 
 	b.Takeover = bridge.TakeoverForeground

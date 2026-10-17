@@ -331,11 +331,10 @@ func (s *Service) AckOutbox(ctx context.Context, req ModuleAckRequest) (items []
 		if _, err := req.Validate(s.cfg.DefaultDevice); err != nil {
 			return err
 		}
-		if receivedAt := clientReceipt(ctx); !receivedAt.IsZero() {
-			if err := s.observeClientPresenceLocked(ctx, req.APIKey, owner, req.AccountSession, receivedAt); err != nil {
-				return err
-			}
-		}
+		// Persist the business result independently of auxiliary presence. The
+		// account lock and ackOutbox still validate the current session/key.
+		// WS presence is queued by its reader; HTTP polling renews installation
+		// presence, while the ACK itself records the actual runtime receipt.
 		items, err = s.ackOutbox(ctx, req)
 		return err
 	})

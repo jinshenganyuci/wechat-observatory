@@ -61,6 +61,7 @@ func main() {
 		InstanceID:             cfg.InstanceID,
 		SessionTTL:             cfg.SessionTTL,
 		PollInterval:           cfg.PollInterval,
+		OutboxTrace:            cfg.OutboxTrace,
 		OfflineAfter:           cfg.ModuleOfflineAfter,
 		TakeoverAfter:          cfg.ModuleTakeoverAfter,
 		EventIdentityV2Devices: cfg.EventIdentityV2,

@@ -18,14 +18,17 @@ import (
 )
 
 const (
-	websocketGUID                  = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	wsOpText                  byte = 0x1
-	wsOpClose                 byte = 0x8
-	wsOpPing                  byte = 0x9
-	wsOpPong                  byte = 0xA
-	wsMaxPayload                   = 1 << 20
-	outboxWSProbeTimeout           = 3 * time.Second
-	outboxWSActivityFreshness      = 30 * time.Second
+	websocketGUID                    = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	wsOpText                    byte = 0x1
+	wsOpClose                   byte = 0x8
+	wsOpPing                    byte = 0x9
+	wsOpPong                    byte = 0xA
+	wsMaxPayload                     = 1 << 20
+	outboxWSProbeTimeout             = 3 * time.Second
+	outboxWSActivityFreshness        = 30 * time.Second
+	outboxWSAckTimeout               = 65 * time.Second
+	outboxWSAckOperationTimeout      = 5 * time.Second
+	outboxWSPresenceTimeout          = 2 * time.Second
 )
 
 type outboxWSMessage struct {
@@ -38,6 +41,10 @@ type outboxWSMessage struct {
 }
 
 func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
+	s.outboxWebSocketWithAckTimeout(w, r, outboxWSAckTimeout)
+}
+
+func (s *HTTPServer) outboxWebSocketWithAckTimeout(w http.ResponseWriter, r *http.Request, ackTimeout time.Duration) {
 	apiKey := strings.TrimSpace(r.URL.Query().Get("api_key"))
 	device := strings.TrimSpace(r.URL.Query().Get("device"))
 	wxid := strings.TrimSpace(r.URL.Query().Get("wxid"))
@@ -70,8 +77,13 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "websocket_upgrade_failed", err.Error())
 		return
 	}
-	defer conn.close()
-	defer s.service.ReleaseOutboxSession(context.Background(), session)
+	defer func() {
+		// Do not leave the old transport open while releasing a durable lease.
+		conn.close()
+		releaseCtx, done := context.WithTimeout(context.Background(), 3*time.Second)
+		defer done()
+		s.service.ReleaseOutboxSession(releaseCtx, session)
+	}()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -98,7 +110,20 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer renew.Stop()
 
 	var lastInbound time.Time
-	var inFlight bool
+	var inFlightID int64
+	var ackTimer *time.Timer
+	var ackDeadline <-chan time.Time
+	stopAck := func() {
+		if ackTimer != nil && !ackTimer.Stop() {
+			select {
+			case <-ackTimer.C:
+			default:
+			}
+		}
+		ackTimer = nil
+		ackDeadline = nil
+	}
+	defer stopAck()
 	var deliveryRequested bool
 	var probeTimer *time.Timer
 	var probeDeadline <-chan time.Time
@@ -138,15 +163,21 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 		if len(items) == 0 {
 			return true
 		}
+		started := time.Now()
 		if !conn.writeJSON(outboxWSMessage{Type: "outbox", OK: true, Items: items, Time: time.Now().Unix()}) {
 			return false
 		}
-		inFlight = true
+		for _, item := range items {
+			s.service.traceOutbox(outboxTraceWSWritten, item.ID, item.AttemptCount, time.Since(started))
+		}
+		inFlightID = items[0].ID
+		ackTimer = time.NewTimer(ackTimeout)
+		ackDeadline = ackTimer.C
 		return true
 	}
 	requestDelivery := func(forceProbe bool) bool {
 		deliveryRequested = true
-		if inFlight || probeDeadline != nil {
+		if inFlightID != 0 || probeDeadline != nil {
 			return true
 		}
 		if forceProbe || lastInbound.IsZero() || s.service.now().Sub(lastInbound) > outboxWSActivityFreshness {
@@ -169,11 +200,17 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if probeDeadline != nil && !receivedAt.Before(probeStarted) {
 				stopProbe()
-				if deliveryRequested && !inFlight && !deliver() {
+				if deliveryRequested && inFlightID == 0 && !deliver() {
 					return
 				}
 			}
 		case <-probeDeadline:
+			return
+		case <-ackDeadline:
+			// Heartbeats cannot hold the queue indefinitely without a task ACK.
+			// Preserve the existing 60s durable lease: never blindly release or
+			// send another task while the previous native send is uncertain.
+			log.Printf("module outbox acknowledgement timeout device=%q task_id=%d", device, inFlightID)
 			return
 		case msg := <-outgoing:
 			switch msg.Type {
@@ -188,15 +225,16 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			case "ack":
-				if msg.OK && len(msg.Items) > 0 {
-					inFlight = false
+				if msg.OK && outboxAcknowledgesFlight(msg.Items, inFlightID) {
+					inFlightID = 0
+					stopAck()
 				}
 			}
 			if !conn.writeJSON(msg) {
 				return
 			}
 		case <-notify:
-			if !requestDelivery(true) {
+			if !requestDelivery(false) {
 				return
 			}
 		case <-poll.C:
@@ -220,6 +258,18 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func outboxAcknowledgesFlight(items []ModuleOutboxItem, id int64) bool {
+	if id == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.ID == id && (item.Status == "sent" || item.Status == "failed") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *HTTPServer) readOutboxWS(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -234,6 +284,14 @@ func (s *HTTPServer) readOutboxWS(
 ) {
 	defer cancel()
 	presence := make(chan time.Time, 1)
+	var receiptMu sync.Mutex
+	recordReceipt := func(receivedAt time.Time) {
+		// The reader and ACK worker share these two coalescing mailboxes.
+		receiptMu.Lock()
+		defer receiptMu.Unlock()
+		publishClientReceipt(activity, receivedAt)
+		publishClientReceipt(presence, receivedAt)
+	}
 	go observeClientReceipts(ctx, cancel, presence, func(ctx context.Context, receivedAt time.Time) error {
 		err := s.service.ObserveModuleClientActivity(ctx, apiKey, wxid, accountSession, receivedAt)
 		if err != nil && ctx.Err() == nil {
@@ -242,6 +300,8 @@ func (s *HTTPServer) readOutboxWS(
 		}
 		return err
 	})
+	acks := make(chan outboxWSAckRequest, 4)
+	go s.processOutboxWSAcks(ctx, cancel, acks, outgoing, recordReceipt)
 	for {
 		payload, op, err := conn.readFrame()
 		if err != nil {
@@ -252,54 +312,112 @@ func (s *HTTPServer) readOutboxWS(
 		case wsOpClose:
 			return
 		case wsOpPing:
-			publishClientReceipt(activity, receivedAt)
+			recordReceipt(receivedAt)
 			if !conn.writeControl(wsOpPong, payload) {
 				return
 			}
-			publishClientReceipt(presence, receivedAt)
 		case wsOpPong:
 			publishClientReceipt(pong, receivedAt)
-			publishClientReceipt(presence, receivedAt)
+			recordReceipt(receivedAt)
 			continue
 		case wsOpText:
 			var msg outboxWSMessage
 			if err := json.Unmarshal(payload, &msg); err != nil {
-				outgoing <- outboxWSMessage{Type: "error", Error: "invalid json: " + err.Error(), Time: time.Now().Unix()}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: "invalid json: " + err.Error(), Time: time.Now().Unix()}) {
+					return
+				}
 				continue
 			}
 			switch strings.ToLower(strings.TrimSpace(msg.Type)) {
 			case "ack":
 				if msg.Ack == nil {
-					outgoing <- outboxWSMessage{Type: "error", Error: "ack payload is required", Time: time.Now().Unix()}
+					if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: "ack payload is required", Time: time.Now().Unix()}) {
+						return
+					}
 					continue
 				}
 				msg.Ack.APIKey = apiKey
 				msg.Ack.Device = device
 				msg.Ack.WxID = wxid
 				msg.Ack.AccountSession = accountSession
-				items, err := s.service.AckOutbox(withClientReceipt(ctx, receivedAt), *msg.Ack)
-				if err != nil {
-					outgoing <- outboxWSMessage{Type: "error", Error: err.Error(), Time: time.Now().Unix()}
-					if isModuleAuthError(err) {
-						return
-					}
-					continue
+				for _, item := range msg.Ack.Items {
+					s.service.traceOutbox(outboxTraceAckReceived, item.ID, 0, 0)
 				}
-				publishClientReceipt(activity, receivedAt)
-				outgoing <- outboxWSMessage{Type: "ack", OK: true, Items: items, Time: time.Now().Unix()}
-				outgoing <- outboxWSMessage{Type: "wake"}
+				for _, id := range msg.Ack.IDs {
+					s.service.traceOutbox(outboxTraceAckReceived, id, 0, 0)
+				}
+				select {
+				case acks <- outboxWSAckRequest{request: *msg.Ack, receivedAt: receivedAt}:
+				case <-ctx.Done():
+					return
+				default:
+					// Bound queued database work. The module retains the result
+					// and can retry its ACK after reconnecting, without resending.
+					return
+				}
 			case "poll", "wake":
-				publishClientReceipt(activity, receivedAt)
-				publishClientReceipt(presence, receivedAt)
-				outgoing <- outboxWSMessage{Type: "wake"}
+				recordReceipt(receivedAt)
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "wake"}) {
+					return
+				}
 			case "pong":
-				publishClientReceipt(activity, receivedAt)
-				publishClientReceipt(presence, receivedAt)
+				recordReceipt(receivedAt)
 				continue
 			default:
-				outgoing <- outboxWSMessage{Type: "error", Error: "unknown message type", Time: time.Now().Unix()}
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: "unknown message type", Time: time.Now().Unix()}) {
+					return
+				}
 			}
 		}
+	}
+}
+
+type outboxWSAckRequest struct {
+	request    ModuleAckRequest
+	receivedAt time.Time
+}
+
+// One ordered, bounded database worker leaves the socket reader free to answer
+// control frames while an ACK waits for a lock or durable storage. It never
+// invokes the native sender or releases a task lease on an uncertain result.
+func (s *HTTPServer) processOutboxWSAcks(ctx context.Context, cancel context.CancelFunc, requests <-chan outboxWSAckRequest,
+	outgoing chan<- outboxWSMessage, recordReceipt func(time.Time)) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ack := <-requests:
+			if ctx.Err() != nil {
+				return
+			}
+			operation, done := context.WithTimeout(ctx, outboxWSAckOperationTimeout)
+			items, err := s.service.AckOutbox(withClientReceipt(operation, ack.receivedAt), ack.request)
+			done()
+			if err != nil {
+				if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "error", Error: err.Error(), Time: time.Now().Unix()}) {
+					return
+				}
+				if isModuleAuthError(err) {
+					cancel()
+					return
+				}
+				continue
+			}
+			recordReceipt(ack.receivedAt)
+			if !sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "ack", OK: true, Items: items, Time: time.Now().Unix()}) ||
+				!sendOutboxWSMessage(ctx, outgoing, outboxWSMessage{Type: "wake"}) {
+				return
+			}
+		}
+	}
+}
+
+func sendOutboxWSMessage(ctx context.Context, outgoing chan<- outboxWSMessage, message outboxWSMessage) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case outgoing <- message:
+		return true
 	}
 }
 
@@ -316,15 +434,31 @@ func observeClientReceipts(ctx context.Context, cancel context.CancelFunc, recei
 			if ctx.Err() != nil {
 				return
 			}
-			if err := observe(ctx, receivedAt); err != nil {
-				cancel()
-				return
+			operation, done := context.WithTimeout(ctx, outboxWSPresenceTimeout)
+			err := observe(operation, receivedAt)
+			done()
+			if err != nil {
+				if isModuleAuthError(err) {
+					cancel()
+					return
+				}
+				// A storage outage is not proof that the authenticated peer has
+				// gone away. Retry only with a later actual receipt; the bounded
+				// mailbox coalesces arrivals while we back off. Delivery/ACK
+				// continue to perform their own authoritative session checks.
+				timer := time.NewTimer(time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}
 }
 
-// The reader is the only producer. Keep the newest receipt when the writer is
+// Callers serialize producers. Keep the newest receipt when the writer is
 // busy, so a pre-probe pong cannot crowd out the response to the current probe.
 func publishClientReceipt(mailbox chan time.Time, receivedAt time.Time) {
 	select {

@@ -5,6 +5,23 @@ import (
 	"time"
 )
 
+func TestOutboxTraceIsExplicitlyOptIn(t *testing.T) {
+	t.Setenv("BRIDGE_MYSQL_DSN", "test:test@tcp(localhost:3306)/observatory_test")
+	for _, value := range []string{"", "false", "true", "invalid"} {
+		t.Setenv("BRIDGE_OUTBOX_TRACE", value)
+		cfg, err := LoadFromEnv()
+		if value == "invalid" {
+			if err == nil {
+				t.Fatal("invalid trace flag accepted")
+			}
+			continue
+		}
+		if err != nil || cfg.OutboxTrace != (value == "true") {
+			t.Fatalf("trace flag %q: enabled=%v err=%v", value, cfg.OutboxTrace, err)
+		}
+	}
+}
+
 func TestLoadFromEnvParsesRuntimeConfig(t *testing.T) {
 	t.Setenv("BRIDGE_HTTP_ADDR", ":8088")
 	t.Setenv("BRIDGE_ADMIN_PASSWORD", "admin")

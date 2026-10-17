@@ -25,12 +25,16 @@ public final class OutboxDeliveryCache {
     }
 
     public synchronized SendResult get(String scope, long id, String recipient, String text, String createdAt) {
-        return completed.get(digest(scope, String.valueOf(id), recipient, text, createdAt));
+        return completed.get(taskKey(scope, id, recipient, text, createdAt));
     }
 
     public synchronized void remember(String scope, long id, String recipient, String text,
                                       String createdAt, SendResult result) {
-        completed.put(digest(scope, String.valueOf(id), recipient, text, createdAt), result);
+        completed.put(taskKey(scope, id, recipient, text, createdAt), result);
+    }
+
+    public static String taskKey(String scope, long id, String recipient, String text, String createdAt) {
+        return digest(scope, String.valueOf(id), recipient, text, createdAt);
     }
 
     private static String digest(String... parts) {

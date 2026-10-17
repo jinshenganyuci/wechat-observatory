@@ -57,6 +57,8 @@ import cc.wechat.observatory.config.ConfigOperationGuard;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
 import cc.wechat.observatory.gateway.OutboxReconnectPolicy;
+import cc.wechat.observatory.gateway.OutboxAckTracker;
+import cc.wechat.observatory.gateway.ConnectionFrameWriter;
 import cc.wechat.observatory.gateway.SocketWriteDeadline;
 import cc.wechat.observatory.util.MainThreadDispatcher;
 import cc.wechat.observatory.util.RuntimeConnectionMonitor;
@@ -67,10 +69,12 @@ import cc.wechat.observatory.wechat.LocalMessageConfirmation;
 import cc.wechat.observatory.wechat.QueueSubmissionRetrier;
 import cc.wechat.observatory.wechat.OutboxDeliveryPacing;
 import cc.wechat.observatory.wechat.OutboxDeliveryCache;
+import cc.wechat.observatory.wechat.OutboxDeliveryCoordinator;
 import cc.wechat.observatory.wechat.SendResult;
 import cc.wechat.observatory.wechat.RuntimeAccount;
 import cc.wechat.observatory.wechat.AccountSession;
 import cc.wechat.observatory.wechat.AccountDatabaseSelector;
+import cc.wechat.observatory.wechat.AccountMessageStatusReader;
 import cc.wechat.observatory.wechat.WeChatAccountResolver;
 import cc.wechat.observatory.wechat.WeChatVersionProfile;
 import cc.wechat.observatory.wechat.DeviceRole;
@@ -101,7 +105,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile long LAST_CONTACT_SCAN_LOG_AT = 0L;
     private static volatile boolean CAPABILITY_REPORTED = false;
     private static volatile long LAST_WEBSOCKET_FAIL_LOG_AT = 0L;
-    private static final OutboxDeliveryCache OUTBOX_DELIVERIES = new OutboxDeliveryCache(512);
+    private static final OutboxDeliveryCoordinator OUTBOX_DELIVERIES =
+            new OutboxDeliveryCoordinator(32, 512);
     private static volatile String CURRENT_WXID = "";
     private static volatile String REGISTERED_KEY = "";
     private static volatile String REGISTERED_DEVICE = "";
@@ -770,7 +775,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                             }
                         }
                         long now = android.os.SystemClock.elapsedRealtime();
-                        if (!FORCE_REREGISTER && !configChanged(config) && reconnect.shouldPollHttp(now)) {
+                        if (!OUTBOX_DELIVERIES.hasPending() && !FORCE_REREGISTER
+                                && !configChanged(config) && reconnect.shouldPollHttp(now)) {
                             reconnect.polledHttp(now);
                             noteOutboxStage("http-fallback");
                             completedOutboxItem = pollOutbox(config, classLoader);
@@ -2358,6 +2364,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
         if (!isCurrentAccount(account)) {
             return null;
         }
+        return findVerifiedAccountDatabase(account, contacts);
+    }
+
+    // Caller has already checked the kernel account on the main thread. Confirmation
+    // captures this exact handle once and never follows another account's database.
+    private static Object findVerifiedAccountDatabase(RuntimeAccount account, boolean contacts) {
         Object cached = contacts ? account.contactDatabase : account.messageDatabase;
         String query = contacts
                 ? "SELECT username,nickname,conRemark,alias,type,verifyFlag FROM rcontact LIMIT 0"
@@ -2677,59 +2689,72 @@ public final class HookEntry implements IXposedHookLoadPackage {
             reconnect.connected(android.os.SystemClock.elapsedRealtime());
             log("outbox websocket connected host=" + hostHeader + " device=" + config.device);
             noteOutboxStage("websocket-idle");
-            writeWebSocketText(socket, output, "{\"type\":\"poll\"}");
 
-            while (!Thread.currentThread().isInterrupted()) {
-                if (!currentStreamAllows(config, streamSession, connectionRevision)) {
-                    log("outbox websocket config or WeChat identity changed; reconnect");
-                    return;
-                }
-                WebSocketFrame frame = readWebSocketFrame(input);
-                // read() may span an account/config change. Recheck before
-                // accepting a delivery or replying to its liveness probe.
-                if (!currentStreamAllows(config, streamSession, connectionRevision)) return;
-                noteOutboxStage("websocket-idle");
-                if (frame.opcode == 0x8) {
-                    return;
-                }
-                if (frame.opcode == 0x9) {
-                    writeWebSocketFrame(socket, output, 0xA, frame.payload);
-                    continue;
-                }
-                if (frame.opcode == 0xA) {
-                    continue;
-                }
-                if (frame.opcode != 0x1) {
-                    continue;
-                }
-                JSONObject root = new JSONObject(new String(frame.payload, StandardCharsets.UTF_8));
-                String type = root.optString("type", "");
-                if ("outbox".equals(type)) {
-                    noteOutboxStage("websocket-send");
-                    JSONArray ackItems = handleOutboxItems(root.optJSONArray("items"), classLoader, config, streamSession);
-                    if (ackItems.length() > 0) {
-                        if (FORCE_REREGISTER || streamSession != config.runtimeAccount.session || configChanged(config)) return;
-                        JSONObject ackBody = new JSONObject();
-                        ackBody.put("type", "ack");
-                        JSONObject ack = new JSONObject();
-                        ack.put("api_key", config.apiKey);
-                        ack.put("device", config.device);
-                        ack.put("wxid", config.selfWxid);
-                        ack.put("account_session", streamSession.id);
-                        ack.put("items", ackItems);
-                        ackBody.put("ack", ack);
-                        noteOutboxStage("websocket-ack");
-                        writeWebSocketText(socket, output, ackBody.toString());
-                        noteOutboxStage("websocket-idle");
-                    }
-                } else if ("ready".equals(type)) {
-                    log("outbox websocket ready");
-                } else if ("error".equals(type)) {
-                    String error = root.optString("error", "");
-                    log("outbox websocket server error: " + error);
-                    if (error.contains("account session conflict") || error.contains("device session lease lost")) {
-                        FORCE_REREGISTER = true;
+            try (ConnectionFrameWriter writer = new ConnectionFrameWriter(socket, output,
+                    () -> currentStreamAllows(config, streamSession, connectionRevision));
+                 OutboxAckTracker acknowledgements = new OutboxAckTracker(
+                         ack -> writeWebSocketText(writer, ack.payload),
+                         error -> { logWebSocketFailure("outbox acknowledgement failed: " + shortError(error)); writer.close(); })) {
+                writeWebSocketText(writer, "{\"type\":\"poll\"}");
+                while (!Thread.currentThread().isInterrupted()) {
+                    if (!currentStreamAllows(config, streamSession, connectionRevision)) {
+                        log("outbox websocket config or WeChat identity changed; reconnect");
                         return;
+                    }
+                    WebSocketFrame frame = readWebSocketFrame(input);
+                    // read() may span an account/config change. Recheck before
+                    // accepting a delivery or replying to its liveness probe.
+                    if (!currentStreamAllows(config, streamSession, connectionRevision)) return;
+                    noteOutboxStage("websocket-idle");
+                    if (frame.opcode == 0x8) {
+                        return;
+                    }
+                    if (frame.opcode == 0x9) {
+                        writeWebSocketFrame(writer, 0xA, frame.payload);
+                        continue;
+                    }
+                    if (frame.opcode == 0xA) {
+                        continue;
+                    }
+                    if (frame.opcode != 0x1) {
+                        continue;
+                    }
+                    JSONObject root = new JSONObject(new String(frame.payload, StandardCharsets.UTF_8));
+                    String type = root.optString("type", "");
+                    if ("outbox".equals(type)) {
+                        JSONArray items = root.optJSONArray("items");
+                        if (items == null) continue;
+                        for (int i = 0; i < items.length(); i++) {
+                            JSONObject item = items.getJSONObject(i);
+                            final long id = item.optLong("id", 0L);
+                            if (id <= 0 || isBlank(item.optString("wxid", "")) || isBlank(item.optString("text", ""))) continue;
+                            final OutboxDeliveryCoordinator.Delivery delivery = submitOutboxItem(item, classLoader, config, streamSession);
+                            acknowledgements.track(id, delivery.key, () -> {
+                                if (!delivery.isDone()) return null;
+                                SendResult result = delivery.await();
+                                JSONObject ack = outboxAckItem(id, result);
+                                JSONObject payload = outboxAckBody(config, streamSession, new JSONArray().put(ack));
+                                JSONObject body = new JSONObject().put("type", "ack").put("ack", payload);
+                                return new OutboxAckTracker.Ack(id, result.ok ? "sent" : "failed",
+                                        result.chatRecordId, result.ok ? "" : result.error, body.toString());
+                            });
+                        }
+                    } else if (("ack".equals(type) || "acked".equals(type)) && root.optBoolean("ok", false)) {
+                        JSONArray items = root.optJSONArray("items");
+                        if (items != null) for (int i = 0; i < items.length(); i++) {
+                            JSONObject item = items.getJSONObject(i);
+                            acknowledgements.acknowledge(item.optLong("id", 0L), item.optString("status", ""),
+                                    item.optLong("chat_record_id", 0L), item.optString("last_error", ""));
+                        }
+                    } else if ("ready".equals(type)) {
+                        log("outbox websocket ready");
+                    } else if ("error".equals(type)) {
+                        String error = root.optString("error", "");
+                        log("outbox websocket server error: " + error);
+                        if (error.contains("account session conflict") || error.contains("device session lease lost")) {
+                            FORCE_REREGISTER = true;
+                            return;
+                        }
                     }
                 }
             }
@@ -2766,47 +2791,59 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static JSONArray handleOutboxItems(JSONArray items, ClassLoader classLoader, BridgeConfig config,
                                               AccountSession deliverySession) throws Exception {
         JSONArray ackItems = new JSONArray();
-        if (items == null) {
-            return ackItems;
-        }
+        if (items == null) return ackItems;
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
-            long id = item.optLong("id", 0);
-            String wxid = item.optString("wxid", "");
-            String text = item.optString("text", "");
-            if (id <= 0 || isBlank(wxid) || isBlank(text)) {
-                continue;
-            }
-            if (!config.selfWxid.equals(item.optString("owner_wxid", ""))
-                    || !config.device.equals(item.optString("device", ""))
-                    || FORCE_REREGISTER || deliverySession != config.runtimeAccount.session || configChanged(config)) {
-                throw new IllegalStateException("Outbox account scope changed");
-            }
-            long started = System.currentTimeMillis();
-            String scope = outboxDeliveryScope(config, deliverySession);
-            String createdAt = item.optString("created_at", "");
-            SendResult result = OUTBOX_DELIVERIES.get(scope, id, wxid, text, createdAt);
-            if (result == null) {
-                result = sendText(classLoader, wxid, text, config, deliverySession);
-                // Keep the result before writing its ACK so a reconnect cannot
-                // enqueue the same task again if the ACK was lost in transit.
-                OUTBOX_DELIVERIES.remember(scope, id, wxid, text, createdAt, result);
-            } else {
-                log("outbox replay cached delivery acknowledgement id=" + id);
-            }
-            logSlowOutboxStage("send", id, started);
-            JSONObject ack = new JSONObject();
-            ack.put("id", id);
-            ack.put("status", result.ok ? "sent" : "failed");
-            if (result.chatRecordId > 0) {
-                ack.put("chat_record_id", result.chatRecordId);
-            }
-            if (!result.ok) {
-                ack.put("error", result.error);
-            }
-            ackItems.put(ack);
+            long id = item.optLong("id", 0L);
+            if (id <= 0 || isBlank(item.optString("wxid", "")) || isBlank(item.optString("text", ""))) continue;
+            // HTTP fallback joins the same process-wide job as any old WebSocket.
+            OutboxDeliveryCoordinator.Delivery delivery = submitOutboxItem(item, classLoader, config, deliverySession);
+            // Fallback must not trap the connection worker behind an old native
+            // transaction. A timeout never cancels that transaction or its key.
+            SendResult result = config.outboxWebSocketEnabled ? delivery.await(5000L) : delivery.await();
+            ackItems.put(outboxAckItem(id, result));
         }
         return ackItems;
+    }
+
+    private static OutboxDeliveryCoordinator.Delivery submitOutboxItem(JSONObject item, ClassLoader classLoader,
+                                                                       BridgeConfig config, AccountSession session) {
+        long id = item.optLong("id", 0L);
+        String recipient = item.optString("wxid", "");
+        String text = item.optString("text", "");
+        String createdAt = item.optString("created_at", "");
+        if (!config.selfWxid.equals(item.optString("owner_wxid", ""))
+                || !config.device.equals(item.optString("device", "")) || !currentDeliveryScopeAllows(config, session)) {
+            throw new IllegalStateException("Outbox account scope changed");
+        }
+        return OUTBOX_DELIVERIES.submit(outboxDeliveryScope(config, session), id, recipient, text, createdAt, () -> {
+            // This runs on the sole delivery worker, never on the socket reader.
+            // Native preparation and submission each recheck the real kernel account on main.
+            if (!currentDeliveryScopeAllows(config, session) || configChanged(config)) {
+                throw new IllegalStateException("Outbox account scope changed before delivery");
+            }
+            long started = System.currentTimeMillis();
+            SendResult result = sendText(classLoader, recipient, text, config, session);
+            try { logSlowOutboxStage("send", id, started); } catch (Throwable ignored) { }
+            return result;
+        });
+    }
+
+    private static boolean currentDeliveryScopeAllows(BridgeConfig config, AccountSession session) {
+        return !FORCE_REREGISTER && config.runtimeAccount != null && CURRENT_ACCOUNT == config.runtimeAccount
+                && session == config.runtimeAccount.session && currentConfigurationAllows(config);
+    }
+
+    private static JSONObject outboxAckItem(long id, SendResult result) throws Exception {
+        JSONObject ack = new JSONObject().put("id", id).put("status", result.ok ? "sent" : "failed");
+        if (result.chatRecordId > 0) ack.put("chat_record_id", result.chatRecordId);
+        if (!result.ok) ack.put("error", result.error);
+        return ack;
+    }
+
+    private static JSONObject outboxAckBody(BridgeConfig config, AccountSession session, JSONArray items) throws Exception {
+        return new JSONObject().put("api_key", config.apiKey).put("device", config.device)
+                .put("wxid", config.selfWxid).put("account_session", session.id).put("items", items);
     }
 
     private static String outboxDeliveryScope(BridgeConfig config) {
@@ -2921,11 +2958,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return value & 0xFF;
     }
 
-    private static void writeWebSocketText(Socket socket, OutputStream output, String text) throws Exception {
-        writeWebSocketFrame(socket, output, 0x1, text.getBytes(StandardCharsets.UTF_8));
+    private static void writeWebSocketText(ConnectionFrameWriter writer, String text) throws Exception {
+        writeWebSocketFrame(writer, 0x1, text.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void writeWebSocketFrame(Socket socket, OutputStream output, int opcode, byte[] payload) throws Exception {
+    private static void writeWebSocketFrame(ConnectionFrameWriter writer, int opcode, byte[] payload) throws Exception {
         if (payload == null) {
             payload = new byte[0];
         }
@@ -2951,10 +2988,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             frame.write(payload[i] ^ mask[i % 4]);
         }
         byte[] encoded = frame.toByteArray();
-        SocketWriteDeadline.run(socket, () -> {
-            output.write(encoded);
-            output.flush();
-        });
+        writer.write(encoded);
     }
 
     private static Socket openGatewaySocket(String host, int port, boolean tls) throws Exception {
@@ -3020,6 +3054,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         final ClassLoader targetClassLoader = classLoader;
         final String targetWxid = wxid;
         final String targetText = text;
+        final AccountMessageStatusReader[] confirmation = new AccountMessageStatusReader[1];
         try {
             final PreparedTextSend prepared = callOnMainThread(new Callable<PreparedTextSend>() {
                 @Override
@@ -3028,7 +3063,20 @@ public final class HookEntry implements IXposedHookLoadPackage {
                             || deliverySession != account.session || !isCurrentAccount(account)) {
                         return PreparedTextSend.completed(SendResult.failed("Gateway configuration or WeChat account changed before send"));
                     }
-                    return prepareTextSendOnWeChatThread(targetClassLoader, targetWxid, targetText);
+                    PreparedTextSend prepared = prepareTextSendOnWeChatThread(targetClassLoader, targetWxid, targetText);
+                    if (prepared.result != null) return prepared;
+                    // Preparation may open the account's message DB for the first time.
+                    // Capture after preparation, still inside the verified main-thread transaction.
+                    confirmation[0] = new AccountMessageStatusReader(account,
+                            findVerifiedAccountDatabase(account, false),
+                            () -> currentDeliveryScopeAllows(config, deliverySession),
+                            new AccountMessageStatusReader.Database() {
+                                @Override public String path(Object db) { return databasePath(db); }
+                                @Override public int status(Object db, long localId) throws Exception {
+                                    return readLocalMessageStatus(localId, db);
+                                }
+                            });
+                    return prepared;
                 }
             });
             if (prepared.result != null) {
@@ -3072,14 +3120,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     SEND_QUEUE_MAX_ATTEMPTS,
                     SEND_QUEUE_RETRY_DELAY_MS);
             if (!accepted) {
-                LocalMessageConfirmation.Result confirmation = confirmLocalMessage(prepared.chatRecordId, account);
-                if (confirmation == LocalMessageConfirmation.Result.SENT) {
+                LocalMessageConfirmation.Result localStatus = confirmLocalMessage(prepared.chatRecordId, confirmation[0]);
+                if (localStatus == LocalMessageConfirmation.Result.SENT) {
                     log("sendText confirmed by local message status wxid=" + targetWxid
                             + " msgType=" + prepared.msgType
                             + " msgId=" + prepared.chatRecordId);
                     return SendResult.sent(prepared.chatRecordId);
                 }
-                if (confirmation == LocalMessageConfirmation.Result.FAILED) {
+                if (localStatus == LocalMessageConfirmation.Result.FAILED) {
                     return SendResult.failed(prepared.chatRecordId,
                             "WeChat local message marked failed; local msg id=" + prepared.chatRecordId);
                 }
@@ -3100,7 +3148,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         new LocalMessageConfirmation.StatusReader() {
                             @Override
                             public int readStatus() throws Exception {
-                                return readLocalMessageStatus(prepared.chatRecordId, account);
+                                return confirmation[0].read(prepared.chatRecordId);
                             }
                         },
                         new LocalMessageConfirmation.Sleeper() {
@@ -3122,7 +3170,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
     }
 
-    private static LocalMessageConfirmation.Result confirmLocalMessage(final long chatRecordId, final RuntimeAccount account) throws Exception {
+    private static LocalMessageConfirmation.Result confirmLocalMessage(final long chatRecordId, final AccountMessageStatusReader reader) throws Exception {
         if (chatRecordId <= 0L) {
             return LocalMessageConfirmation.Result.TIMEOUT;
         }
@@ -3130,7 +3178,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 new LocalMessageConfirmation.StatusReader() {
                     @Override
                     public int readStatus() throws Exception {
-                        return readLocalMessageStatus(chatRecordId, account);
+                        return reader.read(chatRecordId);
                     }
                 },
                 new LocalMessageConfirmation.Sleeper() {
@@ -3143,8 +3191,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 SEND_QUEUE_RETRY_DELAY_MS);
     }
 
-    private static int readLocalMessageStatus(long chatRecordId, RuntimeAccount account) throws Exception {
-        Object db = findAccountDatabase(account, false);
+    private static int readLocalMessageStatus(long chatRecordId, Object db) throws Exception {
         if (db == null) {
             return LocalMessageConfirmation.STATUS_UNKNOWN;
         }

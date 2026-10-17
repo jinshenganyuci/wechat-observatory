@@ -16,7 +16,14 @@ export type InstallationTone = "success" | "outline" | "secondary" | "destructiv
 /** 在用 / 在用·离线 / 待命 / 离线 */
 export function installationStateLabel(item: Pick<ModuleInstallation, "active" | "state">) {
   if (item.active) return item.state === "offline" ? "在用·离线" : "在用";
-  return item.state === "offline" ? "离线" : "待命";
+  return item.state === "offline" ? "离线" : item.state === "standby" ? "待命" : "历史记录";
+}
+
+/** A pending queue must not hide an offline current installation. */
+export function moduleRuntimeStatus(module?: { runtime_status?: string; installations?: ModuleInstallation[] }) {
+  if (module?.runtime_status === "disabled") return "disabled";
+  if (module?.runtime_status === "offline" || module?.installations?.some(item => item.active && item.state === "offline")) return "offline";
+  return module?.runtime_status;
 }
 
 export function installationStateTone(item: Pick<ModuleInstallation, "active" | "state">): InstallationTone {
@@ -25,7 +32,15 @@ export function installationStateTone(item: Pick<ModuleInstallation, "active" | 
 }
 
 export function installationIsStandby(item: Pick<ModuleInstallation, "active" | "state">) {
-  return !item.active && item.state !== "offline";
+  return !item.active && item.state === "standby";
+}
+
+/** Installation IDs are records, not proof of distinct physical phones. */
+export function partitionInstallations(items: ModuleInstallation[]) {
+  return {
+    visible: items.filter((item) => item.active || installationIsStandby(item)),
+    history: items.filter((item) => !item.active && !installationIsStandby(item))
+  };
 }
 
 /** Old module versions do not report a device model. */

@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   installationAccountText,
+  partitionInstallations,
+  moduleRuntimeStatus,
+  installationIsStandby,
   installationDisplayName,
   installationModelText,
   installationShortId,
@@ -52,4 +55,31 @@ test('server error bodies expose code and message; plain text passes through', (
   assert.deepEqual(parseApiError(new Error('HTTP 502'), 'fallback'), { code: '', message: 'HTTP 502' });
   assert.deepEqual(parseApiError(new Error(''), 'fallback'), { code: '', message: 'fallback' });
   assert.deepEqual(parseApiError(undefined, 'fallback'), { code: '', message: 'fallback' });
+});
+
+
+test('history never counts IDs as phones or merges matching model/account records', () => {
+  const same = { device_model: 'Samsung', owner_wxid: 'wxid_a', switch_pending: false };
+  const records = [
+    { ...same, id: 1, active: true, state: 'offline' },
+    { ...same, id: 2, active: false, state: 'standby' },
+    { ...same, id: 3, active: false, state: 'offline' },
+    { ...same, id: 4, active: false, state: 'offline' },
+    { ...same, id: 5, active: false, state: 'unknown' }
+  ];
+  const { visible, history } = partitionInstallations(records);
+  assert.deepEqual(visible.map(r => r.id), [1, 2]);
+  assert.deepEqual(history.map(r => r.id), [3, 4, 5]);
+  assert.equal(installationIsStandby(records[1]), true);
+  assert.equal(installationIsStandby(records[2]), false);
+  assert.equal(installationIsStandby(records[4]), false);
+});
+
+
+test('offline current installation takes priority over a pending queue', () => {
+  const installations = [{ id: 1, active: true, state: 'offline' }];
+  assert.equal(moduleRuntimeStatus({runtime_status: 'pending', installations}), 'offline');
+  assert.equal(moduleRuntimeStatus({runtime_status: 'sending', installations}), 'offline');
+  assert.equal(moduleRuntimeStatus({runtime_status: 'disabled', installations}), 'disabled');
+  assert.equal(moduleRuntimeStatus({runtime_status: 'pending', installations: []}), 'pending');
 });

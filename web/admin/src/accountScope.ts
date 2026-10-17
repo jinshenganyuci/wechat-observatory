@@ -22,9 +22,13 @@ export class AccountScope {
   selectChat(chat: string) {
     if (chat === this.chat) return;
     this.chat = chat;
-    for (const lane of ["messages", "send"]) {
+    for (const lane of ["messages", "send", "outbox"]) {
       this.sequences.set(lane, (this.sequences.get(lane) ?? 0) + 1);
     }
+  }
+
+  invalidate(lane: string) {
+    this.sequences.set(lane, (this.sequences.get(lane) ?? 0) + 1);
   }
 
   begin(lane: string, device: string, owner: string, chat?: string): Ticket | undefined {

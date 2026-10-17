@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ type Service struct {
 
 	outboxNotifyMu sync.Mutex
 	outboxNotify   map[string]map[chan struct{}]struct{}
+	outboxTraceLog *log.Logger
 
 	diagnostics diagnosticDeduper
 }
@@ -77,6 +79,7 @@ type Config struct {
 	InstanceID             string
 	SessionTTL             time.Duration
 	PollInterval           time.Duration
+	OutboxTrace            bool
 	OfflineAfter           time.Duration
 	TakeoverAfter          time.Duration
 	EventIdentityV2Devices map[string]struct{}
@@ -93,6 +96,7 @@ func NewService(cfg Config, opts ...Option) *Service {
 		hub:                  NewHub(500),
 		outbox:               NewMemoryOutbox(),
 		outboxNotify:         map[string]map[chan struct{}]struct{}{},
+		outboxTraceLog:       log.Default(),
 		nextChatRecordID:     time.Now().Unix() * 1000,
 		instanceID:           firstNonEmpty(cfg.InstanceID, "local"),
 		sessionTTL:           cfg.SessionTTL,
@@ -511,6 +515,7 @@ func (s *Service) sendText(ctx context.Context, req SendTextRequest) (int64, err
 	}
 	firstID := int64(0)
 	for _, wxid := range req.WxIDs {
+		started := time.Now()
 		item, err := s.outbox.EnqueueReply(ctx, ReplyAction{
 			Device:    req.Device,
 			OwnerWxID: ownerWxID,
@@ -520,6 +525,7 @@ func (s *Service) sendText(ctx context.Context, req SendTextRequest) (int64, err
 		if err != nil {
 			return 0, err
 		}
+		s.traceOutbox(outboxTraceEnqueued, item.ID, item.AttemptCount, time.Since(started))
 		if firstID == 0 {
 			firstID = item.ID
 		}
@@ -548,9 +554,13 @@ func (s *Service) pollOutbox(ctx context.Context, req ModulePollRequest) ([]Modu
 	if req.Limit > maxOutboxPollBatch {
 		req.Limit = maxOutboxPollBatch
 	}
+	started := time.Now()
 	items, err := s.outbox.PollReplyActions(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	for _, item := range items {
+		s.traceOutbox(outboxTraceLeased, item.ID, item.AttemptCount, time.Since(started))
 	}
 	s.recordModuleActivity(ctx, ModuleActivity{
 		Device:        req.Device,
@@ -629,9 +639,13 @@ func (s *Service) ackOutbox(ctx context.Context, req ModuleAckRequest) ([]Module
 	if currentWxID != "" && req.WxID != "" && currentWxID != req.WxID {
 		return nil, fmt.Errorf("module wxid %q is not current device wxid", req.WxID)
 	}
+	started := time.Now()
 	items, err := s.outbox.AckReplyActions(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	for _, item := range items {
+		s.traceOutbox(outboxTraceAckCommitted, item.ID, item.AttemptCount, time.Since(started))
 	}
 	s.recordModuleActivity(ctx, ackActivity(req))
 	acks := map[int64]ModuleAckItem{}
@@ -667,6 +681,29 @@ func (s *Service) ackOutbox(ctx context.Context, req ModuleAckRequest) ([]Module
 			}
 		}
 		s.hub.Publish(event)
+	}
+	// A client may have sent successfully and lost only the ACK response. Return
+	// matching durable terminal results as confirmations, without replaying the
+	// business event above. Ordinary first ACKs avoid this additional read.
+	if len(items) < len(acks) {
+		if reader, ok := s.outbox.(OutboxAckReader); ok {
+			started := time.Now()
+			confirmed, err := reader.ConfirmedReplyAcknowledgements(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			seen := make(map[int64]bool, len(items))
+			for _, item := range items {
+				seen[item.ID] = true
+			}
+			for _, item := range confirmed {
+				if !seen[item.ID] {
+					s.traceOutbox(outboxTraceAckReplayed, item.ID, item.AttemptCount, time.Since(started))
+					items = append(items, item)
+					seen[item.ID] = true
+				}
+			}
+		}
 	}
 	return items, nil
 }
