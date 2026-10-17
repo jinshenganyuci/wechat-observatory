@@ -7,6 +7,8 @@ import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Process;
 
+import cc.wechat.observatory.util.BridgeLogger;
+
 /** An unexported receiver is a lifecycle token; it never receives configuration. */
 public final class RealtimeProtectionClient {
     static final String ACTION = "cc.wechat.observatory.RUNTIME_PROTECTION_V1";
@@ -32,6 +34,7 @@ public final class RealtimeProtectionClient {
 
         synchronized void update(Context context, boolean enabled) {
             if (!enabled) {
+                boolean hadToken = token != null;
                 if (token != null) {
                     try { owner.unregisterReceiver(token); }
                     catch (IllegalArgumentException alreadyAbsent) { /* Registration never completed. */ }
@@ -44,6 +47,7 @@ public final class RealtimeProtectionClient {
                 token = null;
                 attempted = false;
                 status = "后台保护未启用";
+                if (hadToken) logResult("disabled");
                 return;
             }
             if (attempted || context == null) return;
@@ -59,17 +63,24 @@ public final class RealtimeProtectionClient {
             };
             try {
                 Intent ack = owner.registerReceiver(token, new IntentFilter(ACTION), Context.RECEIVER_NOT_EXPORTED);
-                if (ack != null && ACTION.equals(ack.getAction())
-                        && ack.getIntExtra(ACK_UID, -1) == Process.myUid()) {
+                boolean confirmed = ack != null && ACTION.equals(ack.getAction())
+                        && ack.getIntExtra(ACK_UID, -1) == Process.myUid();
+                if (confirmed) {
                     status = "息屏保护已登记";
                 } else {
                     status = "后台保护未确认：系统未适配，或系统框架作用域尚未加载";
                 }
+                logResult(confirmed ? "confirmed" : "unconfirmed");
             } catch (RuntimeException failed) {
                 // Context may have registered before a reply failure. Keep the
                 // receiver reference; disabling will attempt cleanup explicitly.
                 status = "后台保护登记失败，请重启微信后重试";
+                logResult("registration_failed");
             }
+        }
+
+        private static void logResult(String result) {
+            BridgeLogger.log("realtime protection uid=" + Process.myUid() + " result=" + result);
         }
     }
 }
