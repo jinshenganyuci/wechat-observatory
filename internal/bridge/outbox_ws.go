@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -79,8 +80,8 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer unsubscribe()
 
 	outgoing := make(chan outboxWSMessage, 8)
-	activity := make(chan struct{}, 1)
-	pong := make(chan struct{}, 1)
+	activity := make(chan time.Time, 1)
+	pong := make(chan time.Time, 1)
 	go s.readOutboxWS(ctx, cancel, conn, apiKey, device, wxid, accountSession, outgoing, activity, pong)
 
 	outgoing <- outboxWSMessage{Type: "ready", OK: true, Time: time.Now().Unix()}
@@ -101,6 +102,7 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	var deliveryRequested bool
 	var probeTimer *time.Timer
 	var probeDeadline <-chan time.Time
+	var probeStarted time.Time
 	stopProbe := func() {
 		if probeTimer != nil && !probeTimer.Stop() {
 			select {
@@ -116,6 +118,7 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 		if probeDeadline != nil {
 			return true
 		}
+		probeStarted = s.service.now()
 		if !conn.writeControl(wsOpPing, []byte("outbox-probe")) {
 			return false
 		}
@@ -146,7 +149,7 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 		if inFlight || probeDeadline != nil {
 			return true
 		}
-		if forceProbe || lastInbound.IsZero() || time.Since(lastInbound) > outboxWSActivityFreshness {
+		if forceProbe || lastInbound.IsZero() || s.service.now().Sub(lastInbound) > outboxWSActivityFreshness {
 			return startProbe()
 		}
 		return deliver()
@@ -156,11 +159,15 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-activity:
-			lastInbound = time.Now()
-		case <-pong:
-			lastInbound = time.Now()
-			if probeDeadline != nil {
+		case receivedAt := <-activity:
+			if receivedAt.After(lastInbound) {
+				lastInbound = receivedAt
+			}
+		case receivedAt := <-pong:
+			if receivedAt.After(lastInbound) {
+				lastInbound = receivedAt
+			}
+			if probeDeadline != nil && !receivedAt.Before(probeStarted) {
 				stopProbe()
 				if deliveryRequested && !inFlight && !deliver() {
 					return
@@ -206,7 +213,9 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 			if !conn.writeControl(wsOpPing, []byte("ping")) {
 				return
 			}
-			outgoing <- outboxWSMessage{Type: "wake"}
+			if !requestDelivery(false) {
+				return
+			}
 		}
 	}
 }
@@ -220,31 +229,37 @@ func (s *HTTPServer) readOutboxWS(
 	wxid string,
 	accountSession string,
 	outgoing chan<- outboxWSMessage,
-	activity chan<- struct{},
-	pong chan<- struct{},
+	activity chan time.Time,
+	pong chan time.Time,
 ) {
 	defer cancel()
+	presence := make(chan time.Time, 1)
+	go observeClientReceipts(ctx, cancel, presence, func(ctx context.Context, receivedAt time.Time) error {
+		err := s.service.ObserveModuleClientActivity(ctx, apiKey, wxid, accountSession, receivedAt)
+		if err != nil && ctx.Err() == nil {
+			// Never log the API key, query string or database error payload.
+			log.Printf("module client presence update rejected or unavailable device=%q", device)
+		}
+		return err
+	})
 	for {
 		payload, op, err := conn.readFrame()
 		if err != nil {
 			return
 		}
-		select {
-		case activity <- struct{}{}:
-		default:
-		}
+		receivedAt := s.service.now()
 		switch op {
 		case wsOpClose:
 			return
 		case wsOpPing:
+			publishClientReceipt(activity, receivedAt)
 			if !conn.writeControl(wsOpPong, payload) {
 				return
 			}
+			publishClientReceipt(presence, receivedAt)
 		case wsOpPong:
-			select {
-			case pong <- struct{}{}:
-			default:
-			}
+			publishClientReceipt(pong, receivedAt)
+			publishClientReceipt(presence, receivedAt)
 			continue
 		case wsOpText:
 			var msg outboxWSMessage
@@ -262,7 +277,7 @@ func (s *HTTPServer) readOutboxWS(
 				msg.Ack.Device = device
 				msg.Ack.WxID = wxid
 				msg.Ack.AccountSession = accountSession
-				items, err := s.service.AckOutbox(ctx, *msg.Ack)
+				items, err := s.service.AckOutbox(withClientReceipt(ctx, receivedAt), *msg.Ack)
 				if err != nil {
 					outgoing <- outboxWSMessage{Type: "error", Error: err.Error(), Time: time.Now().Unix()}
 					if isModuleAuthError(err) {
@@ -270,16 +285,63 @@ func (s *HTTPServer) readOutboxWS(
 					}
 					continue
 				}
+				publishClientReceipt(activity, receivedAt)
 				outgoing <- outboxWSMessage{Type: "ack", OK: true, Items: items, Time: time.Now().Unix()}
 				outgoing <- outboxWSMessage{Type: "wake"}
 			case "poll", "wake":
+				publishClientReceipt(activity, receivedAt)
+				publishClientReceipt(presence, receivedAt)
 				outgoing <- outboxWSMessage{Type: "wake"}
 			case "pong":
+				publishClientReceipt(activity, receivedAt)
+				publishClientReceipt(presence, receivedAt)
 				continue
 			default:
 				outgoing <- outboxWSMessage{Type: "error", Error: "unknown message type", Time: time.Now().Unix()}
 			}
 		}
+	}
+}
+
+// One bounded worker per connection performs durable authentication/presence
+// work. A busy database must not block the reader's ping/pong control path.
+// Business delivery and ACK still independently validate the current session.
+func observeClientReceipts(ctx context.Context, cancel context.CancelFunc, receipts <-chan time.Time,
+	observe func(context.Context, time.Time) error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case receivedAt := <-receipts:
+			if ctx.Err() != nil {
+				return
+			}
+			if err := observe(ctx, receivedAt); err != nil {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// The reader is the only producer. Keep the newest receipt when the writer is
+// busy, so a pre-probe pong cannot crowd out the response to the current probe.
+func publishClientReceipt(mailbox chan time.Time, receivedAt time.Time) {
+	select {
+	case mailbox <- receivedAt:
+		return
+	default:
+	}
+	select {
+	case pending := <-mailbox:
+		if pending.After(receivedAt) {
+			receivedAt = pending
+		}
+	default:
+	}
+	select {
+	case mailbox <- receivedAt:
+	default:
 	}
 }
 

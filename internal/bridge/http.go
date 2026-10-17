@@ -506,6 +506,10 @@ func (s *HTTPServer) moduleStatusViews() []ModuleStatusView {
 		if strings.TrimSpace(device.WxID) != "" {
 			item.Registered = true
 		}
+		binding := s.service.accountCurrent[device.Name]
+		if rec := s.service.accountInstallations[installationKey(device.Name, binding.InstanceID)]; rec != nil {
+			item.RuntimeUpdatedAt = formatTimeRFC3339Nano(rec.LastSeenAt)
+		}
 		item.NormalizeRuntimeStatus()
 		out = append(out, item)
 	}
@@ -576,7 +580,8 @@ func (s *HTTPServer) pollOutbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	items, err := s.service.PollOutbox(r.Context(), req)
+	ctx := withClientReceipt(r.Context(), s.service.now())
+	items, err := s.service.PollOutbox(ctx, req)
 	if err != nil {
 		writeError(w, moduleErrorStatus(err), "poll_failed", err.Error())
 		return
@@ -590,7 +595,8 @@ func (s *HTTPServer) ackOutbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	items, err := s.service.AckOutbox(r.Context(), req)
+	ctx := withClientReceipt(r.Context(), s.service.now())
+	items, err := s.service.AckOutbox(ctx, req)
 	if err != nil {
 		writeError(w, moduleErrorStatus(err), "ack_failed", err.Error())
 		return

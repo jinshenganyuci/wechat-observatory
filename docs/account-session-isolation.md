@@ -7,13 +7,16 @@ remarks, deletion states and histories.
 
 ## Protocol
 
-The main WeChat process stores an installation UUID and increasing generation in
-private `observatory_account_sessions` SharedPreferences. Each runtime binding
-gets a random session. The generation is synchronously committed before any
-registration; process restart, account change, or endpoint/Key change creates a
-new session. Repeated kernel identity checks reuse the binding. Identity comes
-from the verified current kernel storage, not contact counts, nicknames or an
-old database. The insert callback captures its binding before asynchronous work.
+The main WeChat process stores an installation UUID and generation high-water
+mark in its private `no_backup/observatory/observatory.properties` AtomicFile.
+At process startup it durably reserves a block of generations before exposing
+any to registration; account/endpoint/Key changes allocate from that block in
+memory. Each runtime binding gets a random session. Repeated kernel identity
+checks reuse the binding. Identity comes from the verified current kernel
+storage, not contact counts, nicknames or an old database. The insert callback
+captures its binding before asynchronous work. Deleting the dedicated config
+also drops its installation identity; reading an absent file does not recreate
+it. See the [0.1.18 upgrade notes](compatibility/wechat-8079-0118.md).
 
 Registration adds `instance_id`, `account_session`, and `account_generation`.
 The server must echo the accepted session and generation; missing/wrong echoes
@@ -29,7 +32,7 @@ retained as identity evidence, independently from 15-day message retention.
 | --- | --- |
 | Registration retry | Identical session/binding is idempotent; does not cancel queued work |
 | New registration | Same installation and strictly higher generation |
-| Another installation using the same device | 409; give it a separate device/Key binding |
+| Another installation using the same device | Standby unless a foreground/admin claim or active-installation timeout permits takeover |
 | Lower generation / reused session with changed identity | 409 |
 | Legacy request on a protected device | 409; no fallback to the latest owner |
 | Message from an old verified session | Store under its original owner; self endpoint must match |
@@ -71,8 +74,9 @@ legacy status. This change does not modify Gateway business workflows.
    one-shot step; do not migrate Gateway's database.
 2. Replace all Observatory replicas with the session-aware server and browser
    assets before upgrading phones. Old replicas do not enforce this protocol.
-3. Install the versionCode 9 APK, retain module/WeChat data, enable the existing
-   LSPosed scope and restart WeChat. An old server leaves this module pending.
+3. Install the current session-aware APK, enable the WeChat LSPosed scope, and
+   restart WeChat. For 0.1.18, enter configuration in WeChat settings again.
+   An old server leaves this module pending.
 4. Verify actual wxid, session echo, fresh contact snapshot and an A → B → A
    switch. Check a shared contact under both owners. JVM/SQL/browser tests do
    not replace this phone verification.
@@ -80,10 +84,11 @@ legacy status. This change does not modify Gateway business workflows.
 Existing legacy phones can run on the new server until their first protected
 registration. After that, downgrading their module to a sessionless version is
 rejected. Roll back using a session-aware release; do not erase binding history
-to admit stale clients. Reinstalling/clearing WeChat data creates a new installation
-and should use a new device/Key binding after checking the old installation.
-After a credential auth-version change, restart the module process to allocate a
-new generation before resuming. A second installation should never share a binding.
+to admit stale clients. Deleting the dedicated configuration creates a new installation on the next
+save; the multi-phone server arbitrates ownership through foreground/admin
+claims and active-installation timeouts. Only one installation sends at a time.
+After a credential auth-version change, restart WeChat to reserve fresh runtime
+generations before resuming.
 
 The verified kernel bindings cover WeChat 8.0.74 and 8.0.78 APK definitions;
 8.0.76 is still pending verification. Production and connected-phone verification

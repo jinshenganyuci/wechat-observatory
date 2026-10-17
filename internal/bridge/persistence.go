@@ -179,6 +179,8 @@ type MessageFilter struct {
 }
 
 type ModuleActivity struct {
+	// Server receive time; retained through asynchronous processing.
+	ReceivedAt     time.Time
 	Device         string
 	WxID           string
 	APIKey         string

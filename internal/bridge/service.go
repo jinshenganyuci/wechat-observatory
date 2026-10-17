@@ -139,7 +139,7 @@ func (s *Service) ModuleOfflineAfter() time.Duration {
 }
 
 func (s *Service) NormalizeModuleStatuses(statuses []ModuleStatusView) []ModuleStatusView {
-	now := time.Now()
+	now := s.now()
 	for index := range statuses {
 		statuses[index].NormalizeRuntimeStatusAt(now, s.offlineAfter)
 	}
@@ -698,6 +698,13 @@ func (s *Service) recordModuleContacts(ctx context.Context, req ModuleContactSna
 }
 
 func (s *Service) recordModuleActivity(ctx context.Context, activity ModuleActivity) {
+	if activity.Kind == "poll" || activity.Kind == "ack" {
+		activity.ReceivedAt = clientReceipt(ctx)
+		if activity.ReceivedAt.IsZero() {
+			// A server-side WS delivery poll is not proof of client liveness.
+			return
+		}
+	}
 	if s.persistence == nil {
 		return
 	}

@@ -19,14 +19,26 @@ public final class BridgeConfig {
     private static Properties runtimeSettings = new Properties();
     private static boolean runtimeLoaded;
 
-    /** Ephemeral snapshot supplied by the module-owned foreground activity. */
+    /** Ephemeral snapshot loaded from WeChat's private configuration file. */
     public static synchronized void acceptRuntimeSettings(Properties values) {
+        if (values == null || values.isEmpty()) {
+            runtimeSettings.clear();
+            runtimeLoaded = true;
+            return;
+        }
         Properties next = new Properties();
         if (values != null) next.putAll(values);
-        for (String key : new String[]{"__installation_id", "__generation_start", "__generation_limit"}) {
-            String existing = runtimeSettings.getProperty(key);
-            if (existing != null) next.setProperty(key, existing);
+        String previousId = runtimeSettings.getProperty("__installation_id", "");
+        String nextId = next.getProperty("__installation_id", previousId);
+        if (previousId.equals(nextId)) {
+            for (String key : new String[]{"__installation_id", "__generation_start", "__generation_limit"}) {
+                String existing = runtimeSettings.getProperty(key);
+                if (existing != null) next.setProperty(key, existing);
+            }
+        } else if (!next.containsKey("__generation_start") || !next.containsKey("__generation_limit")) {
+            throw new IllegalArgumentException("New configuration identity needs a reserved session range");
         }
+        runtimeSettings.clear();
         runtimeSettings = next;
         runtimeLoaded = true;
     }
@@ -82,7 +94,7 @@ public final class BridgeConfig {
 
     static BridgeConfig fromProperties(Properties properties) {
         BridgeConfig config = new BridgeConfig();
-        config.enabled = !"0".equals(setting(properties, "enabled", "1"));
+        config.enabled = !"0".equals(setting(properties, "enabled", properties.isEmpty() ? "0" : "1"));
         config.baseUrl = baseUrlSetting(properties);
         config.device = "";
         config.selfWxid = "";
@@ -104,7 +116,7 @@ public final class BridgeConfig {
     }
 
     private static Properties readProperties(Context context) {
-        // No disk or IPC from WeChat. The module activity owns persistent data.
+        // No disk or IPC on the message path. File snapshots are loaded by the settings client.
         return readSettingsForEditor(context);
     }
 
@@ -186,6 +198,7 @@ public final class BridgeConfig {
     private static String configSignature(Properties properties) {
         StringBuilder out = new StringBuilder();
         for (String key : new String[]{
+                "__installation_id",
                 "enabled",
                 "bridge_url",
                 "api_key",

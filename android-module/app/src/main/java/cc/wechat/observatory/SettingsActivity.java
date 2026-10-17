@@ -1,385 +1,79 @@
 package cc.wechat.observatory;
 
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Context;
-import java.util.Properties;
+import android.content.Intent;
 import android.os.Bundle;
-import android.text.InputType;
-import android.text.Editable;
-import android.text.TextWatcher;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
-import android.text.method.PasswordTransformationMethod;
-import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.util.LinkedHashMap;
-import java.text.DateFormat;
-import java.util.Date;
-import org.json.JSONObject;
-import cc.wechat.observatory.gateway.ConnectionProbe;
-import java.util.Map;
-
-import cc.wechat.observatory.config.BridgeConfig;
-import cc.wechat.observatory.gateway.GatewayEndpoint;
-
+/** Installation instructions only. Configuration is edited inside WeChat. */
 public final class SettingsActivity extends Activity {
-    private static final String DEFAULT_POLL_INTERVAL_MS = "1000";
-    private static final String DEFAULT_POLL_LIMIT = "1";
-    private static final String DEFAULT_OUTBOX_WEBSOCKET_ENABLED = "1";
-    private static final String DEFAULT_CONTACT_SYNC_INTERVAL_MS = "600000";
-    private static final String DEFAULT_CONTACT_SYNC_LIMIT = String.valueOf(BridgeConfig.DEFAULT_CONTACT_SYNC_LIMIT);
-    private static final String DEFAULT_CONTACT_INCLUDE_CHATROOMS = "1";
-    private static final String DEFAULT_MEDIA_UPLOAD_ENABLED = "0";
-    private static final String DEFAULT_MEDIA_UPLOAD_LIMIT_BYTES = "5242880";
-    private static final String DEFAULT_STALE_MESSAGE_GRACE_MS = String.valueOf(BridgeConfig.DEFAULT_STALE_MESSAGE_GRACE_MS);
-    private static final String DEFAULT_STALE_MESSAGE_REPLAY_LIMIT = String.valueOf(BridgeConfig.DEFAULT_STALE_MESSAGE_REPLAY_LIMIT);
-    private static final String[] SENSITIVE_CONFIG_KEYS = new String[]{"api_key"};
-    private static final Map<String, String> DEFAULTS = new LinkedHashMap<>();
-
-    static {
-        DEFAULTS.put("enabled", "1");
-        DEFAULTS.put("bridge_url", GatewayEndpoint.PRODUCTION_BASE_URL);
-        DEFAULTS.put("api_key", "");
-        DEFAULTS.put("poll_interval_ms", DEFAULT_POLL_INTERVAL_MS);
-        DEFAULTS.put("poll_limit", DEFAULT_POLL_LIMIT);
-        DEFAULTS.put("outbox_websocket_enabled", DEFAULT_OUTBOX_WEBSOCKET_ENABLED);
-        DEFAULTS.put("contact_sync_interval_ms", DEFAULT_CONTACT_SYNC_INTERVAL_MS);
-        DEFAULTS.put("contact_sync_limit", DEFAULT_CONTACT_SYNC_LIMIT);
-        DEFAULTS.put("contact_include_chatrooms", DEFAULT_CONTACT_INCLUDE_CHATROOMS);
-        DEFAULTS.put("media_upload_enabled", DEFAULT_MEDIA_UPLOAD_ENABLED);
-        DEFAULTS.put("media_upload_limit_bytes", DEFAULT_MEDIA_UPLOAD_LIMIT_BYTES);
-        DEFAULTS.put("stale_message_grace_ms", DEFAULT_STALE_MESSAGE_GRACE_MS);
-        DEFAULTS.put("stale_message_replay_limit", DEFAULT_STALE_MESSAGE_REPLAY_LIMIT);
-    }
-
-    private static final ExecutorService CONFIG_WRITER = Executors.newSingleThreadExecutor();
-
-    private final Map<String, EditText> fields = new LinkedHashMap<>();
-    private TextView statusView;
-    private TextView connectionStatus;
-    private TextView sharingStatus;
-    private Properties configPreferences = new Properties();
-    private Button testButton;
-    private Button saveButton;
-    private int probeGeneration;
-    private boolean probing;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setTitle(getString(R.string.settings_title));
+        setTitle("WeChat Observatory");
         setContentView(createContentView());
-        loadValues();
-        connectionStatus.setText("尚未测试连接。保存配置不代表微信模块已注册。");
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        showRuntimeStatus();
-    }
-
-    private void showRuntimeStatus() {
-        if (statusView != null) statusView.setText("日常设置请进入微信 → 设置 → WeChat Observatory。配置只保存在本应用私有目录，卸载本应用时删除。");
     }
 
     private View createContentView() {
-        ScrollView scrollView = new ScrollView(this);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(18), dp(18), dp(24));
-        scrollView.addView(root);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(20), dp(24), dp(20), dp(28));
+        scroll.addView(content);
 
-        TextView title = new TextView(this);
-        title.setText(R.string.settings_title);
-        title.setTextSize(22);
-        title.setGravity(Gravity.START);
-        title.setPadding(0, 0, 0, dp(6));
-        root.addView(title, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        addText(content, "WeChat Observatory", 24);
+        addText(content, "配置请在微信内完成。此应用只需安装并在 LSPosed 中启用，无需保持后台。", 16);
+        addText(content, "使用方法", 19);
+        addText(content, "1. 在 LSPosed 中启用本模块，勾选微信，然后强行停止并重新打开微信。\n"
+                + "2. 进入微信 → 我 → 设置 → Observatory 网关。\n"
+                + "3. 填写服务地址和 API Key，开启“启用网关”后保存，即刻生效。", 16);
 
-        TextView hint = new TextView(this);
-        hint.setText(R.string.settings_hint);
-        hint.setTextSize(14);
-        hint.setPadding(0, 0, 0, dp(14));
-        root.addView(hint);
-
-        statusView = new TextView(this);
-        statusView.setTextSize(14);
-        statusView.setPadding(0, 0, 0, dp(14));
-        root.addView(statusView);
-
-        addField(root, "bridge_url", R.string.label_bridge_url, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        addField(root, "api_key", R.string.label_api_key, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        maskSensitiveFields();
-        sharingStatus = new TextView(this);
-        sharingStatus.setTextSize(14);
-        sharingStatus.setTextIsSelectable(true);
-        sharingStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        sharingStatus.setPadding(0, dp(14), 0, dp(8));
-        root.addView(sharingStatus);
-        connectionStatus = new TextView(this);
-        connectionStatus.setText("尚未测试连接。保存配置不代表微信模块已注册。");
-        connectionStatus.setTextSize(15);
-        connectionStatus.setTextIsSelectable(true);
-        connectionStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        connectionStatus.setPadding(0, dp(14), 0, dp(8));
-        root.addView(connectionStatus);
-        testButton = new Button(this);
-        testButton.setText("保存并测试连接");
-        testButton.setAllCaps(false);
-        testButton.setOnClickListener(v -> testConnection());
-        root.addView(testButton, new LinearLayout.LayoutParams(
+        Button open = new Button(this);
+        open.setText("打开微信");
+        open.setAllCaps(false);
+        open.setOnClickListener(view -> openWeChat(this));
+        content.addView(open, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        addField(root, "poll_interval_ms", R.string.label_poll_interval, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "poll_limit", R.string.label_poll_limit, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "outbox_websocket_enabled", R.string.label_outbox_websocket_enabled, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "contact_sync_interval_ms", R.string.label_contact_sync_interval, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "contact_sync_limit", R.string.label_contact_sync_limit, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "contact_include_chatrooms", R.string.label_contact_include_chatrooms, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "media_upload_enabled", R.string.label_media_upload_enabled, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "media_upload_limit_bytes", R.string.label_media_upload_limit, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "stale_message_grace_ms", R.string.label_stale_message_grace, InputType.TYPE_CLASS_NUMBER);
-        addField(root, "stale_message_replay_limit", R.string.label_stale_message_replay_limit, InputType.TYPE_CLASS_NUMBER);
 
-        saveButton = new Button(this);
-        saveButton.setText(R.string.action_save);
-        saveButton.setAllCaps(false);
-        saveButton.setOnClickListener(v -> saveValues());
-        LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        saveParams.topMargin = dp(12);
-        root.addView(saveButton, saveParams);
-
-        Button cleanup = new Button(this);
-        cleanup.setText("清理旧版配置副本");
-        cleanup.setAllCaps(false);
-        cleanup.setOnClickListener(v -> {
-            cleanup.setEnabled(false);
-            sharingStatus.setText("正在清理旧版副本；如需删除旧版 root 文件，系统可能请求 root 授权…");
-            Context context = getApplicationContext();
-            CONFIG_WRITER.execute(() -> {
-                String cleanupResult;
-                try {
-                    ModuleConfigStore.read(context); // Migration must be durable before any old copy is deleted.
-                    cleanupResult = LegacyConfigCleanup.cleanup(context, true);
-                } catch (java.io.IOException | RuntimeException failure) {
-                    cleanupResult = "旧配置尚未安全迁移，已取消清理，请检查存储空间后重试。";
-                }
-                final String result = cleanupResult;
-                runOnUiThread(() -> {
-                    if (isFinishing() || isDestroyed()) return;
-                    sharingStatus.setText(result);
-                    cleanup.setEnabled(true);
-                });
-            });
-        });
-        root.addView(cleanup);
-
-        TextView footer = new TextView(this);
-        footer.setText(R.string.settings_restart_hint);
-        footer.setTextSize(13);
-        footer.setPadding(0, dp(12), 0, 0);
-        root.addView(footer);
-
-        return scrollView;
+        addText(content, "停用或卸载", 19);
+        addText(content, "卸载前，请在微信网关设置中点击“停用并删除配置”。"
+                + "仅卸载本模块不会自动删除微信中保存的配置。", 16);
+        addText(content, "从 0.1.17 升级", 19);
+        addText(content, "请在微信网关设置中重新填写配置，本版不自动导入旧配置。"
+                + "旧版公共文件需手动删除：Documents/WeChatObservatory 文件夹。", 16);
+        return scroll;
     }
 
-    private void addField(LinearLayout root, String key, int labelResId, int inputType) {
-        TextView label = new TextView(this);
-        label.setText(labelResId);
-        label.setTextSize(14);
-        label.setPadding(0, dp(10), 0, dp(4));
-        root.addView(label);
-
-        EditText editText = new EditText(this);
-        editText.setSingleLine(true);
-        editText.setSaveEnabled(false);
-        editText.setInputType(inputType);
-        editText.setTextSize(15);
-        editText.setSelectAllOnFocus(false);
-        root.addView(editText, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        fields.put(key, editText);
-        if ("bridge_url".equals(key) || "api_key".equals(key)) {
-            editText.addTextChangedListener(new TextWatcher() {
-                public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-                public void onTextChanged(CharSequence s, int start, int before, int count) {
-                    if (!probing && connectionStatus != null) connectionStatus.setText("地址或密钥已修改，请保存并重新测试连接。");
-                }
-                public void afterTextChanged(Editable value) { }
-            });
-        }
-    }
-
-    private void maskSensitiveFields() {
-        for (String key : SENSITIVE_CONFIG_KEYS) {
-            EditText field = fields.get(key);
-            if (field != null) {
-                field.setTransformationMethod(PasswordTransformationMethod.getInstance());
-            }
-        }
-    }
-
-    private void loadValues() {
-        try { configPreferences = ModuleConfigStore.read(this); }
-        catch (java.io.IOException failure) {
-            sharingStatus.setText("配置读取失败，请检查存储空间。");
-            return;
-        }
-        Properties prefs = configPreferences;
-        for (String key : BridgeConfigProvider.CONFIG_KEYS) {
-            if (fields.containsKey(key)) {
-                setValue(key, prefs.getProperty(key, DEFAULTS.get(key)));
-            }
-        }
-        showSharingStatus(false);
-    }
-
-    private void showSharingStatus(boolean saved) {
-        sharingStatus.setText(saved
-                ? "配置已保存在 Observatory 私有目录。请强行停止并重新打开微信使此处修改生效；以后可直接在微信设置中修改。"
-                : "配置由 Observatory 保存，微信启动后读取一次；划掉本应用不会中断微信内的通道。卸载本应用会删除配置。");
-    }
-
-    private boolean saveValues() {
-        EditText bridgeUrlField = fields.get("bridge_url");
-        String bridgeUrl = bridgeUrlField == null ? "" : bridgeUrlField.getText().toString().trim();
+    static void openWeChat(Context context) {
         try {
-            bridgeUrl = GatewayEndpoint.normalizeBaseUrl(bridgeUrl);
-        } catch (Throwable ignored) {
-            if (bridgeUrlField != null) {
-                bridgeUrlField.setError(getString(R.string.error_bridge_url_invalid));
-                bridgeUrlField.requestFocus();
+            Intent launch = context.getPackageManager().getLaunchIntentForPackage("com.tencent.mm");
+            if (launch == null) {
+                launch = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                        .setComponent(new ComponentName("com.tencent.mm", "com.tencent.mm.ui.LauncherUI"));
             }
-            Toast.makeText(this, R.string.error_bridge_url_invalid, Toast.LENGTH_LONG).show();
-            return false;
+            context.startActivity(launch);
+        } catch (RuntimeException unavailable) {
+            Toast.makeText(context, "无法打开微信，请从桌面打开微信后进入设置。", Toast.LENGTH_LONG).show();
         }
-        if (bridgeUrlField != null) {
-            bridgeUrlField.setText(bridgeUrl);
-        }
-
-        Properties values = new Properties();
-        values.putAll(configPreferences);
-        for (String key : BridgeConfigProvider.CONFIG_KEYS) {
-            if ("enabled".equals(key)) {
-                values.setProperty(key, "1");
-                continue;
-            }
-            EditText field = fields.get(key);
-            if (field != null) {
-                String value = field.getText().toString().trim();
-                if (value.isEmpty()) values.remove(key);
-                else values.setProperty(key, value);
-            }
-        }
-        ModuleConfigStore.SaveResult saved = ModuleConfigStore.save(this, values);
-        if (!saved.success) {
-            connectionStatus.setText(saved.error);
-            return false;
-        }
-        configPreferences = values;
-        maskSensitiveFields();
-        showSharingStatus(true);
-        connectionStatus.setText("配置已保存，连接尚未验证。请重启微信后测试连接。");
-        Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_LONG).show();
-        return true;
     }
 
-    private void testConnection() {
-        if (probing || !saveValues()) return;
-        final String address = fields.get("bridge_url").getText().toString().trim();
-        final String key = fields.get("api_key").getText().toString().trim();
-        final int generation = ++probeGeneration;
-        setProbing(true);
-        connectionStatus.setText("正在检查后端连接…");
-        new Thread(() -> {
-            String report = "";
-            try {
-                GatewayEndpoint endpoint = GatewayEndpoint.parse(address);
-                ConnectionProbe.Reply health = ConnectionProbe.request(endpoint, "/healthz", null);
-                if (health.status != 200) {
-                    report = "后端检查失败：HTTP " + health.status + "。请填写服务根地址，不要附加 /admin/。";
-                } else if (!new JSONObject(health.body).optBoolean("ok", false)) {
-                    report = "服务器有响应，但不是正常的微信网关健康响应。请检查地址。";
-                } else {
-                    report = "后端：连接成功。";
-                    if (new JSONObject(health.body).has("metrics_error")) report += "\n数据库检查异常，请查看后端日志。";
-                    if (key.isEmpty()) {
-                        report += "\nAPI Key：未填写。请在自己的网页管理台生成。\n微信模块：尚未验证。";
-                    } else {
-                        String body = new JSONObject().put("api_key", key).toString();
-                        ConnectionProbe.Reply result = ConnectionProbe.request(endpoint, "/module/connection", body);
-                        if (result.status == 404 || result.status == 405) {
-                            report += "\nAPI Key / 微信模块：当前后端不支持本模块的账号会话协议，请升级到本 fork 的 0.1.13 服务端。";
-                        } else if (result.status == 401 || result.status == 403) {
-                            report += "\nAPI Key：无效、已停用或请求被代理拒绝。请检查自己的管理台。\n微信模块：尚未验证。";
-                        } else if (result.status != 200) {
-                            report += "\n诊断失败：HTTP " + result.status + "，请查看后端日志。";
-                        } else {
-                            JSONObject status = new JSONObject(result.body);
-                            if (!status.optBoolean("ok") || !status.optBoolean("api_key_valid")) {
-                                report += "\n诊断响应异常，无法确认密钥及微信状态。";
-                            } else if (!status.optBoolean("account_session_supported", false)) {
-                                report += "\nAPI Key：有效，但服务器不支持账号会话确认。请升级到本 fork 的 0.1.13 服务端。";
-                            } else {
-                                report += "\nAPI Key：有效。设备：" + status.optString("device", "未知");
-                                report += "\n" + ConnectionProbe.moduleSummary(status.optBoolean("registered"), status.optString("runtime_status"));
-                                String lastPoll = status.optString("last_poll_at");
-                                String lastRegister = status.optString("last_register_at");
-                                if (!lastRegister.isEmpty()) report += "\n最近注册：" + lastRegister;
-                                if (!lastPoll.isEmpty()) report += "\n最近拉取：" + lastPoll;
-                                report += "\n以上为该密钥绑定设备的后端记录；测试不会注册设备或发送消息。";
-                            }
-                        }
-                    }
-                }
-            } catch (Exception error) {
-                report += (report.isEmpty() ? "" : "\n") + (error instanceof org.json.JSONException
-                        ? "响应不是有效的网关 JSON，请检查服务地址及反向代理。"
-                        : ConnectionProbe.describeFailure(error));
-            }
-            final String display = "检测时间：" + DateFormat.getDateTimeInstance().format(new Date()) + "\n" + report;
-            runOnUiThread(() -> {
-                if (generation != probeGeneration || isFinishing() || isDestroyed()) return;
-                connectionStatus.setText(display);
-                setProbing(false);
-            });
-        }, "gateway-connection-test").start();
-    }
-
-    private void setProbing(boolean value) {
-        probing = value;
-        testButton.setEnabled(!value);
-        testButton.setText(value ? "正在测试…" : "保存并测试连接");
-        saveButton.setEnabled(!value);
-        for (EditText field : fields.values()) field.setEnabled(!value);
-    }
-
-    @Override
-    protected void onDestroy() {
-        ++probeGeneration;
-        super.onDestroy();
-    }
-
-    private void setValue(String key, String value) {
-        EditText editText = fields.get(key);
-        if (editText != null) {
-            editText.setText(value == null ? "" : value);
-        }
+    private void addText(LinearLayout parent, String text, int size) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextSize(size);
+        view.setPadding(0, 0, 0, dp(16));
+        parent.addView(view, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
     private int dp(int value) {
-        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }
