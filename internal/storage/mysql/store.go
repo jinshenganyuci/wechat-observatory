@@ -845,6 +845,10 @@ func (s *Store) RecordOutboundEvent(ctx context.Context, event bridge.MessageEve
 }
 
 func (s *Store) RecordModuleActivity(ctx context.Context, activity bridge.ModuleActivity) error {
+	receivedAt := activity.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
 	switch strings.TrimSpace(activity.Kind) {
 	case "register":
 		_, err := s.executor(ctx).ExecContext(ctx, `
@@ -864,33 +868,39 @@ func (s *Store) RecordModuleActivity(ctx context.Context, activity bridge.Module
 	case "poll":
 		_, err := s.executor(ctx).ExecContext(ctx, `
 			INSERT INTO bridge_module_runtime (
-				device, wxid, last_poll_at, last_poll_limit, last_poll_item_count
-			) VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)
+				device, wxid, last_poll_at, last_poll_limit, last_poll_item_count, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE
 				wxid = COALESCE(VALUES(wxid), wxid),
-				last_poll_at = CURRENT_TIMESTAMP,
+				last_poll_at = GREATEST(COALESCE(last_poll_at, VALUES(last_poll_at)), VALUES(last_poll_at)),
 				last_poll_limit = VALUES(last_poll_limit),
-				last_poll_item_count = VALUES(last_poll_item_count)`,
+				last_poll_item_count = VALUES(last_poll_item_count),
+				updated_at = GREATEST(updated_at, VALUES(last_poll_at))`,
 			strings.TrimSpace(activity.Device),
 			nullString(activity.WxID),
+			receivedAt,
 			activity.PollLimit,
 			activity.PollItemCount,
+			receivedAt,
 		)
 		return err
 	case "ack":
 		_, err := s.executor(ctx).ExecContext(ctx, `
 			INSERT INTO bridge_module_runtime (
-				device, last_ack_at, last_ack_sent_count, last_ack_failed_count, last_error
-			) VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)
+				device, last_ack_at, last_ack_sent_count, last_ack_failed_count, last_error, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE
-				last_ack_at = CURRENT_TIMESTAMP,
+				last_ack_at = GREATEST(COALESCE(last_ack_at, VALUES(last_ack_at)), VALUES(last_ack_at)),
 				last_ack_sent_count = VALUES(last_ack_sent_count),
 				last_ack_failed_count = VALUES(last_ack_failed_count),
-				last_error = VALUES(last_error)`,
+				last_error = VALUES(last_error),
+				updated_at = GREATEST(updated_at, VALUES(last_ack_at))`,
 			strings.TrimSpace(activity.Device),
+			receivedAt,
 			activity.AckSentCount,
 			activity.AckFailedCount,
 			nullString(activity.LastError),
+			receivedAt,
 		)
 		return err
 	default:
@@ -1422,20 +1432,22 @@ func (s *Store) DeleteAPIKey(ctx context.Context, code string) error {
 	if err != nil {
 		return err
 	}
+	// Match the key -> runtime lock order used by disabling and presence writes.
+	// Both changes remain atomic; no foreign key references the raw key code.
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE bridge_module_runtime
-		SET api_key = NULL,
-			last_error = 'api key revoked',
-			updated_at = CURRENT_TIMESTAMP
-		WHERE api_key = ?`,
+		DELETE FROM bridge_api_keys
+		WHERE code = ?`,
 		code,
 	); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM bridge_api_keys
-		WHERE code = ?`,
+		UPDATE bridge_module_runtime
+		SET api_key = NULL,
+			last_error = 'api key revoked',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE api_key = ?`,
 		code,
 	); err != nil {
 		_ = tx.Rollback()

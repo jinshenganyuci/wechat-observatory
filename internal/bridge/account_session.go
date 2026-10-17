@@ -311,6 +311,14 @@ func (s *Service) RecordModuleContacts(ctx context.Context, req ModuleContactSna
 func (s *Service) PollOutbox(ctx context.Context, req ModulePollRequest) (items []ModuleOutboxItem, err error) {
 	err = s.withModuleAccount(ctx, req.APIKey, req.WxID, req.AccountSession, false, func(ctx context.Context, owner string) error {
 		req.WxID = owner
+		if _, err := req.Validate(s.cfg.DefaultDevice); err != nil {
+			return err
+		}
+		if receivedAt := clientReceipt(ctx); !receivedAt.IsZero() {
+			if err := s.observeClientPresenceLocked(ctx, req.APIKey, owner, req.AccountSession, receivedAt); err != nil {
+				return err
+			}
+		}
 		items, err = s.pollOutbox(ctx, req)
 		return err
 	})
@@ -320,6 +328,14 @@ func (s *Service) PollOutbox(ctx context.Context, req ModulePollRequest) (items 
 func (s *Service) AckOutbox(ctx context.Context, req ModuleAckRequest) (items []ModuleOutboxItem, err error) {
 	err = s.withModuleAccount(ctx, req.APIKey, req.WxID, req.AccountSession, false, func(ctx context.Context, owner string) error {
 		req.WxID = owner
+		if _, err := req.Validate(s.cfg.DefaultDevice); err != nil {
+			return err
+		}
+		if receivedAt := clientReceipt(ctx); !receivedAt.IsZero() {
+			if err := s.observeClientPresenceLocked(ctx, req.APIKey, owner, req.AccountSession, receivedAt); err != nil {
+				return err
+			}
+		}
 		items, err = s.ackOutbox(ctx, req)
 		return err
 	})
