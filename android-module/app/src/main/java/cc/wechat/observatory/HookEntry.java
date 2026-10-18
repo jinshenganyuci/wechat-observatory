@@ -278,7 +278,153 @@ public final class HookEntry implements IXposedHookLoadPackage {
         hookWeChatApplication(loader);
         installObservationHook(loader);
         installSettingsEntry(loader);
+        installFileSendLab(loader);
         return loader;
+    }
+
+    // Isolated laboratory build only. Never merge this ADB experiment into main.
+    private static final Map<String, LabSend> LAB_SENDS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static RuntimeAccount LAB_ACCOUNT;
+    private static boolean LAB_HOOKED;
+    private static final class LabSend {
+        final File source;
+        final Object params;
+        final String digest;
+        final long size;
+        volatile String copyPath = "";
+        volatile long copied = -1;
+        volatile boolean finished;
+        LabSend(File source, Object params, String digest) {
+            this.source = source; this.params = params; this.digest = digest; size = source.length();
+        }
+    }
+
+    private static RuntimeAccount labAccount() throws Exception {
+        BridgeConfig config = BridgeConfig.load(APP_CONTEXT);
+        PackageInfo info = APP_CONTEXT.getPackageManager().getPackageInfo(WECHAT_PACKAGE, 0);
+        if (android.os.Process.myUid() / 100000 != 999 || !"8.0.79".equals(info.versionName)
+                || info.versionCode != 3200 || MODULE_REMOVED || !config.enabled
+                || FORCE_REREGISTER || !"phone-test".equals(REGISTERED_DEVICE)
+                || CURRENT_ACCOUNT == null || !isCurrentAccount(CURRENT_ACCOUNT)) {
+            throw new IllegalStateException("lab scope not ready");
+        }
+        if (LAB_ACCOUNT == null) LAB_ACCOUNT = CURRENT_ACCOUNT;
+        if (LAB_ACCOUNT != CURRENT_ACCOUNT) throw new IllegalStateException("lab account changed");
+        return LAB_ACCOUNT;
+    }
+
+    private static String labDigest(InputStream input) throws Exception {
+        try (InputStream stream = input) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[16384];
+            int n;
+            while ((n = stream.read(buffer)) != -1) digest.update(buffer, 0, n);
+            StringBuilder out = new StringBuilder();
+            for (byte b : digest.digest()) out.append(String.format(Locale.ROOT, "%02x", b & 255));
+            return out.toString();
+        }
+    }
+
+    private static synchronized void installFileSendLab(final ClassLoader loader) {
+        Context context = bridgeContext();
+        if (context == null || android.os.Process.myUid() / 100000 != 999 || LAB_HOOKED) return;
+        try {
+            Class<?> task = XposedHelpers.findClass("gu.m0", loader);
+            hookOnce(task.getDeclaredMethod("Z", task, String.class, String.class), new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.hasThrowable()) return;
+                    for (LabSend send : LAB_SENDS.values()) {
+                        if (send.source.getAbsolutePath().equals(p.args[1])
+                                && XposedHelpers.getObjectField(p.args[0], "o") == send.params) {
+                            send.copyPath = String.valueOf(p.args[2]);
+                            send.copied = ((Number)p.getResult()).longValue();
+                        }
+                    }
+                }
+            });
+            hookOnce(task.getDeclaredMethod("h"), new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.hasThrowable() || p.getResult() == null) return;
+                    Object params = XposedHelpers.getObjectField(p.thisObject, "o");
+                    for (Map.Entry<String, LabSend> entry : LAB_SENDS.entrySet()) {
+                        LabSend send = entry.getValue();
+                        if (send.params != params) continue;
+                        Object state = XposedHelpers.getObjectField(p.getResult(), "a");
+                        String name = state instanceof Enum ? ((Enum<?>)state).name() : String.valueOf(state);
+                        if ("Finish".equals(name)) send.finished = true;
+                        android.util.Log.i("ObservatoryFileLab", "native_state file=" + entry.getKey() + " state=" + name);
+                    }
+                }
+            });
+            cc.wechat.observatory.lab.FileSendLab.install(context, new cc.wechat.observatory.lab.FileSendLab.Host() {
+                @Override public void validate() throws Exception { callOnMainThread(() -> labAccount()); }
+                @Override public void submit(File source, String displayName) throws Exception {
+                    String digest = labDigest(new FileInputStream(source));
+                    callOnMainThread(() -> {
+                        labAccount();
+                        Object params = XposedHelpers.newInstance(XposedHelpers.findClass("gu.o0", loader),
+                                "filehelper", source.getAbsolutePath());
+                        XposedHelpers.callMethod(params, "n", displayName);
+                        if (LAB_SENDS.putIfAbsent(displayName, new LabSend(source, params, digest)) != null)
+                            throw new IllegalStateException("lab duplicate native submit");
+                        Object controller = XposedHelpers.getStaticObjectField(XposedHelpers.findClass("rt5.w", loader), "a");
+                        XposedHelpers.callMethod(controller, "c", params);
+                        return null;
+                    });
+                }
+                @Override public JSONObject inspect(String displayName) throws Exception {
+                    RuntimeAccount account = callOnMainThread(() -> labAccount());
+                    JSONObject out = new JSONObject().put("message_id", 0).put("status", "unknown")
+                            .put("source_released", false);
+                    LabSend send = LAB_SENDS.get(displayName);
+                    if (send == null) return out;
+                    Object db = findAccountDatabase(account, false);
+                    if (db == null) return out;
+                    Object cursor = rawQuery(db, "SELECT msgId,status,type,msgSvrId FROM message WHERE talker=? AND isSend=1 AND content LIKE ? ORDER BY msgId DESC LIMIT 3",
+                            new String[]{"filehelper", "%" + displayName + "%"});
+                    int rows = 0, status = 0, type = 0;
+                    long msgId = 0, serverId = 0;
+                    try {
+                        while (Boolean.TRUE.equals(findNoArgMethod(cursor.getClass(), "moveToNext").invoke(cursor))) {
+                            if (rows++ == 0) {
+                                msgId = longColumn(cursor, 0); status = intColumn(cursor, 1);
+                                type = intColumn(cursor, 2); serverId = longColumn(cursor, 3);
+                            }
+                        }
+                    } finally { closeQuietly(cursor); }
+                    boolean phasesOk = true;
+                    JSONObject phases = new JSONObject();
+                    String[] fields = {"m", "n", "o", "p", "J"};
+                    String[] names = {"prepare", "upload", "send", "update", "first_cgi"};
+                    for (int i = 0; i < fields.length; i++) {
+                        String field = fields[i];
+                        Object phase = XposedHelpers.getObjectField(send.params, field);
+                        if (phase == null) { phases.put(field, JSONObject.NULL); phasesOk = false; }
+                        else {
+                            int code = XposedHelpers.getIntField(phase, "a");
+                            phases.put(field, code); phasesOk &= code == 0;
+                            out.put(names[i], code);
+                        }
+                    }
+                    boolean sent = rows == 1 && send.finished && phasesOk && status == 2 && serverId > 0;
+                    boolean copyMatches = false;
+                    if (sent && send.copied == send.size && !send.copyPath.isEmpty()
+                            && !send.copyPath.equals(send.source.getAbsolutePath())) {
+                        try { copyMatches = send.digest.equals(labDigest((InputStream)XposedHelpers.callStaticMethod(
+                                XposedHelpers.findClass("com.tencent.mm.vfs.z6", loader), "E", send.copyPath))); }
+                        catch (Exception unavailable) { /* Never delete an unverified source. */ }
+                    }
+                    out.put("message_id", msgId).put("status", sent ? "sent" : status == 5 ? "failed" : "pending")
+                            .put("source_released", sent && copyMatches).put("row_count", rows).put("message_type", type)
+                            .put("db_status", status).put("server_id_present", serverId > 0).put("native_finished", send.finished)
+                            .put("native_phases", phases).put("copy_bytes", send.copied).put("copy_verified", copyMatches);
+                    return out;
+                }
+            });
+            LAB_HOOKED = true;
+        } catch (Throwable failure) {
+            android.util.Log.e("ObservatoryFileLab", "install_failed " + failure.getClass().getSimpleName());
+        }
     }
 
     private static void installSettingsEntry(ClassLoader loader) {
