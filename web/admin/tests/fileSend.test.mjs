@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sendFile } from '../src/api.ts';
-import { MAX_FILE_BYTES, fileValidationError, sameFileScope, fileDraftMatchesScope, fileTargetSupported, newFileRequestKey,
+import { MAX_FILE_BYTES, fileValidationError, sameFileScope, fileDraftMatchesScope, newFileRequestKey,
   persistFileRequest, restoreFileRequest, clearFileRequest } from '../src/fileSend.ts';
 
 test('ordinary file limit includes exactly 300 MiB and excludes media extensions case-insensitively', () => {
@@ -95,9 +95,6 @@ test('recovery permits original-generation replay but never a different account 
   assert.equal(fileDraftMatchesScope({ scope, stage: 'unknown' }, { ...scope, generation: 3 }), true);
   assert.equal(fileDraftMatchesScope({ scope, stage: 'unknown' }, { ...scope, ownerWxid: 'b' }), false);
   assert.equal(fileDraftMatchesScope({ scope, stage: 'unknown' }, { ...scope, wxid: 'other@chatroom' }), false);
-  assert.equal(fileTargetSupported('filehelper'), true);
-  assert.equal(fileTargetSupported('notice@chatroom'), true);
-  assert.equal(fileTargetSupported('friend'), false);
 });
 
 test('late success cannot erase a newer saved request', () => {

@@ -34,9 +34,14 @@ func fileService(t *testing.T) (*Service, ModuleRegistrationRequest, http.Handle
 }
 func uploadFile(t *testing.T, h http.Handler, key, name, content string, generation int64, admin bool) *httptest.ResponseRecorder {
 	t.Helper()
+	return uploadFileTo(t, h, key, name, content, "filehelper", generation, admin)
+}
+
+func uploadFileTo(t *testing.T, h http.Handler, key, name, content, recipient string, generation int64, admin bool) *httptest.ResponseRecorder {
+	t.Helper()
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
-	for k, v := range map[string]string{"device": "phone-a", "owner_wxid": "wxid_self", "account_generation": fmt.Sprint(generation), "wxid": "filehelper"} {
+	for k, v := range map[string]string{"device": "phone-a", "owner_wxid": "wxid_self", "account_generation": fmt.Sprint(generation), "wxid": recipient} {
 		if err := form.WriteField(k, v); err != nil {
 			t.Fatal(err)
 		}
@@ -56,6 +61,53 @@ func uploadFile(t *testing.T, h http.Handler, key, name, content string, generat
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
+}
+
+func TestFileUploadToFriendPreservesRecipientIdempotencyAndLease(t *testing.T) {
+	s, registration, handler := fileService(t)
+	const recipient = "wxid_test_friend"
+	request := func(key, to string, generation int64, admin bool) *httptest.ResponseRecorder {
+		return uploadFileTo(t, handler, key, "notice.txt", "test file content", to, generation, admin)
+	}
+	if response := request("friend-upload", recipient, 1, false); response.Code != http.StatusUnauthorized {
+		t.Fatal("friend upload bypassed admin auth", response.Code)
+	}
+	for _, invalid := range []string{"", strings.Repeat("x", 192)} {
+		if response := request("invalid-recipient", invalid, 1, true); response.Code != http.StatusBadRequest {
+			t.Fatal("invalid recipient accepted", response.Code)
+		}
+	}
+	if response := request("wrong-generation", recipient, 99, true); response.Code != http.StatusConflict {
+		t.Fatal("friend upload bypassed account generation", response.Code)
+	}
+	var id int64
+	for attempt := 0; attempt < 2; attempt++ {
+		response := request("friend-upload", recipient, 1, true)
+		var result struct {
+			ID     int64 `json:"outbox_id"`
+			Replay bool  `json:"idempotent_replay"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || result.ID <= 0 {
+			t.Fatal("friend file rejected", response.Code, response.Body.String())
+		}
+		if attempt == 0 {
+			id = result.ID
+		}
+		if result.ID != id || result.Replay != (attempt == 1) {
+			t.Fatal("friend request duplicated", result)
+		}
+	}
+	if response := request("friend-upload", "wxid_other_friend", 1, true); response.Code != http.StatusConflict {
+		t.Fatal("same key changed recipient", response.Code)
+	}
+	item := filePoll(t, s, registration)
+	if item.ID != id || item.WxID != recipient || item.OwnerWxID != registration.WxID || item.LeaseToken == "" {
+		t.Fatal("friend identity lost during lease", item)
+	}
+	result, err := s.FileTask(t.Context(), fileOp(registration, item, "renew"))
+	if err != nil || result.Item.ID != id || result.Item.WxID != recipient || result.Item.LeaseToken != item.LeaseToken {
+		t.Fatal("friend lease changed on renewal", result, err)
+	}
 }
 func filePoll(t *testing.T, s *Service, r ModuleRegistrationRequest) ModuleOutboxItem {
 	t.Helper()

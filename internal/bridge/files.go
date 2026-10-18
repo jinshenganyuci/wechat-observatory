@@ -180,11 +180,6 @@ func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
 		writeFileError(w, ErrInvalidFile)
 		return
 	}
-	// First release intentionally supports one group or the filehelper test target.
-	if req.WxID != "filehelper" && !strings.HasSuffix(req.WxID, "@chatroom") {
-		writeFileError(w, ErrInvalidFile)
-		return
-	}
 	fingerprint, _ := json.Marshal([]any{req.WxID, generation, name, blob.Size, blob.SHA256})
 	req.Fingerprint = hashFileKey(string(fingerprint))
 	// A lost SQL COMMIT response is ambiguous. Preserve bytes until the DB-backed
