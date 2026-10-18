@@ -159,8 +159,20 @@ test("empty, oversized, unsupported and invalidly named files are rejected befor
   await expect(page.getByRole("alert")).toHaveText(/文件名不能超过 240 UTF-8 字节/);
   await input.setInputFiles({ name: "photo.JPG", mimeType: "image/jpeg", buffer: Buffer.from("mock") });
   await expect(page.getByRole("alert")).toHaveText(/暂不支持图片或视频/);
-  await input.setInputFiles({ name: "large.zip", mimeType: "application/zip", buffer: Buffer.alloc(25 * 1024 * 1024 + 1) });
-  await expect(page.getByRole("alert")).toHaveText("文件不能超过 25 MiB。");
+  // Exercise only metadata at the limit; never allocate or upload a large file.
+  const selectMockSize = (size: number) => input.evaluate((element, reportedSize) => {
+    const file = new File(["mock"], "large.zip", { type: "application/zip" });
+    Object.defineProperty(file, "size", { value: reportedSize });
+    Object.defineProperty(element, "files", { configurable: true, value: [file] });
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }, size);
+  await selectMockSize(300 * 1024 * 1024 + 1);
+  await expect(page.getByRole("alert")).toHaveText("文件不能超过 300 MiB。");
   await expect(page.getByRole("button", { name: "加入队列", exact: true }).last()).toBeDisabled();
+  await selectMockSize(300 * 1024 * 1024);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByTestId("file-draft-name")).toHaveText("large.zip");
+  await expect(page.getByText("300.0 MiB", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "加入队列", exact: true }).last()).toBeEnabled();
   expect(sends).toBe(0);
 });

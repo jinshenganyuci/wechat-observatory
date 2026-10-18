@@ -10,7 +10,7 @@ import java.util.Set;
 
 /** Version 1 deliberately excludes formats whose native thumbnail task also reads the source. */
 public final class FileJob {
-    public static final long MAX_BYTES = 25L * 1024 * 1024;
+    public static final long MAX_BYTES = 300L * 1024 * 1024;
     private static final Set<String> THUMBNAILS = new HashSet<>(Arrays.asList(
             "jpg", "jpeg", "bmp", "png", "tif", "tiff", "heic", "heif", "webp",
             "avi", "flv", "m4v", "mkv", "mov", "mp4", "mts", "webm", "wmv"));
@@ -31,6 +31,14 @@ public final class FileJob {
         sha256 = attachment.getString("sha256");
         if (size <= 0 || size > MAX_BYTES || !sha256.matches("[0-9a-f]{64}"))
             throw new IllegalArgumentException("Invalid attachment length or SHA256");
+    }
+
+    /** Keep small files at 120s; larger transfers allow 256 KiB/s, capped at 20 minutes.
+     * Used independently for downloading and observing native upload completion. */
+    static long transferTimeoutMillis(long size) {
+        if (size <= 0 || size > MAX_BYTES) throw new IllegalArgumentException("Invalid attachment length");
+        long seconds = (size + 256L * 1024 - 1) / (256L * 1024);
+        return Math.max(120000L, Math.min(20L * 60 * 1000, seconds * 1000));
     }
 
     public static String safeName(String value) {

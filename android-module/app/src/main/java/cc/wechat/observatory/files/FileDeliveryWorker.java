@@ -43,7 +43,7 @@ public final class FileDeliveryWorker {
     private final long observeMillis;
 
     public static synchronized FileDeliveryWorker get(Context context) throws IOException {
-        if (shared == null) shared = new FileDeliveryWorker(new OutgoingFileJournal(context), 120000);
+        if (shared == null) shared = new FileDeliveryWorker(new OutgoingFileJournal(context), -1);
         return shared;
     }
     FileDeliveryWorker(OutgoingFileJournal journal, long observeMillis) { this.journal = journal; this.observeMillis = observeMillis; }
@@ -138,7 +138,8 @@ public final class FileDeliveryWorker {
                 try { journal.observe(observed, id, finished, ok); }
                 catch (Exception failure) { observationFailed.set(true); }
             });
-            long deadline = android.os.SystemClock.elapsedRealtime() + observeMillis;
+            long deadline = android.os.SystemClock.elapsedRealtime()
+                    + (observeMillis >= 0 ? observeMillis : FileJob.transferTimeoutMillis(job.size));
             while (android.os.SystemClock.elapsedRealtime() < deadline) {
                 host.validateCached();
                 JSONObject snapshot = journal.snapshot(record);
@@ -187,7 +188,7 @@ public final class FileDeliveryWorker {
 
     private void download(FileJob job, OutgoingFileJournal.Record record, Host host) throws Exception {
         long total = 0, nextRenew = android.os.SystemClock.elapsedRealtime() + 15000;
-        long deadline = android.os.SystemClock.elapsedRealtime() + 120000;
+        long deadline = android.os.SystemClock.elapsedRealtime() + FileJob.transferTimeoutMillis(job.size);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (Download download = host.download(job); FileOutputStream output = new FileOutputStream(journal.part(record))) {
             byte[] buffer = new byte[16384]; int count;

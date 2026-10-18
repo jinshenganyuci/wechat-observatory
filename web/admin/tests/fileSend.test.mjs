@@ -1,17 +1,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { sendFile } from '../src/api.ts';
 import { MAX_FILE_BYTES, fileValidationError, sameFileScope, fileDraftMatchesScope, fileTargetSupported, newFileRequestKey,
   persistFileRequest, restoreFileRequest, clearFileRequest } from '../src/fileSend.ts';
 
-test('ordinary file limit includes exactly 25 MiB and excludes media extensions case-insensitively', () => {
+test('ordinary file limit includes exactly 300 MiB and excludes media extensions case-insensitively', () => {
+  assert.equal(MAX_FILE_BYTES, 300 * 1024 * 1024);
   assert.match(fileValidationError({ name: 'empty.txt', size: 0 }), /非空/);
   assert.equal(fileValidationError({ name: 'report.zip', size: MAX_FILE_BYTES }), '');
-  assert.match(fileValidationError({ name: 'report.zip', size: MAX_FILE_BYTES + 1 }), /25 MiB/);
+  assert.equal(fileValidationError({ name: 'report.zip', size: 26 * 1024 * 1024 }), '');
+  assert.match(fileValidationError({ name: 'report.zip', size: MAX_FILE_BYTES + 1 }), /300 MiB/);
   for (const name of ['image.JPG', 'movie.Mp4', 'photo.heic']) {
     assert.match(fileValidationError({ name, size: 10 }), /图片或视频/);
   }
   assert.equal(fileValidationError({ name: 'report.pdf', size: 10 }), '');
   assert.equal(fileValidationError({ name: 'jpg', size: 10 }), '');
+});
+
+test('file upload has a 20-minute timeout and clears it after the mocked response', async t => {
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    globalThis.fetch = previousFetch;
+  });
+  let timeoutMs;
+  let cleared;
+  globalThis.window = { location: { pathname: '/' },
+    setTimeout: (_callback, delay) => { timeoutMs = delay; return 42; },
+    clearTimeout: handle => { cleared = handle; } };
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, '/api/send/file');
+    assert.equal(options.body.get('file').size, 4);
+    assert.equal(options.headers['Idempotency-Key'], 'mock-file-request');
+    assert.equal(options.signal.aborted, false);
+    return new Response(JSON.stringify({ ok: true, outbox_id: 1, idempotent_replay: false }));
+  };
+  await sendFile({ password: 'mock-password', device: 'd', ownerWxid: 'a', accountGeneration: 1,
+    wxid: 'filehelper', file: new File(['mock'], 'small.txt'), idempotencyKey: 'mock-file-request' });
+  assert.equal(timeoutMs, 20 * 60 * 1000);
+  assert.equal(cleared, 42);
 });
 
 test('file names match the backend UTF-8 and Unicode contract', () => {
@@ -51,6 +80,13 @@ test('invalid stored retry identities are never used', () => {
   for (const raw of ['{', 'null', '{"name":"x","size":1,"key":"bad","scope":{}}']) {
     assert.equal(restoreFileRequest({ getItem: () => raw }), null);
   }
+});
+
+test('retry metadata accepts the 300 MiB boundary without allocating file bytes', () => {
+  const draft = { name: 'report.zip', size: 300 * 1024 * 1024, key: newFileRequestKey(),
+    scope: { device: 'd', ownerWxid: 'a', generation: 2, wxid: 'filehelper' } };
+  assert.equal(restoreFileRequest({ getItem: () => JSON.stringify(draft) }).size, draft.size);
+  assert.equal(restoreFileRequest({ getItem: () => JSON.stringify({ ...draft, size: draft.size + 1 }) }), null);
 });
 
 test('recovery permits original-generation replay but never a different account or recipient', () => {

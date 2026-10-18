@@ -209,7 +209,7 @@ export async function sendFile(params: {
   body.set("wxid", params.wxid);
   body.set("file", params.file, params.file.name);
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 120000);
+  const timeout = window.setTimeout(() => controller.abort(), 20 * 60 * 1000);
   try {
     const response = await fetch(publicPath("/api/send/file"), {
       method: "POST", body, signal: controller.signal,

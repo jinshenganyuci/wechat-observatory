@@ -15,7 +15,7 @@ import java.util.List;
 public final class OutgoingFileJournal {
     public static final String DIRECTORY = "observatory-outgoing";
     private static final int MAX_RECORDS = 1024;
-    private static final long MAX_STAGED = 8 * FileJob.MAX_BYTES;
+    static final long MAX_STAGED = 2 * FileJob.MAX_BYTES;
     private final File directory;
     interface DirectorySync { void sync(File directory) throws IOException; }
     private final DirectorySync directorySync;

@@ -1429,7 +1429,7 @@ function App() {
                 <Button type="button" size="sm" variant="outline" disabled={fileDraft.stage === "submitting"} onClick={discardFile}>取消选择</Button>
               </div> : null}
               {fileError ? <p role="alert" className="text-xs text-destructive">{fileError}</p> : null}
-              <p className="text-xs leading-5 text-muted-foreground">单个普通文件，最多 25 MiB；暂不支持图片和视频。提交后在发送记录查看结果。</p>
+              <p className="text-xs leading-5 text-muted-foreground">单个普通文件，最多 300 MiB；暂不支持图片和视频。提交后在发送记录查看结果。</p>
               <p className="text-xs leading-5 text-muted-foreground">临时传输文件会自动清理；微信聊天中的原生附件会保留，请在微信内管理。</p>
             </div>}
           </div>

@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-const MaxFileBytes int64 = 25 << 20
+const MaxFileBytes int64 = 300 << 20
 const DefaultFileSpoolBytes int64 = 512 << 20
 
 var (
-	ErrFileTooLarge        = errors.New("file exceeds 25 MiB")
+	ErrFileTooLarge        = errors.New("file exceeds 300 MiB")
 	ErrFileQuota           = errors.New("file storage quota exceeded")
 	ErrFileUnavailable     = errors.New("file storage is unavailable")
 	ErrFileConflict        = errors.New("file task or lease is no longer valid")
@@ -102,6 +102,12 @@ func syncDir(path string) error {
 // Put hashes a bounded stream even when quota prevents storing it. This allows
 // an identical idempotent retry to resolve its tombstone without allocating bytes.
 func (s *FileSpool) Put(ctx context.Context, input io.Reader) (blob FileBlob, err error) {
+	return s.putLimited(ctx, input, MaxFileBytes)
+}
+
+// Keep the streaming boundary testable with small inputs; production always
+// passes MaxFileBytes through Put, without allocating a file-sized buffer.
+func (s *FileSpool) putLimited(ctx context.Context, input io.Reader, maxBytes int64) (blob FileBlob, err error) {
 	lock, err := s.lock(ctx)
 	if err != nil {
 		return blob, err
@@ -145,7 +151,7 @@ func (s *FileSpool) Put(ctx context.Context, input io.Reader) (blob FileBlob, er
 		n, readErr := input.Read(buffer)
 		if n > 0 {
 			blob.Size += int64(n)
-			if blob.Size > MaxFileBytes {
+			if blob.Size > maxBytes {
 				return blob, ErrFileTooLarge
 			}
 			_, _ = hash.Write(buffer[:n])

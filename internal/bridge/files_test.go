@@ -204,12 +204,53 @@ func TestFileUploadIdempotencyQuotaAndValidation(t *testing.T) {
 	if got := uploadFile(t, h, "", "a.txt", "x", 2, true); got.Code != 400 {
 		t.Fatal(got.Code)
 	}
-	if got := uploadFile(t, h, "idem-big-1", "big.bin", strings.Repeat("x", int(MaxFileBytes+1)), 2, true); got.Code != 413 {
-		t.Fatal(got.Code, got.Body.String())
+	// Reject an oversized declared request before reading a body. Do not build
+	// a 300 MiB fixture just to exercise this header boundary.
+	oversized := httptest.NewRequest("POST", "/api/send/file", &rejectReadBody{t: t})
+	oversized.ContentLength = MaxFileBytes + (64 << 10) + 1
+	oversized.Header.Set("X-Bridge-Password", "admin")
+	oversized.Header.Set("Idempotency-Key", "idem-big-1")
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, oversized)
+	if response.Code != 413 || !strings.Contains(response.Body.String(), "300 MiB") {
+		t.Fatal(response.Code, response.Body.String())
 	}
 	entries, _ := os.ReadDir(s.fileSpool.dir)
 	if len(entries) != 2 {
 		t.Fatalf("failed/replayed uploads left blobs: %d", len(entries))
+	}
+}
+
+type rejectReadBody struct{ t *testing.T }
+
+func (b *rejectReadBody) Read([]byte) (int, error) {
+	b.t.Error("oversized declared body should not be read")
+	return 0, io.EOF
+}
+
+type zeroFileReader struct{}
+
+func (zeroFileReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+func TestFileSpoolStreamingBoundaryWithoutLargeFixture(t *testing.T) {
+	spool, err := NewFileSpool(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const smallLimit = 1024
+	exact, err := spool.putLimited(t.Context(), io.LimitReader(zeroFileReader{}, smallLimit), smallLimit)
+	if err != nil || exact.Stored || exact.Size != smallLimit || len(exact.SHA256) != 64 {
+		t.Fatal("exact streaming limit or quota hash fallback failed", exact, err)
+	}
+	if _, err := spool.putLimited(t.Context(), io.LimitReader(zeroFileReader{}, smallLimit+1), smallLimit); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatal("streaming overflow accepted", err)
+	}
+	entries, err := os.ReadDir(spool.dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != ".lock" {
+		t.Fatal("bounded failed upload left file data", entries, err)
 	}
 }
 

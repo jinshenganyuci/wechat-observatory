@@ -36,7 +36,7 @@ curl --fail-with-body \
 
 返回 `{ "item": { "id": 123, "kind": "file", "status": "sent", "attachment": { "name": "report.pdf", "size": 1234, "sha256": "..." } }, "server_time": "..." }`。实际响应还包含其他队列字段。`GET /api/outbox` 则用于列出近期发送记录。
 
-接口使用 `multipart/form-data`，不是 Base64，也不接受任意下载链接。文件非空、单个最大 **25 MiB**；这是本项目当前上限，并非微信官方上限。支持 PDF、Office 文档、TXT、ZIP 和普通二进制文件。第一版拒绝微信会额外启动缩略图流程的图片/视频扩展名：`jpg jpeg bmp png tif tiff heic heif webp avi flv m4v mkv mov mp4 mts webm wmv`。后缀检查不区分大小写。
+接口使用 `multipart/form-data`，不是 Base64，也不接受任意下载链接。文件非空、单个最大 **300 MiB（314,572,800 字节）**；这是本项目当前上限，并非微信官方上限。支持 PDF、Office 文档、TXT、ZIP 和普通二进制文件。第一版拒绝微信会额外启动缩略图流程的图片/视频扩展名：`jpg jpeg bmp png tif tiff heic heif webp avi flv m4v mkv mov mp4 mts webm wmv`。后缀检查不区分大小写。
 
 ## 幂等与发送状态
 
@@ -80,6 +80,8 @@ curl --fail-with-body \
 | `BRIDGE_FILE_SPOOL_DIR` | `./data/files` | 私有暂存目录；Compose 使用持久卷中的 `/data/files` |
 | `BRIDGE_FILE_SPOOL_MAX_BYTES` | `536870912`（512 MiB） | 后端文件总配额，包含尚未确认完成的任务 |
 
-反向代理应允许至少 25 MiB 的文件加 multipart 开销，并给予上传、下载足够的超时时间。服务端不为用户文件开启静态目录或公开下载路由。
+后端默认总配额 512 MiB，能容纳一份 300 MiB 文件；剩余空间不足时拒绝新任务，已存在请求仍可用原幂等键核查。手机暂存总配额 600 MiB，包含结果未知而保留的源文件，成功后释放。本项目不一次性将整份文件读进内存。
+
+反向代理应允许至少 300 MiB 的文件加 multipart 开销；可配置为 301 MiB 或更高。文件上传及下载的服务端时限、管理台上传时限为 20 分钟。手机的下载与原生结果观察时限随文件大小增加，最短 2 分钟、最长 20 分钟；超时仍按既有安全状态处理，不自动重发。慢网和微信端限制仍可能使大文件失败。普通 API 的超时不变，服务端不为用户文件开启静态目录或公开下载路由。
 
 测试验收以文件传输助手为目标，见[验收记录](file-send-validation.md)。群目标使用同一原生发送入口，但群成员权限、微信风控与接收端下载仍需在实际目标群单独验收。

@@ -52,6 +52,9 @@ type FileTaskResult struct {
 	LeaseExpired bool             `json:"lease_expired,omitempty"`
 	Item         ModuleOutboxItem `json:"item"`
 }
+
+const fileTransferTimeout = 20 * time.Minute
+
 type FileOutbox interface {
 	EnqueueFile(context.Context, FileEnqueue) (ModuleOutboxItem, bool, error)
 	OperateFile(context.Context, FileOperation) (FileTaskResult, error)
@@ -98,10 +101,15 @@ func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	const maxRequestBytes = MaxFileBytes + (64 << 10)
+	if r.ContentLength > maxRequestBytes {
+		writeFileError(w, ErrFileTooLarge)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fileTransferTimeout)
 	defer cancel()
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(3 * time.Minute))
-	r.Body = http.MaxBytesReader(w, r.Body, MaxFileBytes+(64<<10))
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(fileTransferTimeout))
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	reader, err := r.MultipartReader()
 	if err != nil {
 		writeFileError(w, ErrInvalidFile)
@@ -296,7 +304,7 @@ func (s *HTTPServer) moduleFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.Header().Set("X-Content-SHA256", result.Item.Attachment.SHA256)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(3 * time.Minute))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(fileTransferTimeout))
 	_, _ = io.Copy(w, f)
 }
 

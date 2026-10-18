@@ -62,6 +62,26 @@ public class FileDeliveryTest {
         journal.reserveDownload(record); Files.write(journal.part(record).toPath(), CONTENT); journal.commitDownload(record);
     }
 
+    @Test public void maximumFileAndStagingBudgetUseMetadataOnly() throws Exception {
+        assertEquals(300L * 1024 * 1024, FileJob.MAX_BYTES);
+        assertEquals(600L * 1024 * 1024, OutgoingFileJournal.MAX_STAGED);
+        JSONObject largest = item(1, "lease");
+        largest.getJSONObject("attachment").put("size", FileJob.MAX_BYTES);
+        assertEquals(FileJob.MAX_BYTES, new FileJob(largest).size);
+        largest.getJSONObject("attachment").put("size", FileJob.MAX_BYTES + 1);
+        assertThrows(IllegalArgumentException.class, () -> new FileJob(largest));
+        assertFalse(new File(root, OutgoingFileJournal.DIRECTORY).exists());
+    }
+    @Test public void sizeDerivedTimeoutPreservesSmallFilesAndBoundsLargeFiles() {
+        assertEquals(120000, FileJob.transferTimeoutMillis(1));
+        assertEquals(120000, FileJob.transferTimeoutMillis(25L * 1024 * 1024));
+        assertEquals(120000, FileJob.transferTimeoutMillis(25L * 1024 * 1024 + 1));
+        assertEquals(121000, FileJob.transferTimeoutMillis(30L * 1024 * 1024 + 1));
+        assertEquals(1200000, FileJob.transferTimeoutMillis(FileJob.MAX_BYTES));
+        assertTrue(FileJob.transferTimeoutMillis(FileJob.MAX_BYTES) <= 20L * 60 * 1000);
+        assertThrows(IllegalArgumentException.class, () -> FileJob.transferTimeoutMillis(0));
+        assertThrows(IllegalArgumentException.class, () -> FileJob.transferTimeoutMillis(Long.MAX_VALUE));
+    }
     @Test public void filenameContractMatchesServerAndKeepsSafeExtension() throws Exception {
         assertEquals("😀:report.txt", FileJob.safeName("😀:report.txt"));
         assertEquals("jpg", FileJob.safeName("jpg"));

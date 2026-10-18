@@ -1,4 +1,4 @@
-export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const MAX_FILE_BYTES = 300 * 1024 * 1024;
 
 const MEDIA_EXTENSIONS = new Set([
   "jpg", "jpeg", "bmp", "png", "tif", "tiff", "heic", "heif", "webp",
@@ -41,7 +41,7 @@ export function clearFileRequest(storage: Pick<Storage, "getItem" | "removeItem"
 
 export function fileValidationError(file: Pick<File, "name" | "size">) {
   if (file.size <= 0) return "请选择非空文件。";
-  if (file.size > MAX_FILE_BYTES) return "文件不能超过 25 MiB。";
+  if (file.size > MAX_FILE_BYTES) return "文件不能超过 300 MiB。";
   if (!file.name || file.name === "." || file.name === ".."
     || new TextEncoder().encode(file.name).length > 240
     || /[\/\\\p{Cc}\uD800-\uDFFF]/u.test(file.name)
