@@ -25,7 +25,7 @@ async function setup(page: Page, handle?: (route: Route, url: URL) => Promise<bo
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "连接刷新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "刷新", exact: true })).toBeVisible();
   if (!offline) await expect(page.locator("#inline-send")).toBeEnabled();
 }
 
@@ -149,7 +149,7 @@ test("account generation changes reject delayed outbox contents", async ({ page 
   await page.getByRole("button", { name: "刷新记录", exact: true }).click();
   await expect.poll(() => !!held).toBe(true);
   generation = 3;
-  await page.getByRole("button", { name: "连接刷新", exact: true }).click();
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
   await expect(page.getByText("会话代次 3", { exact: true })).toBeVisible();
   await held!.fulfill({ json: { items: [{ id: 99, device: "phone", owner_wxid: "A", wxid: "friend", status: "pending", text: "过期队列正文" }], server_time: "2026-10-17T00:02:05Z" } });
   await expect(page.getByText("过期队列正文")).toHaveCount(0);
@@ -177,8 +177,10 @@ test("web connection is separate from server-reported phone availability", async
   await expect(page.getByText("网页已连接", { exact: true })).toBeVisible();
   await expect(page.getByText("实时已连接", { exact: true })).toHaveCount(0);
   await expect(page.getByText("待发送", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("离线", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("region", { name: "工作台", exact: true }).getByText("离线", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备与连接", exact: true }).click();
   await expect(page.getByText("待发：1", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "工作台", exact: true }).click();
   await expect(page.getByText(/待处理任务需等待手机恢复连接/)).toBeVisible();
   await expect(page.getByText("等待恢复连接的内容", { exact: true })).toBeVisible();
   await expect(page.locator("#inline-send")).toBeDisabled();

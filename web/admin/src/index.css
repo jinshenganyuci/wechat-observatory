@@ -4,40 +4,40 @@
 
 @layer base {
   :root {
-    --background: 210 20% 98%;
-    --foreground: 222 31% 11%;
+    --background: 150 15% 97%;
+    --foreground: 164 24% 13%;
     --card: 0 0% 100%;
     --card-foreground: 222 31% 11%;
-    --primary: 204 72% 36%;
+    --primary: 164 64% 28%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 24% 94%;
-    --secondary-foreground: 222 31% 14%;
-    --muted: 214 20% 94%;
-    --muted-foreground: 215 12% 43%;
+    --secondary: 154 24% 94%;
+    --secondary-foreground: 164 24% 18%;
+    --muted: 150 12% 94%;
+    --muted-foreground: 160 8% 46%;
     --destructive: 5 73% 42%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 18% 86%;
-    --input: 214 18% 86%;
-    --ring: 204 72% 36%;
-    --radius: 0.5rem;
+    --border: 150 14% 88%;
+    --input: 150 14% 85%;
+    --ring: 164 64% 28%;
+    --radius: 0.75rem;
   }
 
   .dark {
-    --background: 222 27% 8%;
-    --foreground: 210 28% 96%;
-    --card: 220 24% 11%;
-    --card-foreground: 210 28% 96%;
-    --primary: 201 88% 43%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 217 18% 18%;
-    --secondary-foreground: 210 28% 96%;
-    --muted: 219 19% 15%;
-    --muted-foreground: 214 12% 70%;
+    --background: 165 14% 8%;
+    --foreground: 150 16% 93%;
+    --card: 165 13% 11%;
+    --card-foreground: 150 16% 93%;
+    --primary: 158 47% 58%;
+    --primary-foreground: 164 35% 10%;
+    --secondary: 164 15% 17%;
+    --secondary-foreground: 150 16% 93%;
+    --muted: 164 12% 15%;
+    --muted-foreground: 155 10% 63%;
     --destructive: 4 72% 48%;
     --destructive-foreground: 0 0% 100%;
-    --border: 217 18% 24%;
-    --input: 217 18% 24%;
-    --ring: 201 88% 43%;
+    --border: 164 12% 22%;
+    --input: 164 12% 26%;
+    --ring: 158 47% 58%;
   }
 
   * {
@@ -63,3 +63,60 @@
     letter-spacing: 0;
   }
 }
+
+@layer base {
+  :focus-visible { outline:2px solid hsl(var(--ring)); outline-offset:3px; }
+  button { cursor:pointer; } button:disabled { cursor:default; }
+  [hidden] { display:none !important; }
+}
+@layer components {
+  .observatory-app { @apply min-h-screen bg-background text-foreground; }
+  .app-sidebar { @apply fixed inset-y-0 left-0 z-30 flex w-[224px] flex-col border-r bg-card px-4 py-7; }
+  .app-brand { @apply mb-10 flex items-center gap-3 px-2; }
+  .brand-mark { @apply flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground; }
+  .app-brand strong { @apply block text-base tracking-wide; }
+  .app-brand span:not(.brand-mark) { @apply mt-0.5 block text-[9px] font-semibold tracking-[0.18em] text-muted-foreground; }
+  .app-nav { @apply grid gap-1.5; }
+  .app-nav button { @apply flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground; }
+  .app-nav button[aria-current="page"] { @apply bg-secondary text-primary; }
+  .sidebar-devices { @apply mt-9 min-h-0 overflow-y-auto border-t pt-6; }
+  .sidebar-label { @apply mb-3 flex items-center justify-between px-3 text-[11px] font-medium text-muted-foreground; }
+  .sidebar-label span { @apply rounded bg-secondary px-1.5 py-0.5 text-[10px]; }
+  .device-selector { @apply mb-1 flex w-full items-center gap-2.5 rounded-lg px-3 py-3 text-left hover:bg-secondary; }
+  .device-selector[aria-pressed="true"] { @apply bg-primary/5; }
+  .device-selector strong { @apply block truncate text-sm font-medium; }
+  .device-selector small { @apply mt-1 block truncate text-[11px] text-muted-foreground; }
+  .device-dot { @apply h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500; }
+  .device-dot.offline { @apply bg-muted-foreground; }
+  .sidebar-footer { @apply mt-auto flex items-center justify-between gap-1 pt-6; }
+  .app-body { @apply ml-[224px] min-w-0; }
+  .app-topbar { @apply flex min-h-[106px] items-center justify-between gap-4 border-b bg-card/70 px-8 py-5; }
+  .eyebrow { @apply mb-1.5 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground; }
+  .app-topbar h1 { @apply text-xl font-semibold tracking-tight; }
+  .app-main { @apply mx-auto grid max-w-[1600px] gap-5 px-8 pb-8 pt-4; }
+  .workspace-notice { @apply flex min-w-0 items-start justify-between gap-4 text-xs leading-5 text-muted-foreground; }
+  .workspace-notice > span:first-child { white-space:normal; overflow-wrap:anywhere; }
+  .workspace-summary { @apply flex flex-wrap items-center justify-between gap-5 rounded-xl border bg-card px-5 py-4; }
+  .summary-account { @apply flex min-w-0 flex-1 items-center gap-3; }
+  .account-avatar { @apply flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-secondary text-primary; }
+  .summary-metrics { @apply flex shrink-0 gap-8 border-l pl-7; }
+  .summary-metrics > div { @apply grid gap-1; }
+  .summary-metrics span { @apply text-[11px] text-muted-foreground; }
+  .summary-metrics strong { @apply text-xl font-semibold tabular-nums; }
+  .conversation-grid { @apply grid min-w-0 items-start gap-5; grid-template-columns:300px minmax(0,1fr); }
+  .contact-panel, .chat-panel { @apply overflow-hidden shadow-none; }
+  .contact-list { @apply grid max-h-[650px] min-h-[180px] content-start gap-1 overflow-y-auto overflow-x-hidden; }
+  .contact-row { @apply w-full min-w-0 rounded-lg border border-transparent p-3 text-left transition-colors hover:bg-secondary/60; }
+  .contact-row.selected { @apply border-primary/10 bg-secondary; }
+  .message-timeline { @apply grid h-[380px] min-h-[240px] content-start gap-4 overflow-y-auto overflow-x-hidden rounded-lg bg-muted/40 p-4; }
+  .message-composer { @apply grid gap-2 rounded-lg border bg-card p-3; }
+  .message-composer textarea { @apply min-h-[72px] resize-y border-0 bg-transparent px-0 shadow-none focus-visible:ring-0; }
+  .login-page { @apply grid min-h-screen place-items-center bg-background p-6; }
+  .login-card { @apply w-full max-w-[400px] rounded-2xl border bg-card p-8 shadow-sm; }
+  .login-card .brand-mark { @apply mb-6 h-12 w-12; }
+}
+@media(min-width:1600px) { .conversation-grid{grid-template-columns:340px minmax(0,1fr)} .message-timeline{height:430px} }
+@media(max-width:1199px) { .app-sidebar{width:200px;padding-inline:12px} .app-body{margin-left:200px} .app-main,.app-topbar{padding-inline:20px} .conversation-grid{grid-template-columns:260px minmax(0,1fr);gap:16px} .summary-metrics{gap:18px;padding-left:18px} }
+@media(max-width:900px) { .app-sidebar{position:static;width:auto;padding:16px 20px 0} .app-brand{margin-bottom:16px;padding:0} .app-nav{display:flex;gap:6px;padding-bottom:12px} .app-nav button{flex:1;justify-content:center;padding-inline:10px;min-height:40px} .app-nav button>svg:last-child:not(:first-child){display:none} .sidebar-devices{display:flex;gap:8px;margin:0;padding:10px 0;overflow-x:auto} .sidebar-label{display:none} .device-selector{width:auto;min-width:150px;margin:0;padding:8px 12px} .device-selector small{display:none} .sidebar-footer{position:absolute;right:16px;top:16px;padding:0} .sidebar-footer>span{display:none} .app-body{margin-left:0} .app-topbar{min-height:90px} .app-main{padding-top:12px} .conversation-grid{grid-template-columns:270px minmax(0,1fr)} }
+@media(max-width:640px) { .app-main,.app-topbar{padding-inline:14px} .app-topbar{gap:8px} .app-topbar h1{font-size:18px} .app-topbar .eyebrow{font-size:9px} .conversation-grid{grid-template-columns:minmax(0,1fr)} .contact-list{max-height:220px;min-height:80px} .message-timeline{height:340px} .workspace-summary{padding:16px;gap:16px} .summary-account{flex-basis:100%} .summary-metrics{width:100%;padding:12px 0 0;border-left:0;border-top:1px solid hsl(var(--border));justify-content:space-around} .summary-metrics strong{font-size:18px} .app-nav button{font-size:12px;gap:6px} }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after{animation-duration:0.01ms!important;transition-duration:0.01ms!important;scroll-behavior:auto!important} }

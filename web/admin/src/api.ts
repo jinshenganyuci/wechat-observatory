@@ -5,7 +5,18 @@ type ApiOptions = {
   method?: "GET" | "POST" | "DELETE";
   body?: unknown;
   timeoutMs?: number;
+  signal?: AbortSignal;
 };
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 const OBSERVATORY_MOUNT = "/observatory";
 
@@ -24,20 +35,27 @@ async function requestJSON<T>(path: string, options: ApiOptions): Promise<T> {
     headers["Content-Type"] = "application/json";
   }
   const controller = new AbortController();
-  const timeout = options.timeoutMs ? window.setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
+  const abort = () => controller.abort();
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) controller.abort();
+  const timeoutMs = options.timeoutMs ?? ((options.method ?? "GET") === "GET" ? 10000 : undefined);
+  const timeout = timeoutMs ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
   try {
     const response = await fetch(publicPath(path), {
       method: options.method ?? "GET", headers, signal: controller.signal,
       body: options.body === undefined ? undefined : JSON.stringify(options.body)
     });
     const text = await response.text();
-    if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
+    if (!response.ok) throw new ApiError(response.status, text || `HTTP ${response.status}`);
     return JSON.parse(text) as T;
-  } finally { if (timeout !== undefined) window.clearTimeout(timeout); }
+  } finally {
+    if (timeout !== undefined) window.clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
+  }
 }
 
-export async function getModules(password: string) {
-  return requestJSON<{ modules: ModuleStatus[] }>("/api/modules/status", { password });
+export async function getModules(password: string, signal?: AbortSignal) {
+  return requestJSON<{ modules: ModuleStatus[] }>("/api/modules/status", { password, signal, timeoutMs: 10000 });
 }
 
 /** Ask the server to hand the device binding to another phone on its next heartbeat. */

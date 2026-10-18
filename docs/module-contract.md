@@ -270,6 +270,11 @@ fallback.
 
 It should:
 
+- Restore a saved admin login automatically; discard invalid credentials on HTTP 401.
+- Keep one event stream per authenticated session, independent of device/chat selection.
+- Share one module-status request pipeline between polling, manual refresh and reconnect.
+- Bound read requests and ignore results belonging to a logged-out session.
+- Separate the conversation workspace, device connections and API management.
 - Use Chinese labels.
 - Support light/dark theme switching.
 - Show module runtime status.
