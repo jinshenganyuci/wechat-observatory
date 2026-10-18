@@ -37,8 +37,7 @@ test("switching accounts isolates shared contacts, delayed responses and drafts"
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/");
-  const refresh = page.getByRole("button", { name: "连接刷新", exact: true });
-  await refresh.click();
+  const refresh = page.getByRole("button", { name: "刷新", exact: true });
   await expect(page.getByText("A1 remark", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("A1 message", { exact: true })).toBeVisible();
   await expect(page.getByText("foreign contact", { exact: true })).toHaveCount(0);

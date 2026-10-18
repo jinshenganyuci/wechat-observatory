@@ -1,10 +1,13 @@
 import { AccountScope, belongsToAccount } from "./accountScope";
+import { useAdminConnection, type AdminSession } from "./useAdminConnection";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { formatBeijingClock, formatBeijingDateTime, formatBeijingTimeAgo } from "@/time";
 import {
   Activity,
-  CheckCircle2,
+  LayoutDashboard,
+  LogOut,
+  ChevronRight,
   Download,
   FileText,
   Hash,
@@ -35,10 +38,7 @@ import {
   getContacts,
   getApiKeys,
   getMessages,
-  getModules,
   getOutbox,
-  openLiveEvents,
-  parseLiveMessageEvent,
   publicPath,
   setApiKeyEnabled,
   sendText,
@@ -68,7 +68,6 @@ import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installatio
 import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleInstallation, ModuleStatus, StoredMessage, OutboxStatusItem, OutboxFilter } from "@/types";
 import "./index.css";
 
-const PASSWORD_KEY = "wgc_admin_password";
 const THEME_KEY = "wgc_admin_theme";
 const RAW_PROVIDER_MODULE_ACK = "module_ack";
 const CONTACT_SNAPSHOT_LIMIT = 10000;
@@ -85,7 +84,8 @@ function resolveTheme(): ThemeMode {
 }
 
 function App() {
-  const [password, setPassword] = React.useState(() => localStorage.getItem(PASSWORD_KEY) || "");
+  const [password, setPassword] = React.useState("");
+  const [panel, setPanel] = React.useState<"workspace" | "devices" | "access">("workspace");
   const [theme, setTheme] = React.useState<ThemeMode>(() => resolveTheme());
   const [modules, setModules] = React.useState<ModuleStatus[]>([]);
   const [apiKeys, setApiKeys] = React.useState<ApiKey[]>([]);
@@ -98,10 +98,8 @@ function App() {
   const [includeDeleted, setIncludeDeleted] = React.useState(false);
   const [contactFilter, setContactFilter] = React.useState<ContactFilter>("all");
   const [autoRefresh, setAutoRefresh] = React.useState(true);
-  const [liveConnected, setLiveConnected] = React.useState(false);
   const [sendOpen, setSendOpen] = React.useState(false);
   const [draft, setDraft] = React.useState("");
-  const [loading, setLoading] = React.useState(false);
   const [sending, setSending] = React.useState(false);
   const sendInFlight = React.useRef(false);
   const [outboxItems, setOutboxItems] = React.useState<OutboxStatusItem[]>([]);
@@ -120,7 +118,44 @@ function App() {
   const [switchingInstallation, setSwitchingInstallation] = React.useState<{ device: string; id: number } | null>(null);
   const [installationNotice, setInstallationNotice] = React.useState<(InstallationNotice & { device: string }) | null>(null);
 
-  const adminPassword = password.trim();
+  const connection = useAdminConnection({
+    autoRefresh,
+    onAuthenticated: (nextModules) => {
+      applyModules(nextModules);
+      if (!adminPassword) setNotice(`已同步 ${formatBeijingClock()}`);
+    },
+    onRefresh: async (session) => {
+      await Promise.all([
+        refreshApiKeys(),
+        refreshContacts(deviceRef.current),
+        refreshRecentMessages(deviceRef.current),
+        refreshMessages(deviceRef.current, selectedWxid),
+        refreshOutboxRef.current()
+      ]);
+      if (session.isCurrent()) setNotice(`已同步 ${formatBeijingClock()}`);
+    },
+    onMessage: async (payload, session) => {
+      if (payload.device !== deviceRef.current) return;
+      await refreshModules();
+      if (!session.isCurrent()) return;
+      if (!belongsToAccount(payload, selectedDevice, selectedOwnerWxid) || payload.raw_provider === RAW_PROVIDER_MODULE_ACK) return;
+      await Promise.all([
+        refreshContacts(selectedDevice, selectedOwnerWxid),
+        refreshRecentMessages(selectedDevice, selectedOwnerWxid),
+        selectedWxid && liveEventTouchesChat(payload, selectedWxid)
+          ? refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid) : Promise.resolve()
+      ]);
+    },
+    onReset: () => {
+      accountScope.current.update("", "", 0);
+      setModules([]); setApiKeys([]); setContacts([]); setMessages([]); setRecentMessages([]);
+      setSelectedDevice(""); setSelectedWxid(""); setOutboxItems([]); setDraft("");
+      setNewApiKey(""); setSendOpen(false); setSending(false); setSavingAdmin(false);
+      setInstallationNotice(null); setSwitchingInstallation(null);
+      setNotice("输入管理密码，进入你的微信工作台");
+    }
+  });
+  const { password: adminPassword, liveConnected, connecting: loading, currentSession, handleError } = connection;
   const selectedModule = React.useMemo(
     () => modules.find((item) => item.device === selectedDevice),
     [modules, selectedDevice]
@@ -129,7 +164,6 @@ function App() {
   const selectedGeneration = selectedModule?.account_generation ?? 0;
   const selectedScopeKey = `${selectedDevice}:${selectedOwnerWxid}:${selectedGeneration}`;
   const accountScope = React.useRef(new AccountScope());
-  const moduleRequest = React.useRef(0);
   const deviceRef = React.useRef(selectedDevice);
   deviceRef.current = selectedDevice;
   accountScope.current.update(selectedDevice, selectedOwnerWxid, selectedGeneration);
@@ -212,26 +246,7 @@ function App() {
   const leftSearchPlaceholder = messageListActive ? "搜索消息、昵称、备注" : "搜索昵称、备注、别名";
 
 
-  const refreshApiKeys = React.useCallback(async () => {
-    if (!adminPassword) {
-      setApiKeys([]);
-      return [] as ApiKey[];
-    }
-    const payload = await getApiKeys(adminPassword);
-    const nextKeys = payload.api_keys || [];
-    setApiKeys(nextKeys);
-    return nextKeys;
-  }, [adminPassword]);
-
-  const refreshModules = React.useCallback(async () => {
-    if (!adminPassword) {
-      setNotice("请输入管理密码");
-      return [] as ModuleStatus[];
-    }
-    const request = ++moduleRequest.current;
-    const payload = await getModules(adminPassword);
-    if (request !== moduleRequest.current) return [] as ModuleStatus[];
-    const nextModules = payload.modules || [];
+  function applyModules(nextModules: ModuleStatus[]) {
     const active = nextModules.find((item) => item.device === deviceRef.current) ?? nextModules[0];
     accountScope.current.update(active?.device ?? "", moduleOwnerWxid(active), active?.account_generation ?? 0);
     setModules(nextModules);
@@ -239,11 +254,44 @@ function App() {
       if (current && nextModules.some((item) => item.device === current)) return current;
       return nextModules[0]?.device || "";
     });
-    return nextModules;
+  }
+
+  const reportError = (error: unknown, fallback: string) => {
+    if (error instanceof DOMException && error.name === "AbortError") return;
+    setNotice(parseApiError(error, fallback).message);
+  };
+
+  // Attribute failures to the credential session that started the request.
+  // A delayed 401 from an old login must never log out its replacement.
+  async function authenticatedRequest<T>(session: AdminSession, request: Promise<T>): Promise<T> {
+    try { return await request; }
+    catch (error) {
+      if (!session.isCurrent()) throw new DOMException("Superseded session", "AbortError");
+      handleError(error, session);
+      throw error;
+    }
+  }
+
+  const refreshApiKeys = React.useCallback(async () => {
+    const session = currentSession();
+    if (!session) return [] as ApiKey[];
+    if (!adminPassword) {
+      setApiKeys([]);
+      return [] as ApiKey[];
+    }
+    const payload = await authenticatedRequest(session, getApiKeys(session.password));
+    if (!session.isCurrent()) return [] as ApiKey[];
+    const nextKeys = payload.api_keys || [];
+    setApiKeys(nextKeys);
+    return nextKeys;
   }, [adminPassword]);
+
+  const refreshModules = connection.refreshStatus;
 
   const refreshContacts = React.useCallback(
     async (device: string, ownerWxid = selectedOwnerWxid) => {
+      const session = currentSession();
+      if (!session) return [];
       if (!adminPassword || !device) {
         setContacts([]);
         setSelectedWxid("");
@@ -251,15 +299,15 @@ function App() {
       }
       const ticket = accountScope.current.begin("contacts", device, ownerWxid);
       if (!ticket) return [] as ModuleContact[];
-      const payload = await getContacts({
-        password: adminPassword,
+      const payload = await authenticatedRequest(session, getContacts({
+        password: session.password,
         device,
         ownerWxid,
         query: contactQuery,
         includeDeleted: contactIncludeDeleted,
         limit: CONTACT_SNAPSHOT_LIMIT
-      });
-      if (!accountScope.current.matches(ticket)) {
+      }));
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) {
         return [] as ModuleContact[];
       }
       const nextContacts = (payload.contacts || []).filter((row) => belongsToAccount(row, device, ownerWxid));
@@ -275,6 +323,8 @@ function App() {
 
   const refreshMessages = React.useCallback(
     async (device: string, wxid: string, ownerWxid = selectedOwnerWxid) => {
+      const session = currentSession();
+      if (!session) return [] as StoredMessage[];
       if (!adminPassword || !device || !wxid) {
         loadedMessageChatRef.current = "";
         setMessages([]);
@@ -283,16 +333,16 @@ function App() {
       const ticket = accountScope.current.begin("messages", device, ownerWxid, wxid);
       if (!ticket) return [] as StoredMessage[];
       const contact = contacts.find((item) => item.wxid === wxid);
-      const payload = await getMessages({
-        password: adminPassword,
+      const payload = await authenticatedRequest(session, getMessages({
+        password: session.password,
         device,
         wxid,
         ownerWxid,
         chatId: wxid,
         chatKind: chatKindForContact(wxid, contact),
         limit: 180
-      });
-      if (!accountScope.current.matches(ticket)) {
+      }));
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) {
         return [] as StoredMessage[];
       }
       const nextMessages = (payload.messages || []).filter((row) => belongsToAccount(row, device, ownerWxid)).reverse();
@@ -305,19 +355,21 @@ function App() {
 
   const refreshRecentMessages = React.useCallback(
     async (device: string, ownerWxid = selectedOwnerWxid) => {
+      const session = currentSession();
+      if (!session) return [];
       if (!adminPassword || !device) {
         setRecentMessages([]);
         return [] as StoredMessage[];
       }
       const ticket = accountScope.current.begin("recent", device, ownerWxid);
       if (!ticket) return [] as StoredMessage[];
-      const payload = await getMessages({
-        password: adminPassword,
+      const payload = await authenticatedRequest(session, getMessages({
+        password: session.password,
         device,
         ownerWxid,
         limit: 500
-      });
-      if (!accountScope.current.matches(ticket)) {
+      }));
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) {
         return [] as StoredMessage[];
       }
       const nextMessages = (payload.messages || []).filter((row) => belongsToAccount(row, device, ownerWxid));
@@ -328,6 +380,8 @@ function App() {
   );
 
   const refreshOutbox = React.useCallback(async () => {
+    const session = currentSession();
+    if (!session) return;
     if (!adminPassword || !selectedDevice || !selectedOwnerWxid) {
       setOutboxItems([]);
       return;
@@ -338,19 +392,20 @@ function App() {
     if (!ticket) return;
     setOutboxLoading(true);
     try {
-      const payload = await getOutbox({ password: adminPassword, device: selectedDevice,
-        ownerWxid: selectedOwnerWxid, wxid, status: outboxFilter });
-      if (!accountScope.current.matches(ticket)) return;
+      const payload = await authenticatedRequest(session, getOutbox({ password: session.password, device: selectedDevice,
+        ownerWxid: selectedOwnerWxid, wxid, status: outboxFilter }));
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) return;
       setOutboxItems((payload.items || []).filter((item) => belongsToAccount(item, selectedDevice, selectedOwnerWxid)
         && (!wxid || item.wxid === wxid)));
       const now = Date.parse(payload.server_time);
       setOutboxNow(Number.isFinite(now) ? now : Date.now());
       setOutboxError("");
     } catch (error) {
-      if (!accountScope.current.matches(ticket)) return;
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) return;
+      handleError(error, session);
       setOutboxError(`发送记录读取失败：${parseApiError(error, "请稍后刷新").message}`);
     } finally {
-      if (accountScope.current.matches(ticket)) setOutboxLoading(false);
+      if (session.isCurrent() && accountScope.current.matches(ticket)) setOutboxLoading(false);
     }
   }, [adminPassword, selectedDevice, selectedOwnerWxid, selectedGeneration, selectedWxid, outboxChatOnly, outboxFilter]);
 
@@ -372,40 +427,9 @@ function App() {
     void refreshOutbox();
   }, [refreshOutbox, submittedOutboxId]);
 
-  const refreshAll = React.useCallback(async () => {
-    setLoading(true);
-    setNotice("正在连接服务端");
-    try {
-      localStorage.setItem(PASSWORD_KEY, adminPassword);
-      const nextModules = await refreshModules();
-      const device = nextModules.some((item) => item.device === selectedDevice)
-        ? selectedDevice
-        : nextModules[0]?.device || "";
-      const ownerWxid = moduleOwnerWxid(nextModules.find((item) => item.device === device));
-      const active = nextModules.find((item) => item.device === device);
-      accountScope.current.update(device, ownerWxid, active?.account_generation ?? 0);
-      if (device) {
-        setSelectedDevice(device);
-      }
-      await refreshApiKeys();
-      const nextContacts = await refreshContacts(device, ownerWxid);
-      if (device) {
-        await refreshRecentMessages(device, ownerWxid);
-      }
-      const wxid = nextContacts.some((item) => item.wxid === selectedWxid)
-        ? selectedWxid
-        : nextContacts[0]?.wxid || "";
-      if (device && wxid) {
-        await refreshMessages(device, wxid, ownerWxid);
-      }
-      await refreshOutboxRef.current();
-      setNotice(`已刷新 ${formatBeijingClock()}`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "请求失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [adminPassword, refreshApiKeys, refreshContacts, refreshMessages, refreshModules, refreshRecentMessages, refreshOutbox, selectedDevice, selectedWxid]);
+  React.useEffect(() => {
+    if (adminPassword) void refreshApiKeys().catch(error => reportError(error, "API Key 读取失败"));
+  }, [adminPassword, refreshApiKeys]);
 
   React.useLayoutEffect(() => {
     loadedMessageChatRef.current = "";
@@ -427,7 +451,7 @@ function App() {
     }
     const timer = window.setTimeout(() => {
       void refreshContacts(selectedDevice, selectedOwnerWxid).catch((error) => {
-        setNotice(error instanceof Error ? error.message : "通讯录刷新失败");
+        reportError(error, "通讯录刷新失败");
       });
     }, 220);
     return () => window.clearTimeout(timer);
@@ -451,7 +475,7 @@ function App() {
       return;
     }
     void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch((error) => {
-      setNotice(error instanceof Error ? error.message : "消息刷新失败");
+      reportError(error, "消息刷新失败");
     });
   }, [refreshMessages, selectedDevice, selectedOwnerWxid, selectedWxid]);
 
@@ -476,55 +500,22 @@ function App() {
       return;
     }
     void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch((error) => {
-      setNotice(error instanceof Error ? error.message : "消息列表刷新失败");
+      reportError(error, "消息列表刷新失败");
     });
   }, [refreshRecentMessages, selectedDevice, selectedOwnerWxid]);
 
   React.useEffect(() => {
-    if (!autoRefresh || !selectedDevice) return;
+    if (!autoRefresh || !adminPassword) return;
     const timer = window.setInterval(() => {
-      void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch(() => undefined);
-      void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch(() => undefined);
-      void refreshModules().catch(() => undefined);
+      if (document.hidden || !navigator.onLine) return;
+      void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch(error => reportError(error, "同步暂时中断，正在重试"));
+      void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch(error => reportError(error, "同步暂时中断，正在重试"));
+      void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
       void refreshOutbox();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, refreshMessages, refreshModules, refreshRecentMessages, refreshOutbox, selectedDevice, selectedOwnerWxid, selectedWxid]);
+  }, [autoRefresh, adminPassword, refreshMessages, refreshModules, refreshRecentMessages, refreshOutbox, selectedDevice, selectedOwnerWxid, selectedWxid]);
 
-  React.useEffect(() => {
-    if (!adminPassword || !autoRefresh) {
-      setLiveConnected(false);
-      return;
-    }
-    const source = openLiveEvents(adminPassword);
-    source.addEventListener("ready", () => {
-      setLiveConnected(true);
-    });
-    source.addEventListener("message", (event) => {
-      try {
-        const payload = parseLiveMessageEvent((event as globalThis.MessageEvent).data);
-        if (payload.device !== selectedDevice) return;
-        void refreshModules().catch(() => undefined);
-        if (!belongsToAccount(payload, selectedDevice, selectedOwnerWxid)) return;
-        if (payload.raw_provider === RAW_PROVIDER_MODULE_ACK) return;
-        void refreshContacts(selectedDevice, selectedOwnerWxid).catch(() => undefined);
-        void refreshRecentMessages(selectedDevice, selectedOwnerWxid).catch(() => undefined);
-        if (selectedWxid && liveEventTouchesChat(payload, selectedWxid)) {
-          void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch(() => undefined);
-          setNotice(`实时消息 ${formatBeijingClock()}`);
-        }
-      } catch {
-        // Keep the stream open if one event cannot be parsed.
-      }
-    });
-    source.onerror = () => {
-      setLiveConnected(false);
-    };
-    return () => {
-      source.close();
-      setLiveConnected(false);
-    };
-  }, [adminPassword, autoRefresh, refreshContacts, refreshMessages, refreshModules, refreshRecentMessages, selectedDevice, selectedOwnerWxid, selectedWxid]);
 
   const selectDevice = (device: string) => {
     const nextOwnerWxid = moduleOwnerWxid(modules.find((item) => item.device === device));
@@ -589,6 +580,8 @@ function App() {
   };
 
   const submitSend = async () => {
+    const session = currentSession();
+    if (!session) return;
     if (sendInFlight.current) { setNotice("上一条请求仍在提交，请等待结果后再发送"); return; }
     if (!adminPassword || !selectedDevice || !selectedWxid || !draft.trim() || selectedModuleOffline) {
       if (selectedModuleOffline) setNotice("当前微信离线，不能创建发送任务");
@@ -601,9 +594,9 @@ function App() {
     setSending(true);
     setNotice("正在创建发送任务");
     try {
-      const result = await sendText({ password: adminPassword, device: sentDevice, ownerWxid: selectedOwnerWxid,
+      const result = await sendText({ password: session.password, device: sentDevice, ownerWxid: selectedOwnerWxid,
         accountGeneration: selectedGeneration, wxid: sentWxid, text: submittedDraft.trim() });
-      if (!accountScope.current.matches(ticket)) return;
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) return;
       if (!result.ok || !result.outbox_id) throw new Error("提交结果未确认，请先查看发送记录，避免重复提交");
       setDraft((current) => current === submittedDraft ? "" : current);
       setSendOpen(false);
@@ -611,34 +604,38 @@ function App() {
       setSubmittedOutboxId(result.outbox_id);
       setOutboxFilter("all");
       setNotice(`任务 #${result.outbox_id} 已创建，等待微信处理；结果见发送记录`);
-      void refreshModules().catch(() => undefined);
+      void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
       window.setTimeout(() => {
-        if (!accountScope.current.matches(ticket)) return;
-        void refreshMessages(sentDevice, sentWxid, selectedOwnerWxid).catch(() => undefined);
-        void refreshModules().catch(() => undefined);
+        if (!session.isCurrent() || !accountScope.current.matches(ticket)) return;
+        void refreshMessages(sentDevice, sentWxid, selectedOwnerWxid).catch(error => reportError(error, "同步暂时中断，正在重试"));
+        void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
       }, 800);
     } catch (error) {
-      if (accountScope.current.matches(ticket)) {
+      if (session.isCurrent() && accountScope.current.matches(ticket)) {
+        handleError(error, session);
         const info = parseApiError(error, "提交结果未确认");
         setNotice(info.code ? info.message : `${info.message}。未确认任务是否创建，请先查看发送记录，避免重复提交。`);
         void refreshOutbox();
       }
     } finally {
       sendInFlight.current = false;
-      if (accountScope.current.matches(ticket)) setSending(false);
+      if (session.isCurrent() && accountScope.current.matches(ticket)) setSending(false);
     }
   };
 
   const submitApiKey = async () => {
+    const session = currentSession();
+    if (!session) return;
     if (!adminPassword) return;
     setSavingAdmin(true);
     try {
       const payload = await createApiKey({
-        password: adminPassword,
+        password: session.password,
         apiKey: newApiKey.trim(),
         device: newApiKeyDevice.trim(),
         nickname: newApiKeyNickname.trim()
       });
+      if (!session.isCurrent()) return;
       const created = payload.api_key;
       if (!created) {
         throw new Error("服务端没有返回 API Key");
@@ -646,83 +643,108 @@ function App() {
       setApiKeys((current) => [created, ...current.filter((item) => item.code !== created.code)]);
       setNewApiKey("");
       setNewApiKeyNickname("");
-      setNotice(`已生成 API Key ${created.api_key || created.code}`);
+      setNotice("API Key 已生成，可在下方列表中查看");
     } catch (error) {
+      if (!session.isCurrent()) return;
+      handleError(error, session);
       setNotice(error instanceof Error ? error.message : "生成 API Key 失败");
     } finally {
-      setSavingAdmin(false);
+      if (session.isCurrent()) setSavingAdmin(false);
     }
   };
 
   const toggleApiKeyEnabled = async (apiKey: ApiKey) => {
+    const session = currentSession();
+    if (!session) return;
     if (!adminPassword || !apiKey.code) return;
     setSavingAdmin(true);
     try {
       const payload = await setApiKeyEnabled({
-        password: adminPassword,
+        password: session.password,
         apiKey: apiKey.api_key || apiKey.code,
         enabled: !apiKey.enabled
       });
+      if (!session.isCurrent()) return;
       const updated = payload.api_key;
       if (!updated) {
         throw new Error("服务端没有返回 API Key");
       }
       setApiKeys((current) => [updated, ...current.filter((item) => item.code !== updated.code)]);
       await refreshModules();
+      if (!session.isCurrent()) return;
       setNotice(updated.enabled ? "API Key 已启用" : "API Key 已停用");
     } catch (error) {
+      if (!session.isCurrent()) return;
+      handleError(error, session);
       setNotice(error instanceof Error ? error.message : "更新 API Key 状态失败");
     } finally {
-      setSavingAdmin(false);
+      if (session.isCurrent()) setSavingAdmin(false);
     }
   };
 
   const revokeApiKey = async (apiKey: string) => {
+    const session = currentSession();
+    if (!session) return;
     if (!adminPassword || !apiKey) return;
     const ok = window.confirm(`确认删除并注销 API Key ${apiKey}？`);
     if (!ok) return;
     setSavingAdmin(true);
     try {
-      await deleteApiKey({ password: adminPassword, apiKey });
+      await deleteApiKey({ password: session.password, apiKey });
+      if (!session.isCurrent()) return;
       setApiKeys((current) => current.filter((item) => (item.api_key || item.code) !== apiKey));
       await refreshModules();
+      if (!session.isCurrent()) return;
       setNotice("API Key 已删除");
     } catch (error) {
+      if (!session.isCurrent()) return;
+      handleError(error, session);
       setNotice(error instanceof Error ? error.message : "删除 API Key 失败");
     } finally {
-      setSavingAdmin(false);
+      if (session.isCurrent()) setSavingAdmin(false);
     }
   };
 
   const submitDeviceNickname = async () => {
+    const session = currentSession();
+    if (!session) return;
     if (!adminPassword || !selectedDevice) return;
     setSavingAdmin(true);
     try {
       await updateDevice({
-        password: adminPassword,
+        password: session.password,
         name: selectedDevice,
         nickname: deviceNicknameDraft.trim()
       });
+      if (!session.isCurrent()) return;
       await refreshModules();
+      if (!session.isCurrent()) return;
       setNotice("设备显示名已保存");
     } catch (error) {
+      if (!session.isCurrent()) return;
+      handleError(error, session);
       setNotice(error instanceof Error ? error.message : "保存设备失败");
     } finally {
-      setSavingAdmin(false);
+      if (session.isCurrent()) setSavingAdmin(false);
     }
   };
 
   const requestInstallationSwitch = async (device: string, installation: ModuleInstallation) => {
+    const session = currentSession();
+    if (!session) return;
     if (!adminPassword || !device || !installationIsStandby(installation) || switchingInstallation) return;
     const ok = window.confirm(`确认把设备 ${device} 切到 ${installationDisplayName(installation)}？目标手机下一次心跳时接管。`);
     if (!ok) return;
     setSwitchingInstallation({ device, id: installation.id });
     setInstallationNotice(null);
     try {
-      await switchModuleInstallation({ password: adminPassword, device, installationId: installation.id });
+      await switchModuleInstallation({ password: session.password, device, installationId: installation.id });
+      if (!session.isCurrent()) return;
       setInstallationNotice({ device, tone: "info", text: INSTALLATION_SWITCH_REQUESTED });
       setNotice("已请求切换手机");
     } catch (error) {
+      if (!session.isCurrent()) return;
+      handleError(error, session);
       const info = parseApiError(error, "切换手机失败");
       if (info.code === "installation_active") {
         setInstallationNotice({ device, tone: "info", text: INSTALLATION_ALREADY_ACTIVE });
@@ -731,67 +753,64 @@ function App() {
         setNotice(info.message);
       }
     } finally {
+      if (!session.isCurrent()) return;
       setSwitchingInstallation(null);
-      void refreshModules().catch(() => undefined);
+      void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
     }
   };
 
-  return (
-    <div className="min-h-screen bg-muted/30 text-foreground">
-      <header className="sticky top-0 z-30 border-b border-border/70 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
-        <div className="mx-auto flex max-w-[1560px] flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <ShieldCheck className="h-5 w-5" />
-            </div>
-            <div className="min-w-0">
-              <h1 className="truncate text-lg font-semibold tracking-normal">微信看台</h1>
-              <div className="mt-1 flex flex-wrap items-center gap-2">
-                <ConnectionBadge connected={liveConnected} enabled={autoRefresh} />
-                <StatusBadge status={selectedModule?.runtime_status} />
-                <span className="max-w-[360px] truncate text-xs text-muted-foreground">{notice}</span>
-              </div>
-            </div>
-          </div>
+  if (!adminPassword) return (
+    <div className="login-page"><form className="login-card" onSubmit={event => { event.preventDefault(); connection.login(password); }}>
+      <span className="brand-mark"><ShieldCheck className="h-6 w-6" /></span>
+      <h1 className="text-2xl font-semibold tracking-tight">欢迎回到微信看台</h1>
+      <p className="mb-7 mt-2 text-sm leading-6 text-muted-foreground">一个安静、有序的微信工作台。登录后自动同步会话与设备状态。</p>
+      <Label htmlFor="admin-password">管理密码</Label>
+      <Input className="mb-4 mt-2" id="admin-password" type="password" autoComplete="current-password" autoFocus value={password} onChange={event => setPassword(event.target.value)} placeholder="输入管理密码" />
+      {connection.error ? <p role="alert" className="mb-4 text-sm text-destructive">{parseApiError(connection.error, "连接失败").message}</p> : null}
+      <Button type="submit" className="w-full" disabled={loading || !password.trim()}>{loading ? <><RefreshCw className="h-4 w-4 animate-spin" />正在连接</> : "进入看台"}</Button>
+      <p className="mt-4 text-xs leading-5 text-muted-foreground">此浏览器会记住登录；公用设备使用后请退出登录。</p>
+    </form></div>
+  );
 
-          <div className="flex w-full flex-wrap items-center gap-2 md:w-auto">
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
-              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </Button>
-            <div className="relative min-w-[240px] flex-1 md:w-[320px] md:flex-none">
-              <KeyRound className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                className="pl-8"
-                type="password"
-                placeholder="管理密码"
-                value={password}
-                onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPassword(event.target.value)}
-                onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => {
-                  if (event.key === "Enter") void refreshAll();
-                }}
-              />
-            </div>
-            <Button onClick={() => void refreshAll()} disabled={loading || !adminPassword}>
-              <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-              连接刷新
-            </Button>
-          </div>
+  return (
+    <div className="observatory-app">
+      <aside className="app-sidebar">
+        <div className="app-brand"><span className="brand-mark"><ShieldCheck className="h-5 w-5" /></span><div><strong>微信看台</strong><span>OBSERVATORY</span></div></div>
+        <nav className="app-nav" aria-label="主导航">
+          {([
+            ["workspace", "工作台", LayoutDashboard],
+            ["devices", "设备与连接", Smartphone],
+            ["access", "API 管理", KeyRound]
+          ] as const).map(([id, label, Icon]) => <button key={id} type="button" aria-current={panel === id ? "page" : undefined} onClick={() => setPanel(id)}><Icon className="h-4 w-4" /><span>{label}</span>{panel === id ? <ChevronRight className="ml-auto h-3.5 w-3.5" /> : null}</button>)}
+        </nav>
+        <div className="sidebar-devices">
+          <div className="sidebar-label">设备绑定 <span>{modules.length}</span></div>
+          {modules.length ? modules.map(item => <button key={item.device} type="button" className="device-selector" aria-pressed={selectedDevice === item.device} onClick={() => selectDevice(item.device)}>
+            <span className={item.runtime_status === "offline" || item.runtime_status === "disabled" ? "device-dot offline" : "device-dot"} />
+            <span className="min-w-0 flex-1"><strong>{item.device_nickname || item.device}</strong><small>{item.installations?.find(phone => phone.active)?.wechat_nickname || item.device}</small></span>
+          </button>) : <p className="px-3 text-xs leading-6 text-muted-foreground">手机接入后会显示在这里</p>}
+        </div>
+        <div className="sidebar-footer"><Button variant="ghost" size="sm" onClick={() => { setPassword(""); connection.logout(); }}><LogOut className="h-4 w-4" />退出登录</Button><Button variant="ghost" size="icon" aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}>
+          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </Button></div>
+      </aside>
+      <div className="app-body">
+      <header className="app-topbar">
+        <div className="min-w-0"><div className="eyebrow">{panel === "workspace" ? "WORKSPACE" : panel === "devices" ? "CONNECTIONS" : "DEVELOPER"}</div><h1>{panel === "workspace" ? "消息工作台" : panel === "devices" ? "设备与连接" : "API 管理"}</h1></div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <ConnectionBadge connected={liveConnected} enabled={autoRefresh} />
+          <Button variant="outline" onClick={() => void connection.refresh()} disabled={loading || !adminPassword}><RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />刷新</Button>
         </div>
       </header>
-
-      <main className="mx-auto grid w-full min-w-0 max-w-[1600px] gap-4 p-3 lg:p-4">
-        <aside className="grid h-fit gap-4 lg:grid-cols-2">
+      <main className="app-main">
+        <div className="workspace-notice" role="status"><span className={connection.error ? "text-destructive" : ""}>{connection.error ? parseApiError(connection.error, "连接中断").message : notice}</span><span className="hidden shrink-0 sm:inline">自动同步已{autoRefresh ? "开启" : "暂停"}</span></div>
+        <section hidden={panel !== "devices"} aria-label="设备与连接" className="page-panel">
+        <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Smartphone className="h-4 w-4" />
-                手机模块
+                已接入设备
               </CardTitle>
               <Badge variant="secondary">{modules.length} 个设备绑定</Badge>
             </CardHeader>
@@ -826,6 +845,7 @@ function App() {
                       </button>
                       <Button className="mx-3 mb-2" variant="outline" size="xs" onClick={() => {
                         if (item.device !== selectedDevice) selectDevice(item.device);
+                        setPanel("workspace");
                         window.requestAnimationFrame(() => document.getElementById("send-records")?.scrollIntoView({ block: "start", behavior: "smooth" }));
                       }}>查看发送记录</Button>
                       <InstallationList
@@ -856,7 +876,7 @@ function App() {
             <CardContent className="grid gap-3 text-sm">
               <label className="flex items-center gap-2">
                 <Checkbox checked={autoRefresh} onChange={(event) => setAutoRefresh(event.currentTarget.checked)} />
-                实时流和轮询刷新
+                自动同步
               </label>
               <div className="grid grid-cols-3 gap-2">
                 <SignalPill label="注册" value={formatBeijingTimeAgo(selectedModule?.last_register_at)} />
@@ -865,18 +885,17 @@ function App() {
               </div>
             </CardContent>
           </Card>
-        </aside>
+        </div>
+        </section>
 
-        <section className="grid min-w-0 gap-4">
-          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
-            <MetricCard title="当前设备" value={selectedModule?.device || "-"} icon={<Smartphone className="h-4 w-4" />} />
-            <MetricCard title="运行状态" value={statusText(selectedModule?.runtime_status)} icon={<Activity className="h-4 w-4" />} />
-            <MetricCard title="发送成功" value={String(sentCount)} icon={<CheckCircle2 className="h-4 w-4" />} />
-            <MetricCard title="通讯录" value={`${visibleContacts.length}/${contacts.length}`} icon={<Users className="h-4 w-4" />} />
+        <section hidden={panel !== "workspace"} aria-label="工作台" className="page-panel grid min-w-0 gap-5">
+          <div className="workspace-summary">
+            <div className="summary-account"><span className="account-avatar"><Smartphone className="h-6 w-6" /></span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="truncate font-semibold">{selectedModule?.installations?.find(phone => phone.active)?.wechat_nickname || selectedModule?.device_nickname || selectedDevice || "等待设备接入"}</h2><StatusBadge status={selectedModule?.runtime_status} /></div><p className="mt-1 truncate text-xs text-muted-foreground">{selectedOwnerWxid || "连接手机后即可查看会话和发送消息"}</p></div></div>
+            <div className="summary-metrics"><div><span>待处理</span><strong className={pendingCount ? "text-amber-600" : ""}>{pendingCount}</strong></div><div><span>已发送</span><strong>{sentCount}</strong></div><div><span>通讯录</span><strong>{contacts.length}</strong></div></div>
           </div>
 
-          <div className="grid min-w-0 gap-4 lg:grid-cols-[420px_minmax(0,1fr)] xl:grid-cols-[440px_minmax(0,1fr)]">
-            <Card className="min-w-0">
+          <div className="conversation-grid">
+            <Card className="min-w-0 contact-panel">
               <CardHeader className="items-start">
                 <div className="grid gap-1">
                   <CardTitle className="flex items-center gap-2">
@@ -926,7 +945,7 @@ function App() {
                 </div>
 
                 {messageListActive ? (
-                  <div className="grid max-h-[300px] min-h-[120px] content-start gap-2 overflow-y-auto overflow-x-hidden pr-1 lg:max-h-[620px] lg:min-h-[420px]">
+                  <div className="contact-list">
                     {visibleRecentMessages.length === 0 ? (
                       <EmptyState
                         icon={<MessageCircle className="h-5 w-5" />}
@@ -942,8 +961,8 @@ function App() {
                             type="button"
                             className={
                               chatId === selectedWxid
-                                ? "w-full rounded-lg border border-primary bg-secondary p-3 text-left shadow-sm"
-                                : "w-full rounded-lg border bg-card p-3 text-left transition hover:bg-secondary"
+                                ? "contact-row selected"
+                                : "contact-row"
                             }
                             onClick={() => selectRecentMessage(item)}
                           >
@@ -960,7 +979,7 @@ function App() {
                     )}
                   </div>
                 ) : (
-                <div className="grid max-h-[300px] min-h-[120px] content-start gap-2 overflow-y-auto overflow-x-hidden pr-1 lg:max-h-[620px] lg:min-h-[420px]">
+                <div className="contact-list">
                   {visibleContacts.length === 0 ? (
                     <EmptyState
                       icon={<Users className="h-5 w-5" />}
@@ -972,8 +991,8 @@ function App() {
                         key={`${item.device}:${item.owner_wxid}:${item.wxid}`}
                         className={
                           item.wxid === selectedWxid
-                            ? "w-full rounded-lg border border-primary bg-secondary p-3 text-left shadow-sm"
-                            : "w-full rounded-lg border bg-card p-3 text-left transition hover:bg-secondary"
+                            ? "contact-row selected"
+                            : "contact-row"
                         }
                         onClick={() => selectContact(item)}
                       >
@@ -993,9 +1012,6 @@ function App() {
                             {item.deleted ? "已删除" : isRoomContact(item) ? "群聊" : "好友"}
                           </Badge>
                         </div>
-                        <div className="mt-3 text-xs text-muted-foreground">
-                          <span className="truncate">上报：{formatBeijingTimeAgo(item.last_seen_at || item.updated_at)}</span>
-                        </div>
                       </button>
                     ))
                   )}
@@ -1004,7 +1020,7 @@ function App() {
               </CardContent>
             </Card>
 
-            <Card className="min-w-0">
+            <Card className="min-w-0 chat-panel">
               <CardHeader className="items-start md:items-center">
                 <div className="min-w-0">
                   <CardTitle className="flex items-center gap-2">
@@ -1020,7 +1036,7 @@ function App() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
                     variant="outline"
-                    onClick={() => void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid)}
+                    onClick={() => void refreshMessages(selectedDevice, selectedWxid, selectedOwnerWxid).catch(error => reportError(error, "消息读取失败"))}
                     disabled={!selectedDevice || !selectedWxid || !adminPassword}
                   >
                     <RefreshCw className="h-4 w-4" />
@@ -1033,26 +1049,18 @@ function App() {
                 </div>
               </CardHeader>
               <CardContent className="grid gap-3">
-                <div className="rounded-lg border bg-secondary/35 p-3">
-                  <div className="grid gap-2 text-xs text-muted-foreground md:grid-cols-3">
-                    <span className="truncate">好友：{selectedContact ? contactName(selectedContact) : "-"}</span>
-                    <span className="truncate">会话类型：{selectedContact ? contactKindText(selectedContact) : "-"}</span>
-                    <span className="truncate">最近上报：{formatBeijingDateTime(selectedContact?.last_seen_at || selectedContact?.updated_at)}</span>
-                  </div>
-                </div>
-
                 <div
                   ref={messageListRef}
                   onPointerDown={cancelPendingBottomScroll}
                   onScroll={cancelPendingBottomScroll}
                   onTouchStart={cancelPendingBottomScroll}
                   onWheel={cancelPendingBottomScroll}
-                  className="grid h-[360px] min-h-[240px] content-start gap-3 overflow-y-auto overflow-x-hidden rounded-lg border bg-card p-3 lg:h-[calc(100vh-492px)] lg:min-h-[440px]"
+                  className="message-timeline"
                 >
                   {!selectedWxid ? (
-                    <EmptyState icon={<MessageCircle className="h-5 w-5" />} text="请从好友列表选择一个对象" />
+                    <EmptyState icon={<MessageCircle className="h-5 w-5" />} text="选择一个会话，开始交流" />
                   ) : messages.length === 0 ? (
-                    <EmptyState icon={<MessageCircle className="h-5 w-5" />} text="当前好友暂无消息记录" />
+                    <EmptyState icon={<MessageCircle className="h-5 w-5" />} text="这里还没有消息，发送第一句话吧" />
                   ) : (
                     messages.map((item) => (
                       <MessageBubble
@@ -1066,7 +1074,7 @@ function App() {
                   )}
                 </div>
 
-                <div className="grid gap-2 rounded-lg border bg-card p-3">
+                <div className="message-composer">
                   <Label htmlFor="inline-send">发送内容</Label>
                   <Textarea
                     id="inline-send"
@@ -1094,20 +1102,20 @@ function App() {
             </Card>
           </div>
 
-          <details className="rounded-lg border bg-card">
-            <summary className="cursor-pointer px-4 py-3 text-sm font-medium">API Key 与设备管理</summary>
+        </section>
+        <section hidden={panel !== "access"} aria-label="API 管理" className="page-panel">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <KeyRound className="h-4 w-4" />
                 API Key 与设备管理
               </CardTitle>
-              <Button variant="outline" onClick={() => void refreshApiKeys()} disabled={loading || !adminPassword}>
+              <Button variant="outline" onClick={() => void refreshApiKeys().catch(error => reportError(error, "API Key 读取失败"))} disabled={loading || !adminPassword}>
                 <RefreshCw className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
                 刷新 API Key
               </Button>
             </CardHeader>
-            <CardContent className="grid gap-4 xl:grid-cols-[minmax(0,360px)_minmax(0,360px)_minmax(0,1fr)]">
+            <CardContent className="grid gap-5 lg:grid-cols-2">
               <div className="grid content-start gap-3 rounded-lg border bg-card p-3">
                 <div className="text-sm font-medium">生成 API Key</div>
                 <div className="grid gap-2">
@@ -1169,7 +1177,7 @@ function App() {
                 </Button>
               </div>
 
-              <div className="overflow-auto rounded-lg border">
+              <div className="overflow-auto rounded-lg border lg:col-span-2">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -1185,7 +1193,7 @@ function App() {
                     {apiKeys.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={6}>
-                          <EmptyState icon={<KeyRound className="h-5 w-5" />} text="暂无 API Key，请先连接刷新或生成" />
+                          <EmptyState icon={<KeyRound className="h-5 w-5" />} text="还没有 API Key，生成一个即可接入手机" />
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -1230,8 +1238,8 @@ function App() {
               </div>
             </CardContent>
           </Card>
-          </details>
-
+        </section>
+        <section hidden={panel !== "devices"} className="page-panel">
           <details className="rounded-lg border bg-card">
             <summary className="cursor-pointer px-4 py-3 text-sm font-medium">模块运行明细</summary>
           <Card>
@@ -1303,6 +1311,7 @@ function App() {
           </details>
         </section>
       </main>
+      </div>
 
       <Dialog open={sendOpen} onOpenChange={setSendOpen}>
         <DialogContent onClose={() => setSendOpen(false)}>
@@ -1368,8 +1377,6 @@ function MessageBubble({
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs opacity-80">
           <span>{outgoing ? "发出" : "收到"}</span>
           <span className="font-medium">{senderName}</span>
-          {message.raw_provider ? <span>{providerText(message.raw_provider)}</span> : null}
-          {message.message_type ? <span>{messageTypeText(message.message_type)}</span> : null}
           <span>{formatBeijingDateTime(message.created_at)}</span>
         </div>
         {message.text ? <div className="whitespace-pre-wrap break-words text-sm leading-6">{message.text}</div> : null}
@@ -1494,22 +1501,6 @@ function StatusBadge({ status }: { status?: string }) {
     return <Badge variant="secondary">{statusText(status)}</Badge>;
   }
   return <Badge variant="secondary">{statusText(status)}</Badge>;
-}
-
-function MetricCard({ title, value, icon }: { title: string; value: string; icon: React.ReactNode }) {
-  return (
-    <Card>
-      <CardContent className="flex min-h-[88px] items-center justify-between p-4">
-        <div className="min-w-0">
-          <div className="text-xs text-muted-foreground">{title}</div>
-          <div className="mt-1 truncate text-xl font-semibold">{value}</div>
-        </div>
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
-          {icon}
-        </div>
-      </CardContent>
-    </Card>
-  );
 }
 
 function SignalPill({ label, value }: { label: string; value: string }) {
@@ -1648,19 +1639,6 @@ function statusText(status?: string) {
       return "未注册";
     default:
       return status || "-";
-  }
-}
-
-function providerText(provider: string) {
-  switch (provider) {
-    case RAW_PROVIDER_MODULE_ACK:
-      return "模块回执";
-    case "lsposed":
-      return "LSPosed";
-    case "module":
-      return "模块";
-    default:
-      return provider;
   }
 }
 
