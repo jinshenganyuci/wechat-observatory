@@ -34,12 +34,32 @@ async function openFiles(page: Page) {
   await page.locator(".message-composer").getByRole("button", { name: "发送文件", exact: true }).click();
 }
 
-test("composer file entry keeps the current chat and text draft and explains unsupported recipients", async ({ page }, testInfo) => {
-  let sends = 0;
+async function chooseFile(page: Page, file = report) {
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "选择文件", exact: true }).click();
+  await (await chooser).setFiles(file);
+}
+
+async function dropFiles(page: Page, files: { name: string; size?: number }[]) {
+  const dataTransfer = await page.evaluateHandle(files => {
+    const data = new DataTransfer();
+    for (const item of files) {
+      const file = new File(["synthetic dropped attachment"], item.name, { type: "application/octet-stream" });
+      if (item.size !== undefined) Object.defineProperty(file, "size", { value: item.size });
+      data.items.add(file);
+    }
+    return data;
+  }, files);
+  await page.getByTestId("file-dropzone").dispatchEvent("drop", { dataTransfer });
+  await dataTransfer.dispose();
+}
+
+test("composer opens a working local picker for the current friend and preserves the text draft", async ({ page }, testInfo) => {
+  const bodies: string[] = [];
   await setup(page, async (route, url) => {
     if (!url.pathname.endsWith("/send/file")) return false;
-    sends += 1;
-    await route.fulfill({ status: 500, json: {} });
+    bodies.push(route.request().postDataBuffer()!.toString());
+    await route.fulfill({ json: { ok: true, outbox_id: 73, idempotent_replay: false } });
     return true;
   });
   const composer = page.locator(".message-composer");
@@ -48,7 +68,7 @@ test("composer file entry keeps the current chat and text draft and explains uns
   await composer.screenshot({ path: testInfo.outputPath("composer-file-entry.png") });
   await openFiles(page);
   await expect(page.getByLabel("发送对象", { exact: true })).toHaveValue("通知群");
-  await expect(page.getByLabel("选择文件", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "选择文件", exact: true })).toBeEnabled();
   await expect(page.locator("#send-text")).toHaveCount(0);
   await page.getByRole("button", { name: "收起", exact: true }).click();
   await expect(page.locator("#inline-send")).toHaveValue("未提交的文本草稿");
@@ -56,10 +76,19 @@ test("composer file entry keeps the current chat and text draft and explains uns
   await page.getByRole("button", { name: /其他联系人/ }).click();
   await openFiles(page);
   await expect(page.getByLabel("发送对象", { exact: true })).toHaveValue("其他联系人");
-  await expect(page.getByRole("alert")).toHaveText("文件发送目前仅支持群聊和文件传输助手，请先选择相应会话。");
-  await expect(page.getByLabel("选择文件", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "选择文件", exact: true })).toBeEnabled();
+  const panel = page.getByRole("heading", { name: "发送微信消息", exact: true }).locator("../..");
+  await panel.screenshot({ path: testInfo.outputPath("file-picker.png") });
   await expect(page.getByRole("button", { name: "加入队列", exact: true }).last()).toBeDisabled();
-  expect(sends).toBe(0);
+  await chooseFile(page);
+  await expect(page.getByTestId("file-draft-name")).toHaveText(report.name);
+  await expect(page.getByText(`${report.buffer.length} B`, { exact: true })).toBeVisible();
+  await panel.screenshot({ path: testInfo.outputPath("file-selected.png") });
+  await page.getByRole("button", { name: "加入队列", exact: true }).last().click();
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toContain('name="wxid"\r\n\r\nfriend\r\n');
+  expect(bodies[0]).toContain('name="file"; filename="report.txt"');
+  await expect(page.getByText("文件任务 #73 已创建，等待微信处理；结果见发送记录")).toBeVisible();
 });
 
 test("one multipart upload creates a traceable file task, never an early sent claim", async ({ page }, testInfo) => {
@@ -85,6 +114,12 @@ test("one multipart upload creates a traceable file task, never an early sent cl
   await submit.evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
   await expect.poll(() => requests.length).toBe(1);
   await expect(page.getByText("正在上传文件并创建任务，请勿重复提交。", { exact: true })).toBeVisible();
+  const originalIdentity = await page.evaluate(() => sessionStorage.getItem("wgc_pending_file_request"));
+  await expect(page.getByRole("button", { name: "选择文件", exact: true })).toBeDisabled();
+  await dropFiles(page, [{ name: "replacement.zip" }]);
+  await expect(page.getByText("正在提交文件，请等待结果，不能替换文件。", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("file-draft-name")).toHaveText(report.name);
+  expect(await page.evaluate(() => sessionStorage.getItem("wgc_pending_file_request"))).toBe(originalIdentity);
   const request = requests[0].request();
   expect(request.headers()["idempotency-key"]).toMatch(/^file-[a-f0-9]{32}$/);
   expect(request.headers()["x-bridge-password"]).toBe("mock-password");
@@ -132,6 +167,11 @@ test("uncertain upload survives reload and retries only with the original key an
   await page.getByLabel("选择文件", { exact: true }).setInputFiles(report);
   await page.getByRole("button", { name: "加入队列", exact: true }).last().click();
   await expect(page.getByRole("button", { name: "使用原请求重试", exact: true })).toBeEnabled();
+  const originalIdentity = await page.evaluate(() => sessionStorage.getItem("wgc_pending_file_request"));
+  await dropFiles(page, [{ name: "replacement.zip" }]);
+  await expect(page.getByText("原请求结果未确认，不能替换文件；请使用原请求重试。", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("file-draft-name")).toHaveText(report.name);
+  expect(await page.evaluate(() => sessionStorage.getItem("wgc_pending_file_request"))).toBe(originalIdentity);
   generation = 8;
   await page.reload();
   await expect(page.locator("#inline-send")).toBeEnabled();
@@ -139,6 +179,9 @@ test("uncertain upload survives reload and retries only with the original key an
   await expect(page.getByTestId("file-draft-name")).toHaveText(report.name);
   await expect(page.getByRole("button", { name: "使用原请求重试", exact: true })).toBeDisabled();
   expect(keys).toHaveLength(1);
+  await dropFiles(page, [{ name: "replacement.zip" }]);
+  await expect(page.getByText(/文件名和大小必须一致/)).toBeVisible();
+  expect(await page.evaluate(() => sessionStorage.getItem("wgc_pending_file_request"))).toBe(originalIdentity);
   await page.getByLabel("选择文件", { exact: true }).setInputFiles({ ...report, name: "different.txt" });
   await expect(page.getByText(/文件名和大小必须一致/)).toBeVisible();
   await page.getByLabel("选择文件", { exact: true }).setInputFiles(report);
@@ -148,6 +191,31 @@ test("uncertain upload survives reload and retries only with the original key an
   expect(keys[1]).toBe(keys[0]);
   expect(bodies.every(body => body.includes('name="account_generation"\r\n\r\n7\r\n'))).toBe(true);
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem("wgc_pending_file_request"))).toBeNull();
+});
+
+test("dropzone accepts one ordinary file and rejects multiple, media and oversized drops without sending", async ({ page }) => {
+  let sends = 0;
+  await setup(page, async (route, url) => {
+    if (!url.pathname.endsWith("/send/file")) return false;
+    sends++; await route.fulfill({ status: 500, json: {} }); return true;
+  });
+  await page.getByRole("button", { name: /其他联系人/ }).click();
+  await openFiles(page);
+  await dropFiles(page, [{ name: "first.txt" }, { name: "second.txt" }]);
+  await expect(page.getByRole("alert")).toHaveText("每次只能选择一个文件。");
+  await dropFiles(page, [{ name: "photo.JPG" }]);
+  await expect(page.getByRole("alert")).toHaveText(/暂不支持图片或视频/);
+  await dropFiles(page, [{ name: "video.mp4" }]);
+  await expect(page.getByRole("alert")).toHaveText(/暂不支持图片或视频/);
+  // Only override metadata; allocate no large file and issue no upload.
+  await dropFiles(page, [{ name: "large.zip", size: 300 * 1024 * 1024 + 1 }]);
+  await expect(page.getByRole("alert")).toHaveText("文件不能超过 300 MiB。");
+  await expect(page.getByTestId("file-draft-name")).toHaveCount(0);
+  await dropFiles(page, [{ name: "dropped.zip" }]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByTestId("file-draft-name")).toHaveText("dropped.zip");
+  await expect(page.getByRole("button", { name: "加入队列", exact: true }).last()).toBeEnabled();
+  expect(sends).toBe(0);
 });
 
 test("an uncertain file cannot move to another chat and cancelling replacement retains its identity", async ({ page }) => {

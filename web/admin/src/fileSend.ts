@@ -67,10 +67,6 @@ export function fileDraftMatchesScope(draft: FileSendDraft, current: FileSendSco
     && draft.scope.wxid === current.wxid && (draft.stage !== "ready" || sameFileScope(draft.scope, current));
 }
 
-export function fileTargetSupported(wxid: string) {
-  return wxid === "filehelper" || wxid.endsWith("@chatroom");
-}
-
 export function newFileRequestKey() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return "file-" + Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");

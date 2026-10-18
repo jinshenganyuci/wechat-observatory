@@ -1,6 +1,6 @@
 import { AccountScope, belongsToAccount } from "./accountScope";
 import { useAdminConnection, type AdminSession } from "./useAdminConnection";
-import { clearFileRequest, fileDraftMatchesScope, fileTargetSupported, fileValidationError, formatFileSize, newFileRequestKey, persistFileRequest, restoreFileRequest, type FileSendDraft } from "./fileSend";
+import { clearFileRequest, fileDraftMatchesScope, fileValidationError, formatFileSize, newFileRequestKey, persistFileRequest, restoreFileRequest, type FileSendDraft } from "./fileSend";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { formatBeijingClock, formatBeijingDateTime, formatBeijingTimeAgo } from "@/time";
@@ -105,6 +105,7 @@ function App() {
   const [sendMode, setSendMode] = React.useState<"text" | "file">("text");
   const [fileDraft, setFileDraft] = React.useState<FileSendDraft | null>(() => restoreFileRequest());
   const [fileError, setFileError] = React.useState("");
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [draft, setDraft] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const sendInFlight = React.useRef(false);
@@ -172,7 +173,6 @@ function App() {
   const selectedScopeKey = `${selectedDevice}:${selectedOwnerWxid}:${selectedGeneration}`;
   const fileScope = { device: selectedDevice, ownerWxid: selectedOwnerWxid, generation: selectedGeneration, wxid: selectedWxid };
   const fileScopeMatches = !!fileDraft && fileDraftMatchesScope(fileDraft, fileScope);
-  const fileTargetAllowed = fileTargetSupported(selectedWxid);
   const accountScope = React.useRef(new AccountScope());
   const deviceRef = React.useRef(selectedDevice);
   deviceRef.current = selectedDevice;
@@ -634,7 +634,25 @@ function App() {
   };
 
   const selectFile = (file: File | undefined) => {
-    if (!file || fileDraft?.file || !fileTargetAllowed) return;
+    if (!file) return;
+    if (sending || sendInFlight.current || fileDraft?.stage === "submitting") {
+      setFileError("正在提交文件，请等待结果，不能替换文件。");
+      return;
+    }
+    if (fileDraft?.file) {
+      setFileError(fileDraft.stage === "unknown"
+        ? "原请求结果未确认，不能替换文件；请使用原请求重试。"
+        : "已选择文件，请先取消选择后再更换。");
+      return;
+    }
+    if (fileDraft && !fileScopeMatches) {
+      setFileError("请切回原账号和会话，再选择原文件。");
+      return;
+    }
+    if (selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid) {
+      setFileError("请先选择已连接的微信和会话。");
+      return;
+    }
     const error = fileValidationError(file);
     setFileError(error);
     if (error) return;
@@ -647,6 +665,12 @@ function App() {
     } else setFileDraft({ file, name: file.name, size: file.size, key: newFileRequestKey(), scope: fileScope, stage: "ready", message: "" });
   };
 
+  const selectFiles = (files: FileList | null) => {
+    if (!files?.length) { setFileError("请选择一个本地文件。"); return; }
+    if (files.length !== 1) { setFileError("每次只能选择一个文件。"); return; }
+    selectFile(files[0]);
+  };
+
   const discardFile = () => {
     if (!fileDraft || fileDraft.stage === "submitting") return;
     if (fileDraft.stage === "unknown" && !window.confirm("原请求结果未确认。重新选择文件会使用新请求，可能重复发送；请先查看发送记录或微信聊天。仍要放弃原请求吗？")) return;
@@ -655,7 +679,7 @@ function App() {
 
   const submitFile = async () => {
     const session = currentSession();
-    if (!session || !fileDraft?.file || !fileScopeMatches || !fileTargetAllowed || selectedModuleOffline || sendInFlight.current) return;
+    if (!session || !fileDraft?.file || !fileScopeMatches || selectedModuleOffline || sendInFlight.current) return;
     const ticket = accountScope.current.begin("send", selectedDevice, selectedOwnerWxid, selectedWxid);
     if (!ticket) return;
     const submission = fileDraft;
@@ -1422,12 +1446,19 @@ function App() {
                 disabled={selectedModuleOffline || sending}
               />
             </div> : <div className="grid min-w-0 gap-2">
-              {!fileTargetAllowed ? <p role="alert" className="text-xs leading-5">文件发送目前仅支持群聊和文件传输助手，请先选择相应会话。</p> : null}
-              {!fileDraft?.file && fileTargetAllowed ? <>
-                <Label htmlFor="send-file">选择文件</Label>
-                <Input id="send-file" type="file" disabled={sending || selectedModuleOffline}
-                  onChange={event => { selectFile(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
-              </> : null}
+              <div data-testid="file-dropzone" className="grid justify-items-center gap-3 rounded-md border-2 border-dashed p-5 text-center"
+                onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+                onDrop={event => { event.preventDefault(); event.stopPropagation(); selectFiles(event.dataTransfer.files); }}>
+                <Paperclip className="h-6 w-6 text-muted-foreground" />
+                <p className="text-sm">将一个文件拖到这里，或点击按钮选择</p>
+                <input ref={fileInputRef} id="send-file" aria-label="选择文件" type="file" className="hidden"
+                  disabled={sending || selectedModuleOffline || !!fileDraft?.file || (!!fileDraft && !fileScopeMatches)}
+                  onChange={event => { if (event.currentTarget.files?.length) selectFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
+                <Button type="button" variant="outline" onClick={() => fileInputRef.current?.click()}
+                  disabled={sending || selectedModuleOffline || !!fileDraft?.file || (!!fileDraft && !fileScopeMatches)}>
+                  选择文件
+                </Button>
+              </div>
               {fileDraft ? <div className="grid min-w-0 gap-2 rounded-md border p-3">
                 <p className="break-all text-sm" data-testid="file-draft-name">{fileDraft.name}</p>
                 <p className="text-xs text-muted-foreground">{formatFileSize(fileDraft.size)}</p>
@@ -1445,7 +1476,7 @@ function App() {
               {sendMode === "file" ? "收起" : "取消"}
             </Button>
             <Button type="button" onClick={() => void (sendMode === "file" ? submitFile() : submitSend())}
-              disabled={sending || selectedModuleOffline || (sendMode === "file" ? !fileTargetAllowed || !fileDraft?.file || !fileScopeMatches || fileDraft.stage === "submitting" : !draft.trim())}>
+              disabled={sending || selectedModuleOffline || (sendMode === "file" ? !fileDraft?.file || !fileScopeMatches || fileDraft.stage === "submitting" : !draft.trim())}>
               <Send className="h-4 w-4" />
               {sending ? "提交中" : sendMode === "file" && fileDraft && fileDraft.stage !== "ready" ? "使用原请求重试" : "加入队列"}
             </Button>
