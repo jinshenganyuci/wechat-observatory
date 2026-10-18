@@ -310,6 +310,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         if (LAB_ACCOUNT == null) LAB_ACCOUNT = CURRENT_ACCOUNT;
         if (LAB_ACCOUNT != CURRENT_ACCOUNT) throw new IllegalStateException("lab account changed");
+        if (!"94a1e7615e3aa4bfb65047248b3dcacb7460e16b8bba60ae5671ed85453ca3e5".equals(
+                labDigest(new java.io.ByteArrayInputStream(LAB_ACCOUNT.wxid.getBytes(StandardCharsets.UTF_8)))))
+            throw new IllegalStateException("lab owner outside authorized test scope");
         return LAB_ACCOUNT;
     }
 
