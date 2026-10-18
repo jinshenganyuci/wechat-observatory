@@ -204,6 +204,8 @@ func (s *Store) OperateFile(ctx context.Context, req bridge.FileOperation) (resu
 			return result, bridge.ErrFileConflict
 		}
 		if req.Operation == "begin" && started.Valid { // Lost first grant is never permission to submit again.
+		} else if req.Operation == "abandon" && status == "cancelled" && !started.Valid {
+			// A lost cancellation response is safely replayable, never a send grant.
 		} else {
 			if status != "leased" || session != req.AccountSession || !lease.Valid || !lease.Time.After(current) || !expires.After(current) || removed {
 				return result, bridge.ErrFileConflict
@@ -218,6 +220,12 @@ func (s *Store) OperateFile(ctx context.Context, req bridge.FileOperation) (resu
 				}
 				_, err = tx.ExecContext(ctx, `UPDATE bridge_module_outbox SET status='native_started',native_started_at=CURRENT_TIMESTAMP(6),lease_until=NULL WHERE id=?`, req.ID)
 				result.Granted = err == nil
+			case "abandon":
+				if started.Valid {
+					return result, bridge.ErrFileConflict
+				}
+				_, err = tx.ExecContext(ctx, `UPDATE bridge_module_outbox SET status='cancelled',
+				 last_error='native permission not confirmed; abandoned before send',lease_until=NULL WHERE id=?`, req.ID)
 			default:
 				return result, bridge.ErrInvalidFile
 			}

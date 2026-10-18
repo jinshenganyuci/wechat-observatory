@@ -48,7 +48,7 @@ func (s *Store) ListOutboxStatuses(ctx context.Context, filter bridge.OutboxStat
 	case "active":
 		query += " AND status IN ('pending','leased','native_started','unknown') ORDER BY id ASC"
 	case "failed":
-		query += " AND status='failed' ORDER BY id DESC"
+		query += " AND status IN ('failed','unknown') ORDER BY id DESC"
 	default:
 		query += " ORDER BY id DESC"
 	}

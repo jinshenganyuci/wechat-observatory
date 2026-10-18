@@ -157,9 +157,29 @@ public final class FileDeliveryWorker {
             journal.state(record, "unknown", "Native file result not confirmed; automatic resend disabled");
         } catch (Throwable failure) {
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
-            journal.state(record, intent ? "unknown" : "failed", intent
-                    ? "File send result unknown; automatic resend disabled"
-                    : "Attachment could not be downloaded or validated before send");
+            String persisted = journal.snapshot(record).getString("state");
+            if (intent && ("sent".equals(persisted) || "failed".equals(persisted))) {
+                // A cleanup/ACK failure cannot undo a native result already proven and persisted.
+                log(job.id, "terminal_ack_or_cleanup_pending", journal.snapshot(record).optLong("message_id"));
+                return;
+            }
+            try {
+                journal.state(record, intent ? "unknown" : "failed", intent
+                        ? "File send result unknown; automatic resend disabled"
+                        : "Attachment could not be downloaded or validated before send");
+            } catch (Throwable persistenceFailure) {
+                if (intent) {
+                    // A full disk must not leave the server's already-started slot occupied
+                    // forever. This ACK never authorizes a resend or removal of the source.
+                    try {
+                        host.validate();
+                        host.acknowledge(job, "unknown", journal.snapshot(record).optLong("message_id"),
+                                "Native result unknown; local journal update failed; automatic resend disabled");
+                    } catch (Throwable ignored) { }
+                    log(job.id, "journal_update_failed_unknown", 0);
+                }
+                return;
+            }
             if (!intent) journal.release(record);
         }
         acknowledge(record, job, host);
@@ -203,11 +223,38 @@ public final class FileDeliveryWorker {
                 || !current.sha256.equals(job.sha256)
                 || current.size != job.size || !current.attachmentId.equals(job.attachmentId))
             throw new IOException("File recovery scope changed");
+        if (!data.optBoolean("intent_recorded") && "cancelled".equals(remote.optString("status"))
+                && remote.optString("native_started_at").isEmpty()) {
+            journal.state(record, "failed", "Unstarted file task cancelled by server");
+            journal.release(record); journal.acknowledged(record); return;
+        }
+        if (data.optBoolean("intent_recorded") && remote.optString("native_started_at").isEmpty()) {
+            // Status alone is not permission to clean: a delayed begin could still commit.
+            // Abandon atomically cancels only an unstarted row, racing that begin safely.
+            JSONObject abandoned = host.request("abandon", current);
+            JSONObject cancelled = abandoned.optJSONObject("item");
+            if (!abandoned.optBoolean("ok") || cancelled == null
+                    || cancelled.optLong("id") != job.id
+                    || !"cancelled".equals(cancelled.optString("status"))
+                    || !cancelled.optString("native_started_at").isEmpty())
+                throw new IOException("Unstarted file cancellation not confirmed");
+            host.validate();
+            journal.state(record, "failed", "Native send grant not obtained; task safely cancelled without retry");
+            journal.release(record); journal.acknowledged(record);
+            log(job.id, "unstarted_cancelled", 0); return;
+        }
         if (!current.token.equals(job.token)) {
             if (!data.optBoolean("intent_recorded")) return; // Fresh lease may retry only the pre-begin download.
             throw new IOException("Native file grant changed");
         }
         String state = data.getString("state");
+        if ("sent".equals(state) || "failed".equals(state)) {
+            // This terminal result was committed only after native proof (or before any
+            // handoff). Replaying its ACK must survive later deletion of WeChat's own copy.
+            if (!data.optBoolean("source_released")) journal.release(record);
+            if (!data.optBoolean("acknowledged")) acknowledge(record, job, host);
+            return;
+        }
         if ("prepared".equals(state)) {
             journal.state(record, "failed", "Interrupted before native send; automatic resend disabled");
             journal.release(record); acknowledge(record, job, host); return;

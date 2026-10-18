@@ -22,7 +22,7 @@ Module endpoints use the Web-issued `api_key` only. JSON POST endpoints carry
 - `POST /module/contacts/snapshot`
 - `POST /module/outbox/poll`
 - `POST /module/outbox/ack`
-- `POST /module/outbox/file/{download,renew,begin,status}` (file protocol 1)
+- `POST /module/outbox/file/{download,renew,begin,status,abandon}` (file protocol 1)
 - `GET /module/outbox/ws?api_key=<api_key>&device=<device>&wxid=<wxid>`
 
 Admin endpoints use `X-Bridge-Password: <BRIDGE_ADMIN_PASSWORD>` or
@@ -60,6 +60,11 @@ returns `granted:true` **once**. A repeated begin never authorizes another
 native submission. A lost begin response is ambiguous and must not be retried
 as a send. `status` can recover a task with just `id` plus current module auth,
 but remains bound to the assigned installation and owner.
+
+If a durable client intent never received a grant, `abandon` can atomically
+cancel only a currently leased task whose native handoff has not started. It
+requires the current lease token/session and loses to an already committed
+`begin`. Clients never turn an ambiguous begin response into another send.
 
 File ACK items include `lease_token`, `chat_record_id`, and a status of `sent`,
 `failed` or `unknown`. A current session of the same installation can reconcile

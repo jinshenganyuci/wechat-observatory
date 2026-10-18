@@ -69,6 +69,94 @@ func fileOp(r ModuleRegistrationRequest, item ModuleOutboxItem, operation string
 	return FileOperation{APIKey: r.APIKey, WxID: r.WxID, AccountSession: r.AccountSession, ID: item.ID, LeaseToken: item.LeaseToken, SHA256: item.Attachment.SHA256, Operation: operation}
 }
 
+func TestFileAbandonSerializesWithNativeBegin(t *testing.T) {
+	for _, first := range []string{"begin", "abandon", "race"} {
+		t.Run(first, func(t *testing.T) {
+			s, registration, handler := fileService(t)
+			if response := uploadFile(t, handler, "abandon-test", "a.txt", "file body", 1, true); response.Code != 200 {
+				t.Fatal(response.Code)
+			}
+			item := filePoll(t, s, registration)
+			var granted, cancelled bool
+			apply := func(operation string) (FileTaskResult, error) {
+				return s.FileTask(t.Context(), fileOp(registration, item, operation))
+			}
+			if first == "race" {
+				type outcome struct {
+					result FileTaskResult
+					err    error
+				}
+				outcomes := make(chan outcome, 2)
+				for _, operation := range []string{"begin", "abandon"} {
+					go func() { result, err := apply(operation); outcomes <- outcome{result, err} }()
+				}
+				for range 2 {
+					outcome := <-outcomes
+					if outcome.err != nil && !errors.Is(outcome.err, ErrFileConflict) {
+						t.Fatal(outcome.err)
+					}
+					granted = granted || outcome.result.Granted
+					cancelled = cancelled || outcome.result.Item.Status == "cancelled"
+				}
+			} else {
+				result, err := apply(first)
+				if err != nil {
+					t.Fatal(err)
+				}
+				granted, cancelled = result.Granted, result.Item.Status == "cancelled"
+				second := "begin"
+				if first == "begin" {
+					second = "abandon"
+				}
+				if _, err = apply(second); !errors.Is(err, ErrFileConflict) {
+					t.Fatal("conflicting transition accepted", err)
+				}
+			}
+			if granted == cancelled {
+				t.Fatalf("grant=%t cancelled=%t", granted, cancelled)
+			}
+			if cancelled {
+				result, err := apply("abandon")
+				if err != nil || result.Granted || result.Item.Status != "cancelled" {
+					t.Fatal("lost abandon response not replayable", result, err)
+				}
+			}
+			if err := s.CleanupFiles(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			file, err := s.fileSpool.Open(item.Attachment.ID)
+			if granted && err != nil {
+				t.Fatal("abandon deleted granted bytes", err)
+			}
+			if cancelled && err == nil {
+				t.Fatal("cancelled bytes retained")
+			}
+			if file != nil {
+				file.Close()
+			}
+		})
+	}
+}
+
+func TestFileAbandonConfirmsSessionCancelledIntentAfterRestart(t *testing.T) {
+	s, old, handler := fileService(t)
+	if response := uploadFile(t, handler, "abandon-restart", "a.txt", "file body", 1, true); response.Code != 200 {
+		t.Fatal(response.Code)
+	}
+	item := filePoll(t, s, old)
+	current := accountRegistration(old.WxID, 2)
+	if _, err := s.RegisterModule(t.Context(), current); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.FileTask(t.Context(), fileOp(current, item, "abandon"))
+	if err != nil || result.Item.Status != "cancelled" || result.Item.NativeStartedAt != "" {
+		t.Fatal(result, err)
+	}
+	if _, err = s.FileTask(t.Context(), fileOp(old, item, "abandon")); !errors.Is(err, ErrAccountSession) {
+		t.Fatal("old session accepted", err)
+	}
+}
+
 func TestFileUploadIdempotencyQuotaAndValidation(t *testing.T) {
 	s, r, h := fileService(t)
 	if got := uploadFile(t, h, "idem-key-1", "a.txt", "file body", 1, false); got.Code != 401 {
@@ -177,6 +265,9 @@ func TestFileNativeHandoffCannotRepeatAndReconcilesAfterRestart(t *testing.T) {
 	ack := ModuleAckRequest{APIKey: r.APIKey, WxID: r.WxID, AccountSession: r.AccountSession, Items: []ModuleAckItem{{ID: item.ID, LeaseToken: item.LeaseToken, Status: "unknown", ChatRecordID: 42, Error: "native result unknown"}}}
 	if items, err := s.AckOutbox(t.Context(), ack); err != nil || len(items) != 1 || items[0].Status != "unknown" {
 		t.Fatal(items, err)
+	}
+	if items, err := s.outbox.(OutboxStatusReader).ListOutboxStatuses(t.Context(), OutboxStatusFilter{Device: item.Device, OwnerWxID: item.OwnerWxID, Status: "failed"}); err != nil || len(items) != 1 || items[0].Status != "unknown" {
+		t.Fatal("failed/unconfirmed filter hid unknown", items, err)
 	}
 	if err := s.CleanupFiles(t.Context()); err != nil {
 		t.Fatal(err)

@@ -128,6 +128,44 @@ public class FileDeliveryTest {
         assertEquals(1, host.begins.get()); assertEquals(0, host.submits.get());
         assertEquals("unknown", journal.snapshot(record(1)).getString("state")); assertTrue(journal.source(record(1)).exists());
     }
+    @Test public void ackFailureDoesNotDowngradeDurablyProvenNativeSuccess() throws Exception {
+        Host host = new Host(item(1, "lease")) {
+            @Override public boolean acknowledge(FileJob job, String status, long id, String error) throws Exception {
+                throw new IOException("ACK response lost");
+            }
+        };
+        worker(1000).deliver(host.remote, host);
+        assertEquals("sent", journal.snapshot(record(1)).getString("state"));
+        assertFalse(journal.source(record(1)).exists()); assertEquals(1, host.submits.get());
+    }
+    @Test public void lateNativeObservationCannotRollBackRecoveredTerminalState() throws Exception {
+        OutgoingFileJournal.Record original = journal.create(SCOPE, "installation", item(1, "lease"));
+        stage(original); journal.state(original, "intent", ""); journal.state(original, "unknown", "");
+        OutgoingFileJournal.Record recovery = record(1);
+        journal.state(recovery, "sent", ""); journal.release(recovery); journal.acknowledged(recovery);
+        journal.observe(original, 77, true, true);
+        assertEquals("sent", journal.snapshot(record(1)).getString("state"));
+        assertTrue(journal.snapshot(record(1)).getBoolean("source_released"));
+        assertTrue(journal.snapshot(record(1)).getBoolean("acknowledged"));
+    }
+    @Test public void diskFailureAfterGrantStillReportsUnknownAndRetainsSource() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean failSync = new java.util.concurrent.atomic.AtomicBoolean();
+        journal = new OutgoingFileJournal(root, dir -> {
+            try (FileChannel channel = FileChannel.open(dir.toPath(), StandardOpenOption.READ)) { channel.force(true); }
+            if (failSync.get()) throw new IOException("injected directory fsync failure");
+        });
+        Host host = new Host(item(1, "lease")) {
+            @Override public JSONObject request(String action, FileJob job) throws Exception {
+                JSONObject result = super.request(action, job);
+                if ("begin".equals(action)) failSync.set(true);
+                return result;
+            }
+        };
+        worker(1000).deliver(host.remote, host);
+        assertEquals(1, host.begins.get()); assertEquals(0, host.submits.get());
+        assertEquals(1, host.acks.get()); assertEquals("unknown", host.remote.getString("status"));
+        assertTrue(journal.source(record(1)).exists());
+    }
     @Test public void checksumFailureCannotBeginAndRemovesPartialFile() throws Exception {
         Host host = new Host(item(1, "lease")); host.bytes = "bad".getBytes(StandardCharsets.UTF_8);
         worker(1000).deliver(host.remote, host);
@@ -143,9 +181,39 @@ public class FileDeliveryTest {
     }
     @Test public void changedLeaseCannotRetryAnyPersistedBeginIntent() throws Exception {
         OutgoingFileJournal.Record old = journal.create(SCOPE, "installation", item(1, "old")); stage(old); journal.state(old, "intent", "");
-        Host host = new Host(item(1, "new"));
+        Host host = new Host(item(1, "new")); host.remote.put("native_started_at", "2026-10-18T00:00:00Z");
         assertThrows(IOException.class, () -> worker(1000).deliver(host.remote, host));
         assertEquals(0, host.begins.get()); assertEquals(0, host.submits.get()); assertTrue(journal.source(old).exists());
+    }
+    @Test public void expiredUngrantableIntentCanOnlyCancelNeverBeginAgain() throws Exception {
+        OutgoingFileJournal.Record old = journal.create(SCOPE, "installation", item(1, "expired"));
+        stage(old); journal.state(old, "intent", "");
+        Host host = new Host(item(1, "current")); worker(1000).deliver(host.remote, host);
+        assertEquals(0, host.begins.get()); assertEquals(0, host.submits.get());
+        assertEquals("cancelled", host.remote.getString("status")); assertFalse(journal.source(record(1)).exists());
+        assertTrue(journal.snapshot(record(1)).getBoolean("acknowledged"));
+    }
+    @Test public void beginWinningAbandonRaceKeepsSourceAndNeverResubmits() throws Exception {
+        OutgoingFileJournal.Record old = journal.create(SCOPE, "installation", item(1, "lease"));
+        stage(old); journal.state(old, "intent", "");
+        Host host = new Host(item(1, "lease")) {
+            @Override public JSONObject request(String action, FileJob job) throws Exception {
+                if ("abandon".equals(action)) {
+                    remote.put("native_started_at", "2026-10-18T00:00:00Z");
+                    throw new IOException("begin won CAS");
+                }
+                return super.request(action, job);
+            }
+        };
+        assertThrows(IOException.class, () -> worker(1000).deliver(host.remote, host));
+        assertEquals(0, host.begins.get()); assertEquals(0, host.submits.get()); assertTrue(journal.source(record(1)).exists());
+    }
+    @Test public void cancelledPreBeginLeaseCleansWithoutRejectedTerminalAck() throws Exception {
+        OutgoingFileJournal.Record old = journal.create(SCOPE, "installation", item(1, "lease")); stage(old);
+        Host host = new Host(item(1, "lease")); host.remote.put("status", "cancelled");
+        worker(1000).deliver(host.remote, host);
+        assertEquals(0, host.begins.get()); assertEquals(0, host.submits.get()); assertEquals(0, host.acks.get());
+        assertFalse(journal.source(record(1)).exists()); assertTrue(journal.snapshot(record(1)).getBoolean("acknowledged"));
     }
     @Test public void configurationChangeAfterHandoffRetainsUnknownSource() throws Exception {
         Host host = new Host(item(1, "lease")); host.invalidateAfterSubmit = true;
@@ -168,7 +236,7 @@ public class FileDeliveryTest {
     }
     @Test public void recoveryDoesNotReplaceTerminalSentWithUnknownWhenNativeCopyUnavailable() throws Exception {
         Host host = new Host(item(1, "lease")); host.acceptAck = false; FileDeliveryWorker worker = worker(1000);
-        worker.deliver(host.remote, host); host.proofPending = true; host.acceptAck = true;
+        worker.deliver(host.remote, host); host.inspectFailure = true; host.acceptAck = true;
         worker.deliver(host.remote, host);
         assertEquals("sent", journal.snapshot(record(1)).getString("state")); assertEquals(1, host.submits.get());
     }
@@ -206,7 +274,7 @@ public class FileDeliveryTest {
         final JSONObject remote;
         final AtomicInteger submits = new AtomicInteger(), begins = new AtomicInteger(), acks = new AtomicInteger();
         byte[] bytes = CONTENT;
-        boolean loseGrantResponse, nativeFailed, invalidateAfterSubmit, invalid, proofPending;
+        boolean loseGrantResponse, nativeFailed, invalidateAfterSubmit, invalid, proofPending, inspectFailure;
         boolean finishEvent = true, acceptAck = true;
         Runnable onAck = () -> {};
         Host(JSONObject remote) { this.remote = remote; }
@@ -219,6 +287,10 @@ public class FileDeliveryTest {
                 begins.incrementAndGet(); remote.put("native_started_at", "2026-10-18T00:00:00Z");
                 if (loseGrantResponse) throw new IOException("grant response lost");
                 return new JSONObject().put("ok", true).put("granted", true).put("item", remote);
+            }
+            if ("abandon".equals(action)) {
+                if (!remote.optString("native_started_at").isEmpty()) throw new IOException("already started");
+                remote.put("status", "cancelled");
             }
             return new JSONObject().put("ok", true).put("item", remote);
         }
@@ -233,7 +305,8 @@ public class FileDeliveryTest {
             submits.incrementAndGet(); assertArrayEquals(CONTENT, Files.readAllBytes(source.toPath()));
             observer.observed(77, finishEvent, !nativeFailed); if (invalidateAfterSubmit) invalid = true;
         }
-        @Override public WeChat8079FileAdapter.Proof inspect(FileJob job, long id) {
+        @Override public WeChat8079FileAdapter.Proof inspect(FileJob job, long id) throws IOException {
+            if (inspectFailure) throw new FileNotFoundException("native attachment removed by user");
             assertEquals(77, id); return new WeChat8079FileAdapter.Proof(!nativeFailed && !proofPending, nativeFailed);
         }
         @Override public boolean acknowledge(FileJob job, String status, long id, String error) throws Exception {

@@ -142,7 +142,7 @@ func (o *MemoryOutbox) ListOutboxStatuses(_ context.Context, filter OutboxStatus
 		if filter.Status == "active" && item.Status != "pending" && item.Status != "leased" && item.Status != "native_started" && item.Status != "unknown" {
 			continue
 		}
-		if filter.Status == "failed" && item.Status != "failed" {
+		if filter.Status == "failed" && item.Status != "failed" && item.Status != "unknown" {
 			continue
 		}
 		items = append(items, OutboxStatusItem{ModuleOutboxItem: item.ModuleOutboxItem, LeaseUntil: formatRFC3339(item.leaseUntil)})

@@ -66,6 +66,9 @@ func (o *MemoryOutbox) OperateFile(_ context.Context, req FileOperation) (result
 		if req.Operation == "begin" && item.NativeStartedAt != "" {
 			return result, nil
 		}
+		if req.Operation == "abandon" && item.Status == "cancelled" && item.NativeStartedAt == "" {
+			return result, nil
+		}
 		expires, _ := time.Parse(time.RFC3339, item.Attachment.ExpiresAt)
 		if item.Status != "leased" || item.fileSession != req.AccountSession || !item.leaseUntil.After(o.now()) || !expires.After(o.now()) {
 			return result, ErrFileConflict
@@ -83,6 +86,13 @@ func (o *MemoryOutbox) OperateFile(_ context.Context, req FileOperation) (result
 			item.leaseUntil = time.Time{}
 			item.UpdatedAt = formatRFC3339(o.now())
 			result.Granted = true
+		case "abandon":
+			if item.NativeStartedAt != "" {
+				return result, ErrFileConflict
+			}
+			item.Status, item.LastError = "cancelled", "native permission not confirmed; abandoned before send"
+			item.leaseUntil = time.Time{}
+			item.UpdatedAt = formatRFC3339(o.now())
 		default:
 			return result, ErrInvalidFile
 		}

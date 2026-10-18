@@ -215,8 +215,9 @@ func (s *FileSpool) Remove(id string) error {
 		return ErrFileUnavailable
 	}
 	err := os.Remove(filepath.Join(s.dir, id))
-	if os.IsNotExist(err) {
-		return nil
+	if err == nil || os.IsNotExist(err) {
+		// Persist the unlink before the database tombstone records bytes_removed.
+		return syncDir(s.dir)
 	}
 	return err
 }

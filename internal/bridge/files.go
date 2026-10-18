@@ -242,6 +242,9 @@ func (s *Service) FileTask(ctx context.Context, req FileOperation) (result FileT
 		result, e = store.OperateFile(ctx, req)
 		return e
 	})
+	if err == nil && req.Operation == "abandon" {
+		s.notifyOutbox(result.Item.Device)
+	}
 	return
 }
 
@@ -260,7 +263,7 @@ func (s *HTTPServer) moduleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Operation = r.PathValue("operation")
-	if req.Operation != "download" && req.Operation != "renew" && req.Operation != "begin" && req.Operation != "status" {
+	if req.Operation != "download" && req.Operation != "renew" && req.Operation != "begin" && req.Operation != "status" && req.Operation != "abandon" {
 		writeFileError(w, ErrInvalidFile)
 		return
 	}

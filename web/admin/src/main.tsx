@@ -679,7 +679,9 @@ function App() {
       setSendOpen(false);
       accountScope.current.invalidate("outbox");
       setSubmittedOutboxId(result.outbox_id); setOutboxFilter("all");
-      setNotice(`文件任务 #${result.outbox_id} ${result.idempotent_replay ? "已找回" : "已创建"}，等待微信处理；结果见发送记录`);
+      setNotice(result.idempotent_replay
+        ? `文件任务 #${result.outbox_id} 已存在，未创建新发送；请查看发送记录`
+        : `文件任务 #${result.outbox_id} 已创建，等待微信处理；结果见发送记录`);
       void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
     } catch (error) {
       const definiteRejection = submission.stage !== "unknown"

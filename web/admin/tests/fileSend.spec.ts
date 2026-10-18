@@ -116,7 +116,7 @@ test("uncertain upload survives reload and retries only with the original key an
   await expect(page.getByText(/文件名和大小必须一致/)).toBeVisible();
   await page.getByLabel("选择文件", { exact: true }).setInputFiles(report);
   await page.getByRole("button", { name: "使用原请求重试", exact: true }).click();
-  await expect(page.getByText(/文件任务 #72 已找回/)).toBeVisible();
+  await expect(page.getByText("文件任务 #72 已存在，未创建新发送；请查看发送记录")).toBeVisible();
   expect(keys).toHaveLength(2);
   expect(keys[1]).toBe(keys[0]);
   expect(bodies.every(body => body.includes('name="account_generation"\r\n\r\n7\r\n'))).toBe(true);

@@ -187,6 +187,10 @@ func TestFileOutboxMySQLIntegration(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("native grants=%d", count)
 	}
+	op.Operation = "abandon"
+	if _, e := s2.FileTask(ctx, op); !errors.Is(e, bridge.ErrFileConflict) {
+		t.Fatal("abandon cancelled an already granted native send", e)
+	}
 	// Neither a session transition, lease expiration nor the 24h sweeper may
 	// put a granted task back into the native submission queue.
 	if _, err = first.db.ExecContext(ctx, `UPDATE bridge_file_attachments SET expires_at=DATE_SUB(CURRENT_TIMESTAMP,INTERVAL 1 DAY) WHERE id=?`, blob.ID); err != nil {
@@ -216,6 +220,9 @@ func TestFileOutboxMySQLIntegration(t *testing.T) {
 	ack := bridge.ModuleAckRequest{APIKey: key, WxID: reg.WxID, AccountSession: reg.AccountSession, Items: []bridge.ModuleAckItem{{ID: id, LeaseToken: op.LeaseToken, Status: "unknown", ChatRecordID: 101}}}
 	if got, e := s1.AckOutbox(ctx, ack); e != nil || len(got) != 1 || got[0].Status != "unknown" {
 		t.Fatal(got, e)
+	}
+	if got, e := first.ListOutboxStatuses(ctx, bridge.OutboxStatusFilter{Device: device, OwnerWxID: reg.WxID, Status: "failed"}); e != nil || len(got) != 1 || got[0].Status != "unknown" {
+		t.Fatal("failed/unconfirmed filter hid unknown", got, e)
 	}
 	if err = s1.CleanupFiles(ctx); err != nil {
 		t.Fatal(err)
@@ -276,5 +283,83 @@ func TestFileOutboxMySQLIntegration(t *testing.T) {
 	view, found, err = first.OutboxStatusByID(ctx, item.ID, device, reg.WxID)
 	if err != nil || !found || view.Status != "cancelled" {
 		t.Fatal(view, found, err)
+	}
+	var cancelledOperation bridge.FileOperation
+	for _, scenario := range []string{"abandon-first", "race"} {
+		blob, err := spool.Put(ctx, strings.NewReader("cancellation race"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.IdempotencyHash = fmt.Sprintf("%064s", scenario)
+		req.Attachment = bridge.FileAttachment{ID: blob.ID, Name: "cancel.txt", Size: blob.Size, SHA256: blob.SHA256, ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}
+		if _, _, err = s1.EnqueueFile(ctx, req, 2); err != nil {
+			t.Fatal(err)
+		}
+		items, err := s1.PollOutbox(ctx, poll)
+		if err != nil || len(items) != 1 {
+			t.Fatal(items, err)
+		}
+		operation := bridge.FileOperation{APIKey: key, WxID: reg.WxID, AccountSession: reg.AccountSession, ID: items[0].ID,
+			LeaseToken: items[0].LeaseToken, SHA256: blob.SHA256}
+		var granted, cancelled bool
+		if scenario == "abandon-first" {
+			operation.Operation = "abandon"
+			result, err := s1.FileTask(ctx, operation)
+			if err != nil || result.Granted || result.Item.Status != "cancelled" {
+				t.Fatal(result, err)
+			}
+			cancelled = true
+			cancelledOperation = operation
+			if _, err = s2.FileTask(ctx, operation); err != nil {
+				t.Fatal("abandon replay", err)
+			}
+			operation.Operation = "begin"
+			if _, err = s2.FileTask(ctx, operation); !errors.Is(err, bridge.ErrFileConflict) {
+				t.Fatal("grant after abandon", err)
+			}
+		} else {
+			type outcome struct {
+				result bridge.FileTaskResult
+				err    error
+			}
+			outcomes := make(chan outcome, 2)
+			for i, action := range []string{"begin", "abandon"} {
+				request, service := operation, []*bridge.Service{s1, s2}[i]
+				request.Operation = action
+				go func() { result, err := service.FileTask(ctx, request); outcomes <- outcome{result, err} }()
+			}
+			for range 2 {
+				outcome := <-outcomes
+				if outcome.err != nil && !errors.Is(outcome.err, bridge.ErrFileConflict) {
+					t.Fatal(outcome.err)
+				}
+				granted = granted || outcome.result.Granted
+				cancelled = cancelled || outcome.result.Item.Status == "cancelled"
+			}
+		}
+		if granted == cancelled {
+			t.Fatalf("grant=%t cancelled=%t", granted, cancelled)
+		}
+		if err = s1.CleanupFiles(ctx); err != nil {
+			t.Fatal(err)
+		}
+		file, err := spool.Open(blob.ID)
+		if granted && err != nil {
+			t.Fatal("granted source removed", err)
+		}
+		if cancelled && err == nil {
+			t.Fatal("cancelled source retained")
+		}
+		if file != nil {
+			file.Close()
+		}
+	}
+	reg.AccountGeneration, reg.AccountSession = 3, "file-session-00000003"
+	if _, err = s2.RegisterModule(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	cancelledOperation.AccountSession = reg.AccountSession
+	if result, err := s1.FileTask(ctx, cancelledOperation); err != nil || result.Item.Status != "cancelled" {
+		t.Fatal("current new session could not confirm prior cancellation", result, err)
 	}
 }

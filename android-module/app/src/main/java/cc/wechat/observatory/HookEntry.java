@@ -56,6 +56,7 @@ import cc.wechat.observatory.config.BridgeConfig;
 import cc.wechat.observatory.config.ConfigOperationGuard;
 import cc.wechat.observatory.files.FileDeliveryWorker;
 import cc.wechat.observatory.files.FileJob;
+import cc.wechat.observatory.files.FileResponseInputStream;
 import cc.wechat.observatory.files.OutgoingFileJournal;
 import cc.wechat.observatory.files.WeChat8079FileAdapter;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
@@ -2520,13 +2521,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static boolean pollOutbox(BridgeConfig config, ClassLoader classLoader) throws Exception {
         final AccountSession requestSession = config.runtimeAccount.session;
+        final boolean acceptFile = fileDeliverySupported(classLoader) && !FILE_WORKER.isBusy();
         String body = "{"
                 + "\"api_key\":\"" + json(config.apiKey) + "\","
                 + "\"device\":\"" + json(config.device) + "\","
                 + "\"wxid\":\"" + json(config.selfWxid) + "\","
                 + "\"account_session\":\"" + json(requestSession.id) + "\","
-                + "\"file_protocol\":" + (fileDeliverySupported(classLoader) && !FILE_WORKER.isBusy() ? 1 : 0) + ","
-                + "\"limit\":" + config.pollLimit
+                + "\"file_protocol\":" + (acceptFile ? 1 : 0) + ","
+                + "\"limit\":" + (acceptFile ? 1 : config.pollLimit)
                 + "}";
         long started = System.currentTimeMillis();
         String response = postJson(config, "/module/outbox/poll", body);
@@ -2589,7 +2591,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         .put("id", job.id).put("lease_token", job.token).put("sha256", job.sha256);
             }
             @Override public JSONObject request(String action, FileJob job) throws Exception {
-                if (!java.util.Arrays.asList("renew", "begin", "status").contains(action))
+                if (!java.util.Arrays.asList("renew", "begin", "status", "abandon").contains(action))
                     throw new IllegalArgumentException("Invalid file action");
                 try (FileHttpResponse response = openFileRequest(config, "/module/outbox/file/" + action, body(job))) {
                     ByteArrayOutputStream bytes = new ByteArrayOutputStream();
@@ -2686,7 +2688,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static final class FileHttpResponse implements AutoCloseable {
         final Socket socket; final InputStream input; final long length; final boolean chunked;
         FileHttpResponse(Socket socket, InputStream input, long length, boolean chunked) {
-            this.socket = socket; this.input = input; this.length = length; this.chunked = chunked;
+            this.socket = socket; this.input = !chunked && length >= 0 ? new FileResponseInputStream(input, length) : input;
+            this.length = length; this.chunked = chunked;
         }
         @Override public void close() throws IOException { socket.close(); }
     }

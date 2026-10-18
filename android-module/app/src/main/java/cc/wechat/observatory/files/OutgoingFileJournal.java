@@ -117,6 +117,9 @@ public final class OutgoingFileJournal {
     }
 
     public synchronized void state(Record record, String state, String error) throws Exception {
+        record.data = read(record.key).data;
+        String previous = record.data.getString("state");
+        if (("sent".equals(previous) || "failed".equals(previous)) && "unknown".equals(state)) return;
         record.data.put("state", state).put("error", error == null ? "" : error);
         if ("intent".equals(state)) record.data.put("intent_recorded", true);
         write(record);
@@ -124,6 +127,7 @@ public final class OutgoingFileJournal {
 
     /** A fresh lease may retry a download, but only if no begin intent was ever persisted. */
     public synchronized void prepareLease(Record record, JSONObject item) throws Exception {
+        record.data = read(record.key).data;
         if (record.data.optBoolean("intent_recorded")) throw new IOException("Native begin intent is immutable");
         FileJob previous = new FileJob(record.data.getJSONObject("item")), next = new FileJob(item);
         if (previous.id != next.id || !previous.owner.equals(next.owner) || !previous.recipient.equals(next.recipient)
@@ -136,6 +140,9 @@ public final class OutgoingFileJournal {
     }
 
     public synchronized void observe(Record record, long messageId, boolean finished, boolean ok) throws Exception {
+        // A late native callback can arrive after a separate recovery transaction. Merge its
+        // observation into the committed state; never restore an older unknown/started snapshot.
+        record.data = read(record.key).data;
         long previous = record.data.optLong("message_id", 0);
         if (messageId > 0 && previous > 0 && previous != messageId) throw new IOException("Native message identity changed");
         if (messageId == previous && !finished) return;
@@ -146,6 +153,7 @@ public final class OutgoingFileJournal {
 
     public synchronized JSONObject snapshot(Record record) throws Exception { return new JSONObject(record.data.toString()); }
     public synchronized void acknowledged(Record record) throws Exception {
+        record.data = read(record.key).data;
         record.data.put("acknowledged", true); write(record);
     }
 
@@ -181,6 +189,7 @@ public final class OutgoingFileJournal {
     }
 
     public synchronized void release(Record record) throws Exception {
+        record.data = read(record.key).data;
         File source = source(record), part = part(record);
         if (source.exists() && !source.delete()) throw new IOException("Cannot clean staging file");
         if (part.exists() && !part.delete()) throw new IOException("Cannot clean partial file");
@@ -272,13 +281,17 @@ public final class OutgoingFileJournal {
     }
     private static void syncDirectory(File directory) throws IOException {
         java.io.FileDescriptor fd = null;
-        try { fd = Os.open(directory.getAbsolutePath(), OsConstants.O_RDONLY | OsConstants.O_DIRECTORY, 0); Os.fsync(fd); }
+        try {
+            fd = Os.open(directory.getAbsolutePath(), OsConstants.O_RDONLY, 0);
+            if (!OsConstants.S_ISDIR(Os.fstat(fd).st_mode)) throw new IOException("Journal sync target is not a directory");
+            Os.fsync(fd);
+        }
         catch (Exception failure) { throw new IOException("Cannot sync file journal", failure); }
         finally { if (fd != null) try { Os.close(fd); } catch (Exception ignored) { } }
     }
     public static final class Record {
         public final String key;
-        public final JSONObject data;
+        private JSONObject data;
         Record(String key, JSONObject data) { this.key = key; this.data = data; }
     }
 }
