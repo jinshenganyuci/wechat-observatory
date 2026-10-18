@@ -293,9 +293,9 @@ public final class FileSendLab {
     }
 
     private static void syncDirectory(File directory) throws IOException {
+        if (!directory.isDirectory()) throw new IOException("not a journal directory");
         try {
-            java.io.FileDescriptor fd = Os.open(directory.getPath(), OsConstants.O_RDONLY
-                    | OsConstants.O_DIRECTORY, 0);
+            java.io.FileDescriptor fd = Os.open(directory.getPath(), OsConstants.O_RDONLY, 0);
             try { Os.fsync(fd); } finally { Os.close(fd); }
         } catch (android.system.ErrnoException failure) {
             throw new IOException("journal directory sync failed", failure);
