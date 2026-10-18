@@ -100,7 +100,12 @@ class FakeClient:
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        platform_registry.register(PlatformEntry("observatory", "Observatory", ObservatoryAdapter, lambda: True))
+        context = SimpleNamespace(current_cron_execution=lambda: None,
+            register_platform=lambda name, label, adapter, **options:
+                platform_registry.register(PlatformEntry(name, label, adapter, **options)))
+        self.context = patch.object(module, "_plugin_context", context)
+        self.context.start()
+        module.register(context)
         self.home = patch.object(module, "get_hermes_home", return_value=Path(self.temp.name))
         self.safe = patch.object(module, "require_safe_delivery_config")
         self.home.start()
@@ -115,6 +120,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.adapter.state.close()
         self.safe.stop()
         self.home.stop()
+        self.context.stop()
         self.temp.cleanup()
 
     def event(self, **values):
@@ -305,14 +311,181 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(call[0]["kind"] == "text" for call in self.client.calls), 1)
         self.assertEqual(len(self.client.ids), 2)
 
+    async def test_cron_live_and_standalone_share_caption_and_file_identity(self):
+        path = Path(self.temp.name) / "cron.txt"
+        path.write_text("cron attachment")
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-live", profile="wechat"))
+        with patch.object(module, "_plugin_context", context), patch.object(module, "Client", return_value=self.client):
+            caption = await self.adapter.send("alice", "caption")
+            attachment = await self.adapter.send_document("alice", str(path))
+            fallback = await module.standalone_sender(self.config, "alice", "caption\n", media_files=[(str(path), False)])
+        self.assertTrue(caption.success)
+        self.assertTrue(attachment.success)
+        self.assertTrue(fallback["success"])
+        self.assertEqual(len(self.client.ids), 2)
+        self.assertEqual(len(self.client.calls), 2)
+
+    async def test_cron_live_unconfirmed_file_recovers_in_standalone_without_new_caption(self):
+        path = Path(self.temp.name) / "cron.txt"
+        path.write_text("cron attachment")
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-partial", profile="wechat"))
+        with patch.object(module, "_plugin_context", context), patch.object(module, "Client", return_value=self.client):
+            self.assertTrue((await self.adapter.send("alice", "caption")).success)
+            self.client.lose = 2
+            self.assertFalse((await self.adapter.send_document("alice", str(path))).success)
+            fallback = await module.standalone_sender(self.config, "alice", "caption", media_files=[(str(path), False)])
+        self.assertNotIn("error", fallback)
+        self.assertEqual(len(self.client.ids), 2)
+        self.assertEqual(sum(body["kind"] == "text" for body, _key in self.client.calls), 1)
+        self.assertFalse(self.adapter.state.unresolved())
+
+    async def test_native_cron_live_media_failure_returns_delivered_with_error(self):
+        from cron import scheduler_delivery as cron
+        path = Path(self.temp.name) / "cron.txt"
+        path.write_text("cron attachment")
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-native", profile="wechat"))
+        target = SimpleNamespace(job={"id": "cron-test"}, runtime_adapter=self.adapter, chat_id="alice",
+            loop=asyncio.get_running_loop(), platform=self.adapter.platform, platform_name="observatory",
+            is_relay=False, where="observatory:alice")
+        errors = []
+        with patch.object(module, "_plugin_context", context), \
+                patch.object(cron, "_live_route_metadata", return_value=(None, {}, {})), \
+                patch.object(cron, "_seed_live_delivery_sessions"):
+            caption = await self.adapter.send("alice", "caption")
+            self.client.lose = 2
+            with patch.object(cron, "_live_send_text", return_value=(True, False, caption.message_id)):
+                delivered = await asyncio.to_thread(cron._deliver_via_live_adapter, target, "caption",
+                    [(str(path), False)], target_errors=[], delivery_errors=errors, unverified_targets=[])
+        self.assertTrue(delivered)  # _deliver_result only invokes fallback when this is false.
+        self.assertEqual(len(errors), 1)
+        self.assertIn("media send failed", errors[0])
+        self.assertEqual(sum(body["kind"] == "text" for body, _key in self.client.calls), 1)
+        self.assertEqual(len(self.adapter.state.unresolved()), 1)
+
     async def test_notification_rejects_invalid_unicode_without_rewriting_valid_text(self):
-        with patch.object(module, "standalone_sender", new_callable=AsyncMock) as sender:
-            rejected = await module.notification_handler({"message": "bad\udcfftext"}, "alice", "observatory", self.config)
+        with patch.object(module, "Client", return_value=self.client):
+            rejected = await module.standalone_sender(self.config, "alice", "bad\udcfftext")
             self.assertIn("invalid Unicode", rejected["error"])
-            sender.assert_not_called()
-            sender.return_value = {"success": True}
-            await module.notification_handler({"message": "Hello 😀"}, "alice", "observatory", self.config)
-            self.assertEqual(sender.call_args.args[2], "Hello 😀")
+            self.assertFalse(self.client.calls)
+            await module.standalone_sender(self.config, "alice", "Hello 😀")
+            self.assertEqual(self.client.calls[0][0]["text"], "Hello 😀")
+
+    async def test_native_cron_standalone_route_without_args_preserves_caption_and_files(self):
+        from tools import send_message_tool as native
+        path = Path(self.temp.name) / "cron.txt"
+        path.write_text("cron attachment")
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-standalone", profile="wechat"))
+        with patch.object(module, "_plugin_context", context), patch.object(module, "Client", return_value=self.client), \
+                patch.object(native, "_live_adapter", return_value=(None, None)):
+            for _ in range(2):
+                result = await native._send_to_platform(self.adapter.platform, self.config, "alice", "caption",
+                    media_files=[(str(path), False)])
+                self.assertTrue(result.get("success"), result)
+        self.assertEqual([body["kind"] for body, _key in self.client.calls], ["text", "file"])
+        self.assertEqual(len(self.client.ids), 2)
+
+    async def test_native_notification_rejects_long_text_before_any_bundle_or_send(self):
+        from tools import send_message_tool as native
+        with patch.object(module, "Client", return_value=self.client), \
+                patch.object(native, "_live_adapter", return_value=(None, None)):
+            result = await native._send_to_platform(self.adapter.platform, self.config, "alice", "x" * 8001)
+        self.assertIn("8000", result["error"])
+        self.assertFalse(self.client.calls)
+        self.assertEqual(self.adapter.state.db.execute("SELECT COUNT(*) FROM bundles").fetchone()[0], 0)
+        self.assertEqual(self.adapter.state.db.execute("SELECT COUNT(*) FROM outgoing").fetchone()[0], 0)
+
+    async def test_real_cron_router_preserves_long_text_and_standalone_identity(self):
+        from gateway.config import GatewayConfig
+        from gateway.delivery import DeliveryRouter, DeliveryTarget
+        from tools import send_message_tool as native
+        config = GatewayConfig(platforms={self.adapter.platform: self.config})
+        router = DeliveryRouter(config, {self.adapter.platform: self.adapter})
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-long", profile="wechat"))
+        with patch.object(module, "_plugin_context", context), patch.object(module, "Client", return_value=self.client), \
+                patch.object(native, "_live_adapter", return_value=(None, None)), \
+                patch("gateway.delivery.get_hermes_home", return_value=Path(self.temp.name)):
+            for size in (4001, 8000):
+                target = "alice" + str(size)
+                text = "x" * size
+                live = await router._deliver_to_platform(DeliveryTarget(self.adapter.platform, target), text,
+                    {"job_id": "cron-test"})
+                self.assertTrue(live.success)
+                self.assertEqual(self.client.calls[-1][0]["text"], text)
+                fallback = await native._send_to_platform(self.adapter.platform, self.config, target, text)
+                self.assertTrue(fallback.get("success"), fallback)
+        self.assertEqual(len(self.client.ids), 2)
+        self.assertEqual(len(self.client.calls), 2)
+
+    async def test_real_cron_router_and_fallback_reject_8001_before_any_send(self):
+        from gateway.config import GatewayConfig
+        from gateway.delivery import DeliveryRouter, DeliveryTarget
+        from tools import send_message_tool as native
+        config = GatewayConfig(platforms={self.adapter.platform: self.config})
+        router = DeliveryRouter(config, {self.adapter.platform: self.adapter})
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-over-limit", profile="wechat"))
+        with patch.object(module, "_plugin_context", context), patch.object(module, "Client", return_value=self.client), \
+                patch.object(native, "_live_adapter", return_value=(None, None)), \
+                patch("gateway.delivery.get_hermes_home", return_value=Path(self.temp.name)):
+            with self.assertRaisesRegex(RuntimeError, "8000"):
+                await router._deliver_to_platform(DeliveryTarget(self.adapter.platform, "alice"), "x" * 8001,
+                    {"job_id": "cron-test"})
+            fallback = await native._send_to_platform(self.adapter.platform, self.config, "alice", "x" * 8001)
+            self.assertIn("8000", fallback["error"])
+        self.assertFalse(self.client.calls)
+        self.assertEqual(self.adapter.state.db.execute("SELECT COUNT(*) FROM bundles").fetchone()[0], 0)
+        self.assertEqual(self.adapter.state.db.execute("SELECT COUNT(*) FROM outgoing").fetchone()[0], 0)
+
+    async def test_native_cli_notification_retry_preserves_whole_manifest(self):
+        from gateway.config import GatewayConfig
+        from tools import send_message_tool as native
+        path = Path(self.temp.name) / "cli.txt"
+        path.write_text("cli attachment")
+        later_path = Path(self.temp.name) / "later.txt"
+        later_path.write_text("second cli attachment")
+        original = self.client.submit
+        losses = 2
+
+        async def lose_file_response(body, key):
+            nonlocal losses
+            if body["kind"] == "file" and body["attachment"]["name"] == later_path.name and losses:
+                losses -= 1
+                self.client.lose = 1
+            return await original(body, key)
+
+        self.client.submit = lose_file_response
+        args = {"target": "observatory:alice", "message": f"caption\nMEDIA:{path}\nMEDIA:{later_path}"}
+        config = GatewayConfig(platforms={self.adapter.platform: self.config})
+        with patch.object(module, "Client", return_value=self.client), \
+                patch.object(native, "_live_adapter", return_value=(None, None)), \
+                patch.object(native, "prepare_send_message_platforms"), \
+                patch.object(native, "_authorize_relay_target", return_value=None), \
+                patch.object(native, "_mirror_sent_message", return_value=False), \
+                patch("hermes_cli.plugins.discover_plugins"), \
+                patch("gateway.config.load_gateway_config", return_value=config):
+            first = json.loads(await asyncio.to_thread(native._handle_send, args))
+            second = json.loads(await asyncio.to_thread(native._handle_send, args))
+        self.assertIn("error", first)
+        self.assertTrue(second.get("success"), second)
+        self.assertEqual(sum(body["kind"] == "text" for body, _key in self.client.calls), 1)
+        self.assertEqual(len(self.client.ids), 3)
+        self.assertEqual(sum(body["kind"] == "file" and body["attachment"]["name"] == path.name
+                             for body, _key in self.client.calls), 1)
+
+    async def test_live_notification_to_other_target_uses_original_turn_identity(self):
+        from tools import send_message_tool as native
+        path = Path(self.temp.name) / "group.txt"
+        path.write_text("group attachment")
+        token = module._reply_identity.set((self.adapter._chat_id("alice"), "inbound-1"))
+        try:
+            with patch.object(native, "_live_adapter", return_value=(SimpleNamespace(), self.adapter)):
+                for _ in range(2):
+                    result = await native._send_to_platform(self.adapter.platform, self.config, "123@chatroom", "caption",
+                        media_files=[(str(path), False)])
+                    self.assertTrue(result["success"])
+        finally:
+            module._reply_identity.reset(token)
+        self.assertEqual(len(self.client.ids), 2)
+        self.assertEqual(len(self.client.calls), 2)
 
     async def test_first_connection_skips_head_and_reconnects_with_durable_cursor(self):
         handled = []

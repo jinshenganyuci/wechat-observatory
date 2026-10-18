@@ -93,7 +93,7 @@ hermes --profile wechat send --to observatory:123456789@chatroom \
   "报告文件 MEDIA:/absolute/path/report.pdf"
 ```
 
-目标应使用管理台看到的好友 wxid 或群 ID。`hermes send --file report.txt` 读取的是文本正文；发送附件使用 `MEDIA:`，并带一句简短说明（v0.22.2 的通用 CLI 路由会拒绝仅有附件标记的空正文）。图片和视频目前仍不支持。
+目标应使用管理台看到的好友 wxid 或群 ID。`hermes send --file report.txt` 读取的是文本正文；发送附件使用 `MEDIA:`。所有文件通知（包括 cron）都应带一句简短说明，v0.22.2 的通用通知路由会拒绝仅有附件的空正文。通知正文最多 8000 字符，超限整条拒绝，不拆成多个发送任务；图片和视频目前仍不支持。
 
 Hermes cron 的投递目标同样使用 `observatory:<目标>`，在微信 profile 中创建任务即可。文件原件由产生它的工具管理，插件不会删除用户原文件；后端和手机的传输暂存按[文件发送与清理约定](file-send.md)处理。
 

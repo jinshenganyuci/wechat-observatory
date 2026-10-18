@@ -56,6 +56,10 @@ def valid_target(target: str) -> bool:
 
 
 class ObservatoryAdapter(BasePlatformAdapter):
+    # Own the length decision: v0.22.2 otherwise truncates cron text and adds
+    # a changing audit-path footer. send() rejects >8000 without splitting.
+    splits_long_messages = True
+
     def __init__(self, config):
         super().__init__(config, Platform("observatory"))
         self.settings = settings_from_config(config)
@@ -227,15 +231,17 @@ class ObservatoryAdapter(BasePlatformAdapter):
         return {"name": peer, "type": "group" if peer.endswith("@chatroom") else "dm"}
 
     def _identity(self, chat_id, reply_to, metadata, fingerprint):
-        supplied = (metadata or {}).get("observatory_intent")
-        current = _reply_identity.get()
-        anchor = supplied or reply_to or (current[1] if current and current[0] == chat_id else None)
-        if anchor:
-            return "reply:" + digest([chat_id, anchor, fingerprint])
+        # Cron's live adapter and standalone fallback carry the same native
+        # execution context, but different per-notification metadata.
         if _plugin_context:
             execution = _plugin_context.current_cron_execution()
             if execution and execution.execution_id:
                 return "cron:" + digest([execution.profile, execution.execution_id, chat_id, fingerprint])
+        supplied = (metadata or {}).get("observatory_intent")
+        current = _reply_identity.get()
+        anchor = supplied or reply_to or (current[1] if current else None)
+        if anchor:
+            return "reply:" + digest([chat_id, anchor, fingerprint])
         return None
 
     def _send_retry_is_final(self, result):
@@ -358,6 +364,16 @@ class ObservatoryAdapter(BasePlatformAdapter):
 async def standalone_sender(config, chat_id, message, *, thread_id=None, media_files=None, force_document=False):
     if thread_id:
         return {"error": "Observatory does not support threads"}
+    try:
+        message.encode("utf-8")
+    except UnicodeEncodeError:
+        return {"error": "Notification text contains invalid Unicode; nothing was sent. Correct the text and try again."}
+    if len(message) > 8000:
+        return {"error": "Observatory notification text exceeds 8000 characters; nothing was sent. Shorten the notification."}
+    execution = _plugin_context.current_cron_execution() if _plugin_context else None
+    if execution and execution.execution_id:
+        # Hermes' cron live lane strips the caption before calling send().
+        message = message.strip()
     adapter = ObservatoryAdapter(config)
     try:
         require_safe_delivery_config()
@@ -371,10 +387,8 @@ async def standalone_sender(config, chat_id, message, *, thread_id=None, media_f
             return {"error": "empty notification"}
         manifest = digest([message, [{k: v for k, v in f.items() if k != "path"} for f in files]])
         identity = None
-        if _plugin_context:
-            execution = _plugin_context.current_cron_execution()
-            if execution:
-                identity = "cron-bundle:" + digest([execution.profile, execution.execution_id, chat_id])
+        if execution and execution.execution_id:
+            identity = "cron-bundle:" + digest([execution.profile, execution.execution_id, chat_id])
         bundle = adapter.state.bundle(identity, chat_id, manifest)
         result = None
         if message:
@@ -399,22 +413,6 @@ async def standalone_sender(config, chat_id, message, *, thread_id=None, media_f
         adapter.state.close()
 
 
-async def notification_handler(args, chat_id, platform_name, config):
-    # Reuse Hermes' media path security filter, then preserve one whole notification
-    # manifest across caption/attachment partial failures (including live-gateway sends).
-    message = str(args.get("message", ""))
-    try:
-        message.encode("utf-8")
-    except UnicodeEncodeError:
-        return {"error": "Notification text contains invalid Unicode; nothing was sent. Correct the text and try again."}
-    files, text = BasePlatformAdapter.extract_media(message)
-    dropped = []
-    files = BasePlatformAdapter.filter_media_delivery_paths(files, dropped=dropped)
-    if dropped:
-        return {"error": "Hermes rejected one or more notification file paths; nothing was sent"}
-    return await standalone_sender(config, chat_id, text, media_files=files)
-
-
 def register(ctx):
     global _plugin_context
     _plugin_context = ctx
@@ -422,8 +420,9 @@ def register(ctx):
     ctx.register_platform("observatory", "WeChat Observatory", ObservatoryAdapter,
                           check_fn=lambda: True, validate_config=validate_config,
                           setup_fn=interactive_setup, standalone_sender_fn=standalone_sender,
-                          send_message_handler=notification_handler,
-                          allowed_users_env="OBSERVATORY_ALLOWED_USERS", max_message_length=8000,
+                          # Keep each notification whole for the durable manifest;
+                          # standalone_sender rejects over 8000 before any send.
+                          allowed_users_env="OBSERVATORY_ALLOWED_USERS", max_message_length=0,
                           parse_target_ref_fn=lambda ref: (ref, None) if valid_target(ref) else None,
                           validate_target_ref_fn=valid_target, display_tier="low",
                           cron_deliver_env_var="OBSERVATORY_HOME_CHANNEL",
