@@ -380,7 +380,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     JSONObject out = new JSONObject().put("message_id", 0).put("status", "unknown")
                             .put("source_released", false);
                     LabSend send = LAB_SENDS.get(displayName);
-                    if (send == null) return out;
                     Object db = findAccountDatabase(account, false);
                     if (db == null) return out;
                     Object cursor = rawQuery(db, "SELECT msgId,status,type,msgSvrId FROM message WHERE talker=? AND isSend=1 AND content LIKE ? ORDER BY msgId DESC LIMIT 3",
@@ -399,7 +398,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     JSONObject phases = new JSONObject();
                     String[] fields = {"m", "n", "o", "p", "J"};
                     String[] names = {"prepare", "upload", "send", "update", "first_cgi"};
-                    for (int i = 0; i < fields.length; i++) {
+                    for (int i = 0; send != null && i < fields.length; i++) {
                         String field = fields[i];
                         Object phase = XposedHelpers.getObjectField(send.params, field);
                         if (phase == null) { phases.put(field, JSONObject.NULL); phasesOk = false; }
@@ -409,18 +408,48 @@ public final class HookEntry implements IXposedHookLoadPackage {
                             out.put(names[i], code);
                         }
                     }
-                    boolean sent = rows == 1 && send.finished && phasesOk && status == 2 && serverId > 0;
+                    File source = send == null ? new File(new File(APP_CONTEXT.getNoBackupFilesDir(),
+                            "observatory-file-probe"), displayName) : send.source;
+                    if (!source.getCanonicalFile().equals(source) || !displayName.startsWith("observatory-lab-"))
+                        throw new IllegalStateException("invalid laboratory source");
+                    long sourceSize = send == null ? source.length() : send.size;
+                    Object attachment = XposedHelpers.newInstance(XposedHelpers.findClass(
+                            "com.tencent.mm.pluginsdk.model.app.d", loader));
+                    XposedHelpers.setLongField(attachment, "field_msgInfoId", msgId);
+                    XposedHelpers.setObjectField(attachment, "field_msgInfoTalker", "filehelper");
+                    Object storage = XposedHelpers.callStaticMethod(XposedHelpers.findClass(
+                            "com.tencent.mm.pluginsdk.model.app.v5", loader), "yj");
+                    Object migration = XposedHelpers.getStaticObjectField(XposedHelpers.findClass("ox0.t", loader), "c1");
+                    boolean migrated = Boolean.TRUE.equals(XposedHelpers.callMethod(migration, "a", "appattach"));
+                    boolean found = msgId > 0 && Boolean.TRUE.equals(XposedHelpers.callMethod(storage, "get", attachment,
+                            migrated ? new String[]{"msgInfoId", "msgInfoTalker"} : new String[]{"msgInfoId"}));
+                    long attachmentStatus = found ? XposedHelpers.getLongField(attachment, "field_status") : -1;
+                    long total = found ? XposedHelpers.getLongField(attachment, "field_totalLen") : -1;
+                    long offset = found ? XposedHelpers.getLongField(attachment, "field_offset") : -1;
+                    String finalPath = found ? String.valueOf(XposedHelpers.getObjectField(attachment, "field_fileFullPath")) : "";
+                    boolean nativeComplete = found && attachmentStatus == 199 && total == sourceSize && offset == total;
+                    // Across this controlled restart, native attachment status 199 is written
+                    // only after all CGI/upload phases succeed. Never submit a journal again.
+                    boolean recovered = send == null && source.isFile() && nativeComplete;
+                    boolean sent = rows == 1 && status == 2 && serverId > 0
+                            && (send == null ? recovered : send.finished && phasesOk);
                     boolean copyMatches = false;
-                    if (sent && send.copied == send.size && !send.copyPath.isEmpty()
-                            && !send.copyPath.equals(send.source.getAbsolutePath())) {
-                        try { copyMatches = send.digest.equals(labDigest((InputStream)XposedHelpers.callStaticMethod(
-                                XposedHelpers.findClass("com.tencent.mm.vfs.z6", loader), "E", send.copyPath))); }
-                        catch (Exception unavailable) { /* Never delete an unverified source. */ }
+                    if (sent && nativeComplete && (send == null || send.copied == sourceSize)
+                            && !finalPath.isEmpty() && !finalPath.equals(source.getAbsolutePath())) {
+                        try {
+                            String expected = send == null ? labDigest(new FileInputStream(source)) : send.digest;
+                            copyMatches = expected.equals(labDigest((InputStream)XposedHelpers.callStaticMethod(
+                                    XposedHelpers.findClass("com.tencent.mm.vfs.z6", loader), "E", finalPath)));
+                        } catch (Throwable unavailable) {
+                            android.util.Log.i("ObservatoryFileLab", "copy_verify_error=" + unavailable.getClass().getSimpleName());
+                        }
                     }
                     out.put("message_id", msgId).put("status", sent ? "sent" : status == 5 ? "failed" : "pending")
                             .put("source_released", sent && copyMatches).put("row_count", rows).put("message_type", type)
-                            .put("db_status", status).put("server_id_present", serverId > 0).put("native_finished", send.finished)
-                            .put("native_phases", phases).put("copy_bytes", send.copied).put("copy_verified", copyMatches);
+                            .put("db_status", status).put("server_id_present", serverId > 0).put("native_finished", send != null && send.finished)
+                            .put("native_phases", phases).put("copy_bytes", send == null ? -1 : send.copied).put("copy_verified", copyMatches)
+                            .put("attachment_status", attachmentStatus).put("attachment_total", total).put("attachment_offset", offset)
+                            .put("recovered_completed_attachment", recovered);
                     return out;
                 }
             });

@@ -118,7 +118,8 @@ public final class FileSendLab {
         } catch (Throwable failure) {
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
             // A native call may have started. An exception never authorizes a retry or deletion.
-            event(testCase, "unknown", "error=" + failure.getClass().getSimpleName());
+            event(testCase, "unknown", "error=" + failure.getClass().getSimpleName()
+                    + " cause=" + (failure.getCause() == null ? "none" : failure.getCause().getClass().getSimpleName()));
         }
     }
 
@@ -323,11 +324,11 @@ public final class FileSendLab {
                 + " status=" + status(result) + " source_released="
                 + Boolean.TRUE.equals(result.opt("source_released")));
         for (String key : new String[]{"message_type", "row_count", "prepare", "upload",
-                "send", "update", "first_cgi"}) {
+                "send", "update", "first_cgi", "attachment_status", "attachment_total", "attachment_offset", "copy_bytes"}) {
             Object value = result.opt(key);
             if (value instanceof Number) text.append(' ').append(key).append('=').append(((Number) value).longValue());
         }
-        for (String key : new String[]{"native_finished", "copy_verified", "server_id_present"}) {
+        for (String key : new String[]{"native_finished", "copy_verified", "server_id_present", "recovered_completed_attachment"}) {
             Object value = result.opt(key);
             if (value instanceof Boolean) text.append(' ').append(key).append('=').append(value);
         }
