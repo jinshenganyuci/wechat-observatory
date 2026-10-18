@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatBeijingDateTime } from "@/time";
+import { formatFileSize } from "@/fileSend";
 import { outboxIsActive, outboxLeaseExpired, outboxResultUnconfirmed, outboxStatusLabel, outboxWaitText } from "@/outbox";
 import type { ModuleContact, OutboxFilter, OutboxStatusItem } from "@/types";
 
@@ -45,7 +46,10 @@ export function OutboxList({ items, filter, onFilter, chatOnly, onChatOnly, hasC
             <span className="break-all font-medium">{name}{name !== item.wxid ? `（${item.wxid}）` : ""}</span>
             <Badge variant={tone}>{outboxStatusLabel(item.status, item.last_error)}</Badge>
           </div>
-          {item.text.length > 240 ? <details className="mt-2"><summary className="cursor-pointer whitespace-pre-wrap break-words">{item.text.slice(0, 120)}… 展开全文</summary>
+          {item.kind === "file" ? <div className="mt-2 min-w-0 text-sm">
+            <p className="break-all">文件：{item.attachment?.name || "文件信息暂不可用"}</p>
+            {item.attachment ? <p className="mt-1 text-xs text-muted-foreground">{formatFileSize(item.attachment.size)}</p> : null}
+          </div> : (item.text || "").length > 240 ? <details className="mt-2"><summary className="cursor-pointer whitespace-pre-wrap break-words">{item.text.slice(0, 120)}… 展开全文</summary>
             <p className="mt-2 whitespace-pre-wrap break-words text-sm">{item.text}</p></details>
             : <p className="mt-2 whitespace-pre-wrap break-words text-sm">{item.text}</p>}
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
@@ -57,7 +61,7 @@ export function OutboxList({ items, filter, onFilter, chatOnly, onChatOnly, hasC
             <span> · 不代表预计送达时间</span>
           </p> : null}
           {item.attempt_count > 0 ? <p className="mt-1 text-muted-foreground">分派 {item.attempt_count} 次</p> : null}
-          {unconfirmed ? <p className="mt-2 text-amber-700 dark:text-amber-200">微信已接收任务，但尚未确认结果；请先查看聊天记录，避免重复发送。</p> : null}
+          {unconfirmed ? <p className="mt-2 text-amber-700 dark:text-amber-200">{item.kind === "file" ? "文件发送结果未确认；请先查看微信聊天记录，不要重新创建发送任务。" : "微信已接收任务，但尚未确认结果；请先查看聊天记录，避免重复发送。"}</p> : null}
           {item.last_error ? <p className="mt-2 whitespace-pre-wrap break-words text-destructive">{item.last_error}</p> : null}
         </li>;
       })}

@@ -54,7 +54,12 @@ func main() {
 		opts = append(opts, bridge.WithOutbox(store))
 		opts = append(opts, bridge.WithAdminReader(store))
 	}
+	spool, err := bridge.NewFileSpool(cfg.FileSpoolDir, cfg.FileSpoolMaxBytes)
+	if err != nil {
+		log.Fatal("initialize private file storage failed")
+	}
 	service := bridge.NewService(bridge.Config{
+		FileSpool:              spool,
 		DefaultDevice:          cfg.DefaultDevice,
 		Devices:                cfg.Devices,
 		APIKeys:                cfg.APIKeys,
@@ -78,6 +83,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go startFileCleanup(ctx, service)
 	if store != nil {
 		go startHistoryRetention(ctx, store, cfg.RetentionDays, cfg.RetentionPoll)
 		go startOfflineOutboxCancellation(ctx, store, cfg.ModuleOfflineAfter, cfg.OfflineOutboxSweep)
@@ -101,6 +107,23 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+}
+
+func startFileCleanup(ctx context.Context, service *bridge.Service) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := service.CleanupFiles(cleanupCtx); err != nil && ctx.Err() == nil {
+			log.Print("file storage cleanup incomplete; retrying later")
+		}
+		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 type historyRetentionStore interface {

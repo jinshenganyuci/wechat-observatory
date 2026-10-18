@@ -22,6 +22,7 @@ Module endpoints use the Web-issued `api_key` only. JSON POST endpoints carry
 - `POST /module/contacts/snapshot`
 - `POST /module/outbox/poll`
 - `POST /module/outbox/ack`
+- `POST /module/outbox/file/{download,renew,begin,status}` (file protocol 1)
 - `GET /module/outbox/ws?api_key=<api_key>&device=<device>&wxid=<wxid>`
 
 Admin endpoints use `X-Bridge-Password: <BRIDGE_ADMIN_PASSWORD>` or
@@ -42,6 +43,35 @@ Admin endpoints use `X-Bridge-Password: <BRIDGE_ADMIN_PASSWORD>` or
 - `POST /api/api-keys/{key}/enable`
 - `DELETE /api/api-keys/{key}`
 - `POST /api/send/text`
+- `POST /api/send/file`
+- `GET /api/outbox/{id}?device=...&owner_wxid=...`
+
+## Outgoing files (protocol 1)
+
+Only explicitly capable clients include `file_protocol: 1` in HTTP poll JSON
+or `file_protocol=1` in the outbox WebSocket query. File items carry `kind:file`,
+`attachment:{id,name,size,sha256,expires_at}` and an opaque `lease_token`.
+Older clients never lease file items.
+
+File operation POSTs carry `api_key`, `device`, `wxid`, `account_session`, `id`
+and `lease_token`. `download` returns authenticated raw bytes; `renew` extends
+an unstarted lease; `begin` additionally requires the verified `sha256` and
+returns `granted:true` **once**. A repeated begin never authorizes another
+native submission. A lost begin response is ambiguous and must not be retried
+as a send. `status` can recover a task with just `id` plus current module auth,
+but remains bound to the assigned installation and owner.
+
+File ACK items include `lease_token`, `chat_record_id`, and a status of `sent`,
+`failed` or `unknown`. A current session of the same installation can reconcile
+its previously started task; another installation cannot take it over. Neither
+lease expiry nor offline cleanup requeues native-started tasks. Clients must
+persist their intent before begin, their handoff state before native invocation,
+and the local message ID as soon as native observation provides it.
+
+File work must not block WebSocket control frames. Completion is checked through
+the native attachment record, final file hash and message record, not merely
+queue admission or the first CGI's message status. See [file API](file-send.md)
+for supported types, retention, deployment and operator-facing states.
 
 ## Registration
 

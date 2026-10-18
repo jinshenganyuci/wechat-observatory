@@ -36,7 +36,8 @@ import cc.wechat.observatory.util.BridgeLogger;
 /** In-memory editor; the client persists configuration inside WeChat. */
 public final class WeChatConfigUi {
     private static final String STORAGE_NOTICE = "配置保存在微信内，无需保持 Observatory 后台。"
-            + "\n卸载模块前，请先点击“停用并删除配置”。";
+            + "\n卸载模块前，请先点击“停用并删除配置”。"
+            + "已交给微信且结果未确认的文件暂存会保留，避免中断发送。";
     private static final String DELETE_UNCONFIRMED = "网关已停用，配置文件删除未确认，请重试。";
     private static final String MAIN_SETTINGS =
             "com.tencent.mm.plugin.setting.ui.setting_new.MainSettingsUI";

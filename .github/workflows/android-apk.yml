@@ -48,7 +48,7 @@ jobs:
       - name: Verify and package
         run: |
           mkdir -p artifacts
-          cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.22-wechat8079-debug.apk
+          cp android-module/app/build/outputs/apk/debug/app-debug.apk artifacts/wechat-observatory-0.1.23-wechat8079-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs artifacts/*.apk > artifacts/apk-verification.txt
           grep -F "Signer #1 certificate SHA-256 digest: 6b95e8c196f30a26b0f1dd0d9be43d08d2714cc0a2614dce2f33165043996f4e" artifacts/apk-verification.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging artifacts/*.apk > artifacts/apk-package.txt

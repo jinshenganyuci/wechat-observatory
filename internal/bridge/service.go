@@ -40,6 +40,7 @@ type Service struct {
 	outboxNotify   map[string]map[chan struct{}]struct{}
 
 	diagnostics diagnosticDeduper
+	fileSpool   *FileSpool
 }
 
 const maxOutboxPollBatch = 1
@@ -71,6 +72,7 @@ func (e *IngestPersistenceError) Unwrap() error {
 }
 
 type Config struct {
+	FileSpool              *FileSpool
 	DefaultDevice          string
 	Devices                map[string]config.Device
 	APIKeys                map[string]config.APIKey
@@ -84,6 +86,7 @@ type Config struct {
 
 func NewService(cfg Config, opts ...Option) *Service {
 	service := &Service{
+		fileSpool:            cfg.FileSpool,
 		cfg:                  cfg,
 		accountCurrent:       map[string]AccountBinding{},
 		accountHistory:       map[string]AccountBinding{},
@@ -548,6 +551,13 @@ func (s *Service) pollOutbox(ctx context.Context, req ModulePollRequest) ([]Modu
 	if req.Limit > maxOutboxPollBatch {
 		req.Limit = maxOutboxPollBatch
 	}
+	if req.AccountSession != "" {
+		binding, _, bindErr := s.currentBinding(ctx, req.Device)
+		if bindErr != nil {
+			return nil, bindErr
+		}
+		req.InstanceID = binding.InstanceID
+	}
 	items, err := s.outbox.PollReplyActions(ctx, req)
 	if err != nil {
 		return nil, err
@@ -629,6 +639,14 @@ func (s *Service) ackOutbox(ctx context.Context, req ModuleAckRequest) ([]Module
 	if currentWxID != "" && req.WxID != "" && currentWxID != req.WxID {
 		return nil, fmt.Errorf("module wxid %q is not current device wxid", req.WxID)
 	}
+	if req.AccountSession != "" {
+		binding, _, bindErr := s.currentBinding(ctx, req.Device)
+		if bindErr != nil {
+			return nil, bindErr
+		}
+		req.InstanceID = binding.InstanceID
+		req.CredentialID, req.AuthVersion = binding.CredentialID, binding.AuthVersion
+	}
 	items, err := s.outbox.AckReplyActions(ctx, req)
 	if err != nil {
 		return nil, err
@@ -639,8 +657,14 @@ func (s *Service) ackOutbox(ctx context.Context, req ModuleAckRequest) ([]Module
 		acks[ack.ID] = ack
 	}
 	for _, item := range items {
+		if item.Kind == "file" {
+			s.notifyOutbox(req.Device)
+			// Native file observations own chat history. An ACK proves a task
+			// result, not the exact WeChat XML/type/timestamp of that message.
+			continue
+		}
 		ack := acks[item.ID]
-		if ack.Status != "sent" {
+		if ack.Status != "sent" || item.AckReplay {
 			continue
 		}
 		recordID := ack.ChatRecordID

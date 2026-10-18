@@ -1,7 +1,7 @@
 import type { OutboxStatusItem } from "./types";
 
 export function outboxResultUnconfirmed(item: Pick<OutboxStatusItem, "status" | "last_error">) {
-  return item.status === "failed" && !!item.last_error?.toLowerCase().includes("wechat message queued but delivery unconfirmed");
+  return item.status === "unknown" || (item.status === "failed" && !!item.last_error?.toLowerCase().includes("wechat message queued but delivery unconfirmed"));
 }
 
 export function outboxStatusLabel(status: string, lastError?: string) {
@@ -9,6 +9,7 @@ export function outboxStatusLabel(status: string, lastError?: string) {
   switch (status) {
     case "pending": return "等待微信领取";
     case "leased": return "已分派 · 待回执";
+    case "native_started": return "发送处理中 · 待确认";
     case "sent": return "微信已确认发送";
     case "failed": return "发送失败";
     case "cancelled": return "已取消";
@@ -17,7 +18,7 @@ export function outboxStatusLabel(status: string, lastError?: string) {
 }
 
 export function outboxIsActive(item: Pick<OutboxStatusItem, "status">) {
-  return item.status === "pending" || item.status === "leased";
+  return item.status === "pending" || item.status === "leased" || item.status === "native_started";
 }
 
 export function outboxWaitText(item: Pick<OutboxStatusItem, "status" | "created_at">, now: number) {

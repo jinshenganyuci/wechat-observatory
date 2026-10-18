@@ -52,6 +52,8 @@ export type OutboxStatusItem = {
   owner_wxid?: string;
   wxid: string;
   text: string;
+  kind?: "text" | "file";
+  attachment?: { id: string; name: string; size: number; sha256: string; expires_at?: string };
   status: string;
   attempt_count: number;
   last_error?: string;

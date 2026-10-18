@@ -14,11 +14,13 @@ type MemoryOutbox struct {
 	nextID int64
 	items  []memoryOutboxItem
 	now    func() time.Time
+	files  map[string]*memoryFile
 }
 
 type memoryOutboxItem struct {
 	ModuleOutboxItem
-	leaseUntil time.Time
+	leaseUntil                time.Time
+	fileInstance, fileSession string
 }
 
 func NewMemoryOutbox() *MemoryOutbox {
@@ -68,6 +70,17 @@ func (o *MemoryOutbox) PollReplyActions(_ context.Context, req ModulePollRequest
 		if o.items[i].Status != "pending" && !(o.items[i].Status == "leased" && o.items[i].leaseUntil.Before(now)) {
 			continue
 		}
+		if o.items[i].Kind == "file" {
+			if req.FileProtocol != 1 || req.InstanceID == "" || req.AccountSession == "" {
+				continue
+			}
+			expires, _ := time.Parse(time.RFC3339, o.items[i].Attachment.ExpiresAt)
+			if !expires.After(now) {
+				continue
+			}
+			o.items[i].LeaseToken = generateSessionToken()
+			o.items[i].fileInstance, o.items[i].fileSession = req.InstanceID, req.AccountSession
+		}
 		o.items[i].Status = "leased"
 		o.items[i].AttemptCount++
 		o.items[i].leaseUntil = now.Add(defaultOutboxLease)
@@ -88,6 +101,15 @@ func (o *MemoryOutbox) AckReplyActions(_ context.Context, req ModuleAckRequest) 
 	out := []ModuleOutboxItem{}
 	for i := range o.items {
 		ack, ok := acks[o.items[i].ID]
+		if ok && o.items[i].Kind == "file" {
+			if item, accepted := o.ackFile(&o.items[i], req, ack, now); accepted {
+				out = append(out, item)
+			}
+			continue
+		}
+		if ack.Status == "unknown" {
+			continue
+		}
 		if !ok || o.items[i].Device != req.Device || o.items[i].Status != "leased" {
 			continue
 		}

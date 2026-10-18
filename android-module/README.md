@@ -12,6 +12,14 @@ sync, media upload, and text send after upgrading WeChat.
 
 Version 0.1.21 keeps the 0.1.18 send flow and private configuration storage. Only read-only account queries gain a bounded wait; control-frame checks use the last validated binding, while business sends still validate the live account. It does not add a module background service, wake lock, power-event reconnect monitor or ACK retry coordinator.
 
+Version 0.1.23 adds ordinary file notifications through the existing outbox. A
+separate serial file worker downloads and verifies the attachment, persists an
+intent, obtains a one-time server handoff grant, and calls the verified WeChat
+8.0.79 native file sender. It leaves the WebSocket reader free to answer control
+frames. See [file API, duplicate prevention and cleanup](../docs/file-send.md).
+Private staging is a sibling directory `no_backup/observatory-outgoing`, not
+part of the configuration directory. Native WeChat attachment copies are kept.
+
 ## Hook Point
 
 The module scopes to `com.tencent.mm` and hooks:

@@ -35,6 +35,8 @@ FROM alpine:3.21
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
 	&& apk add --no-cache ca-certificates wget
 RUN adduser -D -H -u 10001 appuser
+RUN mkdir -p /data/files && chown -R appuser:appuser /data && chmod 700 /data/files
+ENV BRIDGE_FILE_SPOOL_DIR=/data/files
 COPY --from=build /out/wechat-observatory /usr/local/bin/wechat-observatory
 COPY --from=build /out/wechat-observatory-db /usr/local/bin/wechat-observatory-db
 

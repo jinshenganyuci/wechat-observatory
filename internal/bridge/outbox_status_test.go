@@ -2,10 +2,44 @@ package bridge
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestOutboxStatusByIDIsScopedAndNotListLimited(t *testing.T) {
+	o := NewMemoryOutbox()
+	for range 105 {
+		if _, err := o.EnqueueReply(t.Context(), ReplyAction{Device: "phone", OwnerWxID: "self", WxID: "friend", Text: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewHTTPServer(NewService(Config{}, WithOutbox(o)), "admin", WithDeviceAdminPassword("device-only")).Handler()
+	for _, tc := range []struct {
+		query, password string
+		want            int
+	}{
+		{"device=phone&owner_wxid=self", "admin", 200},
+		{"device=phone&owner_wxid=other", "admin", 404},
+		{"device=other&owner_wxid=self", "admin", 404},
+		{"device=phone", "admin", 400},
+		{"device=phone&owner_wxid=self", "", 401},
+		{"device=phone&owner_wxid=self", "device-only", 401},
+	} {
+		r := httptest.NewRequest("GET", fmt.Sprintf("/api/outbox/1?%s", tc.query), nil)
+		r.Header.Set("X-Bridge-Password", tc.password)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Fatal(tc, w.Code, w.Body.String())
+		}
+	}
+	item, found, err := o.OutboxStatusByID(t.Context(), 1, "phone", "self")
+	if err != nil || !found || item.AttemptCount != 0 || item.Status != "pending" {
+		t.Fatal(item, found, err)
+	}
+}
 
 func TestOutboxStatusReadOnlyAndScope(t *testing.T) {
 	o := NewMemoryOutbox()
