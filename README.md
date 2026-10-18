@@ -235,6 +235,7 @@ cd android-module
 - [部署指南](docs/deployment.md)
 - [Android 模块使用](docs/android-module.md)
 - [API 说明](docs/api.md)
+- [Hermes 私聊机器人与通知渠道](docs/hermes.md)
 - [架构说明](docs/architecture.md)
 - [模块协议](docs/module-contract.md)
 - [安全说明](docs/security.md)

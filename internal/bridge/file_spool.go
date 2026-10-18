@@ -21,7 +21,7 @@ var (
 	ErrFileQuota           = errors.New("file storage quota exceeded")
 	ErrFileUnavailable     = errors.New("file storage is unavailable")
 	ErrFileConflict        = errors.New("file task or lease is no longer valid")
-	ErrIdempotencyConflict = errors.New("idempotency key was already used for a different file request")
+	ErrIdempotencyConflict = errors.New("idempotency key was already used for a different request")
 	blobIDPattern          = regexp.MustCompile(`^[a-f0-9]{32}$`)
 )
 
