@@ -1163,10 +1163,17 @@ function App() {
                     <span className="text-xs text-muted-foreground">
                       {selectedModuleOffline ? "当前微信离线，请查看发送记录确认任务状态" : pendingCount > 0 ? `待发送 ${pendingCount} 条` : failedCount > 0 ? `失败 ${failedCount} 条` : "发送队列空闲"}
                     </span>
-                    <Button onClick={() => void submitSend()} disabled={sending || selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid || !draft.trim()}>
-                      <Send className="h-4 w-4" />
-                      {sending ? "提交中" : "加入队列"}
-                    </Button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button variant="outline" onClick={() => { setSendMode("file"); setSendOpen(true); }}
+                        disabled={sending || selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid}>
+                        <Paperclip className="h-4 w-4" />
+                        发送文件
+                      </Button>
+                      <Button onClick={() => void submitSend()} disabled={sending || selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid || !draft.trim()}>
+                        <Send className="h-4 w-4" />
+                        {sending ? "提交中" : "加入队列"}
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 <OutboxList items={outboxItems} filter={outboxFilter} onFilter={changeOutboxFilter}

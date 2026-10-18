@@ -31,9 +31,36 @@ async function setup(page: Page, handle: (route: Route, url: URL) => Promise<boo
 }
 
 async function openFiles(page: Page) {
-  await page.getByRole("button", { name: "发消息", exact: true }).click();
-  await page.getByRole("button", { name: "文件", exact: true }).click();
+  await page.locator(".message-composer").getByRole("button", { name: "发送文件", exact: true }).click();
 }
+
+test("composer file entry keeps the current chat and text draft and explains unsupported recipients", async ({ page }, testInfo) => {
+  let sends = 0;
+  await setup(page, async (route, url) => {
+    if (!url.pathname.endsWith("/send/file")) return false;
+    sends += 1;
+    await route.fulfill({ status: 500, json: {} });
+    return true;
+  });
+  const composer = page.locator(".message-composer");
+  await page.locator("#inline-send").fill("未提交的文本草稿");
+  await expect(composer.getByRole("button", { name: "发送文件", exact: true })).toBeVisible();
+  await composer.screenshot({ path: testInfo.outputPath("composer-file-entry.png") });
+  await openFiles(page);
+  await expect(page.getByLabel("发送对象", { exact: true })).toHaveValue("通知群");
+  await expect(page.getByLabel("选择文件", { exact: true })).toBeVisible();
+  await expect(page.locator("#send-text")).toHaveCount(0);
+  await page.getByRole("button", { name: "收起", exact: true }).click();
+  await expect(page.locator("#inline-send")).toHaveValue("未提交的文本草稿");
+
+  await page.getByRole("button", { name: /其他联系人/ }).click();
+  await openFiles(page);
+  await expect(page.getByLabel("发送对象", { exact: true })).toHaveValue("其他联系人");
+  await expect(page.getByRole("alert")).toHaveText("文件发送目前仅支持群聊和文件传输助手，请先选择相应会话。");
+  await expect(page.getByLabel("选择文件", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "加入队列", exact: true }).last()).toBeDisabled();
+  expect(sends).toBe(0);
+});
 
 test("one multipart upload creates a traceable file task, never an early sent claim", async ({ page }, testInfo) => {
   const requests: Route[] = [];
