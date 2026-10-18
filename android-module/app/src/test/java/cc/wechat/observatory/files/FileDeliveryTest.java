@@ -112,6 +112,20 @@ public class FileDeliveryTest {
         assertTrue(journal.source(pending).exists()); assertNull(record(2)); assertFalse(journal.source(prepared).exists());
         assertNotNull(record(1)); assertNotNull(record(3));
     }
+    @Test public void coldWorkerCanCleanSavedSourcesWithoutRegistrationOrNativeAdapter() throws Exception {
+        OutgoingFileJournal.Record prepared = journal.create(SCOPE, "installation", item(1, "lease")); stage(prepared);
+        OutgoingFileJournal.Record uncertain = journal.create(SCOPE, "installation", item(2, "lease2"));
+        stage(uncertain); journal.state(uncertain, "intent", ""); journal.state(uncertain, "unknown", "");
+        File configDirectory = new File(root, "observatory"); assertTrue(configDirectory.mkdir());
+        File unrelated = new File(configDirectory, "unrelated"); Files.write(unrelated.toPath(), CONTENT);
+        journal = openJournal(); // New process has no file worker, registration, or native adapter.
+        FileDeliveryWorker cold = worker(0); cold.clearSafeSources();
+        java.lang.reflect.Field executor = FileDeliveryWorker.class.getDeclaredField("worker"); executor.setAccessible(true);
+        ((ThreadPoolExecutor)executor.get(cold)).submit(() -> {}).get(3, TimeUnit.SECONDS);
+        assertFalse(journal.source(record(1)).exists()); assertTrue(journal.source(record(2)).exists());
+        assertArrayEquals(CONTENT, Files.readAllBytes(unrelated.toPath()));
+        assertEquals("unknown", journal.snapshot(record(2)).getString("state"));
+    }
     @Test public void verifiedCompletionCallsNativeOnceAndCleansOnlyOwnSource() throws Exception {
         Host host = new Host(item(1, "lease")); FileDeliveryWorker worker = worker(1000);
         File unrelated = new File(root, "unrelated"); Files.write(unrelated.toPath(), CONTENT);

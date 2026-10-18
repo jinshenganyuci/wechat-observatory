@@ -165,6 +165,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     static synchronized void acceptConfiguration(Properties settings) {
         CONFIG_REVISION++;
         Properties previous = BridgeConfig.readSettingsForEditor(null);
+        boolean hadConfiguration = !previous.isEmpty();
         boolean changedIdentity = !previous.getProperty("__installation_id", "").equals(
                 settings.getProperty("__installation_id", ""));
         previous.clear();
@@ -185,6 +186,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
             RUNTIME_ROLE = "网关未配置，已停用";
             LAST_OUTBOX_STAGE = "disabled";
             configurationChanged();
+            // Registration may never have succeeded in this process (e.g. gateway offline),
+            // but a prior process can still have left safe staging files to remove.
+            if (FILE_WORKER == null && hadConfiguration && APP_CONTEXT != null) {
+                try { FILE_WORKER = FileDeliveryWorker.get(APP_CONTEXT); }
+                catch (Exception failure) { log("file staging cleanup unavailable"); }
+            }
             if (FILE_WORKER != null) FILE_WORKER.clearSafeSources();
         }
         BridgeConfig config = BridgeConfig.load(APP_CONTEXT);
