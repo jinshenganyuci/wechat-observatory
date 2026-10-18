@@ -28,6 +28,11 @@ curl -H "X-Bridge-Password: your-admin-password" \
 
 也支持 `?password=...`，但不建议在生产环境使用 URL 参数传密码。
 
+`GET /api/modules/status` 保留原有 `modules` 数组，并返回
+`capabilities.text_idempotency` 布尔值，表示当前队列存储是否支持文本请求幂等。
+需要安全自动重试的客户端必须先确认该值为 `true`；字段缺失或为 `false` 时应拒绝发送，
+不能通过真实消息探测。旧后端可能忽略 `Idempotency-Key`，不能仅凭连接成功判断支持。
+
 ## API Key 管理
 
 列出：
@@ -116,6 +121,12 @@ curl -X POST \
 ```
 
 `owner_wxid` 必填。它用于防止浏览器停留在旧账号状态时，把消息发到切换后的微信账号里。
+
+机器人回复建议加 `Idempotency-Key` 请求头。带此头时，必须提供正数 `account_generation`（来自 `/api/modules/status`），且 `wx_ids` 只能有一个收件人。键为 8–128 个可见 ASCII 字符；同一 `device`、`owner_wxid` 与键下，账号代次、收件人和文本必须完全相同。收件人去首尾空白；文本保留原样，首尾空白也参与比较。
+
+成功返回 `{"ok":true,"outbox_id":123,"idempotent_replay":false}`；重复原请求返回同一 ID 和 `idempotent_replay:true`。内容不同返回 `409 idempotency_conflict`。首次响应丢失或返回 `503 send_unconfirmed` 时，只能用原键和原请求重试；即使手机离线、账号已换代或任务已失败/取消，也不会重新入队。去重记录会保留到发送历史清理之后，此时原任务详情可能已返回 404，但重试仍返回原 ID。新请求仍受当前账号、代次和在线检查约束。
+
+不带此头的旧接口行为不变，也不提供请求去重。200 只表示入队；用 `GET /api/outbox/{id}?device=...&owner_wxid=...` 查询结果。文本 `failed` 可能包含“已提交微信但结果未确认”，不能据此自动换键重发；`sent` 是手机报告的本地发送成功，不是收件人已读回执。请求幂等也不等于手机原生发送的跨进程严格一次保证。
 
 ## 发送文件
 

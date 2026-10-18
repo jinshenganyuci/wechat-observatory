@@ -104,6 +104,9 @@ func (s *Store) ApplyMigrations(ctx context.Context) error {
 	if err := s.ensureOutboxOwnerColumns(ctx); err != nil {
 		return err
 	}
+	if _, err := s.executor(ctx).ExecContext(ctx, textIdempotencyTable); err != nil {
+		return err
+	}
 	if err := s.ensureFileTables(ctx); err != nil {
 		return err
 	}

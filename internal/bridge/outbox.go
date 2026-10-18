@@ -10,11 +10,12 @@ import (
 const defaultOutboxLease = 60 * time.Second
 
 type MemoryOutbox struct {
-	mu     sync.Mutex
-	nextID int64
-	items  []memoryOutboxItem
-	now    func() time.Time
-	files  map[string]*memoryFile
+	mu              sync.Mutex
+	nextID          int64
+	items           []memoryOutboxItem
+	now             func() time.Time
+	files           map[string]*memoryFile
+	textIdempotency map[string]memoryTextIdempotency
 }
 
 type memoryOutboxItem struct {
@@ -30,6 +31,10 @@ func NewMemoryOutbox() *MemoryOutbox {
 func (o *MemoryOutbox) EnqueueReply(_ context.Context, action ReplyAction) (ModuleOutboxItem, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	return o.enqueueReplyLocked(action), nil
+}
+
+func (o *MemoryOutbox) enqueueReplyLocked(action ReplyAction) ModuleOutboxItem {
 	o.nextID++
 	now := o.now()
 	item := memoryOutboxItem{
@@ -45,7 +50,7 @@ func (o *MemoryOutbox) EnqueueReply(_ context.Context, action ReplyAction) (Modu
 		},
 	}
 	o.items = append(o.items, item)
-	return item.ModuleOutboxItem, nil
+	return item.ModuleOutboxItem
 }
 
 func (o *MemoryOutbox) PollReplyActions(_ context.Context, req ModulePollRequest) ([]ModuleOutboxItem, error) {

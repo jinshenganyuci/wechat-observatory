@@ -456,7 +456,11 @@ func (s *HTTPServer) moduleStatuses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "admin_read_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"modules": statuses})
+	_, textIdempotency := s.service.outbox.(TextIdempotencyStore)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"modules":      statuses,
+		"capabilities": map[string]bool{"text_idempotency": textIdempotency},
+	})
 }
 
 func (s *HTTPServer) moduleContacts(w http.ResponseWriter, r *http.Request) {
@@ -531,6 +535,32 @@ func (s *HTTPServer) sendText(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.OwnerWxID) == "" {
 		writeError(w, http.StatusBadRequest, "owner_wxid_required", "owner_wxid is required for admin sends")
+		return
+	}
+	if key, present := r.Header["Idempotency-Key"]; present {
+		if len(key) != 1 {
+			writeError(w, 400, "invalid_request", ErrInvalidTextIdempotency.Error())
+			return
+		}
+		id, replay, err := s.service.SendTextIdempotent(r.Context(), req, key[0])
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidTextIdempotency):
+				writeError(w, 400, "invalid_request", err.Error())
+			case errors.Is(err, ErrIdempotencyConflict):
+				writeError(w, 409, "idempotency_conflict", err.Error())
+			case errors.Is(err, ErrTextIdempotencyUnavailable):
+				writeError(w, 503, "idempotency_unavailable", err.Error())
+			case errors.Is(err, ErrAccountSession), errors.Is(err, ErrModuleOffline):
+				writeError(w, moduleErrorStatus(err), "send_failed", err.Error())
+			default:
+				// A commit response may be lost after a durable insert. Do not
+				// present storage uncertainty as invalid input or expose SQL.
+				writeError(w, 503, "send_unconfirmed", "could not confirm durable text enqueue; retry only with the same key and request")
+			}
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "outbox_id": id, "idempotent_replay": replay})
 		return
 	}
 	outboxID, err := s.service.SendText(r.Context(), req)
