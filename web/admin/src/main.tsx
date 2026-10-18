@@ -1,5 +1,6 @@
 import { AccountScope, belongsToAccount } from "./accountScope";
 import { useAdminConnection, type AdminSession } from "./useAdminConnection";
+import { clearFileRequest, fileDraftMatchesScope, fileTargetSupported, fileValidationError, formatFileSize, newFileRequestKey, persistFileRequest, restoreFileRequest, type FileSendDraft } from "./fileSend";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { formatBeijingClock, formatBeijingDateTime, formatBeijingTimeAgo } from "@/time";
@@ -34,6 +35,7 @@ import {
 } from "lucide-react";
 import {
   createApiKey,
+  ApiError,
   deleteApiKey,
   getContacts,
   getApiKeys,
@@ -42,6 +44,7 @@ import {
   publicPath,
   setApiKeyEnabled,
   sendText,
+  sendFile,
   switchModuleInstallation,
   updateDevice
 } from "@/api";
@@ -99,6 +102,9 @@ function App() {
   const [contactFilter, setContactFilter] = React.useState<ContactFilter>("all");
   const [autoRefresh, setAutoRefresh] = React.useState(true);
   const [sendOpen, setSendOpen] = React.useState(false);
+  const [sendMode, setSendMode] = React.useState<"text" | "file">("text");
+  const [fileDraft, setFileDraft] = React.useState<FileSendDraft | null>(() => restoreFileRequest());
+  const [fileError, setFileError] = React.useState("");
   const [draft, setDraft] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const sendInFlight = React.useRef(false);
@@ -151,6 +157,7 @@ function App() {
       setModules([]); setApiKeys([]); setContacts([]); setMessages([]); setRecentMessages([]);
       setSelectedDevice(""); setSelectedWxid(""); setOutboxItems([]); setDraft("");
       setNewApiKey(""); setSendOpen(false); setSending(false); setSavingAdmin(false);
+      setFileDraft(restoreFileRequest()); setFileError(""); setSendMode("text");
       setInstallationNotice(null); setSwitchingInstallation(null);
       setNotice("输入管理密码，进入你的微信工作台");
     }
@@ -163,6 +170,9 @@ function App() {
   const selectedOwnerWxid = moduleOwnerWxid(selectedModule);
   const selectedGeneration = selectedModule?.account_generation ?? 0;
   const selectedScopeKey = `${selectedDevice}:${selectedOwnerWxid}:${selectedGeneration}`;
+  const fileScope = { device: selectedDevice, ownerWxid: selectedOwnerWxid, generation: selectedGeneration, wxid: selectedWxid };
+  const fileScopeMatches = !!fileDraft && fileDraftMatchesScope(fileDraft, fileScope);
+  const fileTargetAllowed = fileTargetSupported(selectedWxid);
   const accountScope = React.useRef(new AccountScope());
   const deviceRef = React.useRef(selectedDevice);
   deviceRef.current = selectedDevice;
@@ -623,6 +633,72 @@ function App() {
     }
   };
 
+  const selectFile = (file: File | undefined) => {
+    if (!file || fileDraft?.file || !fileTargetAllowed) return;
+    const error = fileValidationError(file);
+    setFileError(error);
+    if (error) return;
+    if (fileDraft) {
+      if (file.name !== fileDraft.name || file.size !== fileDraft.size) {
+        setFileError("请重新选择原文件，文件名和大小必须一致；服务端还会核对文件内容。");
+        return;
+      }
+      setFileDraft({ ...fileDraft, file });
+    } else setFileDraft({ file, name: file.name, size: file.size, key: newFileRequestKey(), scope: fileScope, stage: "ready", message: "" });
+  };
+
+  const discardFile = () => {
+    if (!fileDraft || fileDraft.stage === "submitting") return;
+    if (fileDraft.stage === "unknown" && !window.confirm("原请求结果未确认。重新选择文件会使用新请求，可能重复发送；请先查看发送记录或微信聊天。仍要放弃原请求吗？")) return;
+    clearFileRequest(); setFileDraft(null); setFileError("");
+  };
+
+  const submitFile = async () => {
+    const session = currentSession();
+    if (!session || !fileDraft?.file || !fileScopeMatches || !fileTargetAllowed || selectedModuleOffline || sendInFlight.current) return;
+    const ticket = accountScope.current.begin("send", selectedDevice, selectedOwnerWxid, selectedWxid);
+    if (!ticket) return;
+    const submission = fileDraft;
+    const file = fileDraft.file;
+    try { persistFileRequest(submission); }
+    catch { setFileError("无法保存重试标识，请允许此页面使用浏览器存储后重试。"); return; }
+    sendInFlight.current = true;
+    setSending(true);
+    setFileDraft({ ...submission, stage: "submitting", message: "正在上传文件并创建任务，请勿重复提交。" });
+    const updateDraft = (stage: FileSendDraft["stage"], message: string) => setFileDraft(current =>
+      current?.key === submission.key ? { ...current, stage, message } : current);
+    try {
+      const result = await sendFile({ password: session.password, device: submission.scope.device,
+        ownerWxid: submission.scope.ownerWxid, accountGeneration: submission.scope.generation,
+        wxid: submission.scope.wxid, file, idempotencyKey: submission.key });
+      if (!result.ok || !result.outbox_id) throw new Error("未收到有效任务编号");
+      // Settle only this draft. A late response must not close another chat's editor.
+      clearFileRequest(sessionStorage, submission.key);
+      setFileDraft(current => current?.key === submission.key ? null : current);
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) return;
+      setSendOpen(false);
+      accountScope.current.invalidate("outbox");
+      setSubmittedOutboxId(result.outbox_id); setOutboxFilter("all");
+      setNotice(result.idempotent_replay
+        ? `文件任务 #${result.outbox_id} 已存在，未创建新发送；请查看发送记录`
+        : `文件任务 #${result.outbox_id} 已创建，等待微信处理；结果见发送记录`);
+      void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
+    } catch (error) {
+      const definiteRejection = submission.stage !== "unknown"
+        && error instanceof ApiError && error.status >= 400 && error.status < 500;
+      const message = definiteRejection ? parseApiError(error, "文件请求被拒绝").message
+        : "提交结果未确认。文件和原请求标识已保留，可使用原请求重试；请勿另建任务。";
+      if (session.isCurrent()) updateDraft(definiteRejection ? "rejected" : "unknown", message);
+      if (!session.isCurrent() || !accountScope.current.matches(ticket)) return;
+      handleError(error, session);
+      setNotice(message);
+      void refreshOutbox();
+    } finally {
+      sendInFlight.current = false;
+      if (session.isCurrent() && accountScope.current.matches(ticket)) setSending(false);
+    }
+  };
+
   const submitApiKey = async () => {
     const session = currentSession();
     if (!session) return;
@@ -790,7 +866,7 @@ function App() {
             <span className="min-w-0 flex-1"><strong>{item.device_nickname || item.device}</strong><small>{item.installations?.find(phone => phone.active)?.wechat_nickname || item.device}</small></span>
           </button>) : <p className="px-3 text-xs leading-6 text-muted-foreground">手机接入后会显示在这里</p>}
         </div>
-        <div className="sidebar-footer"><Button variant="ghost" size="sm" onClick={() => { setPassword(""); connection.logout(); }}><LogOut className="h-4 w-4" />退出登录</Button><Button variant="ghost" size="icon" aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}>
+        <div className="sidebar-footer"><Button variant="ghost" size="sm" onClick={() => { setPassword(""); clearFileRequest(); connection.logout(); }}><LogOut className="h-4 w-4" />退出登录</Button><Button variant="ghost" size="icon" aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}>
           {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </Button></div>
       </aside>
@@ -1314,7 +1390,7 @@ function App() {
       </div>
 
       <Dialog open={sendOpen} onOpenChange={setSendOpen}>
-        <DialogContent onClose={() => setSendOpen(false)}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onClose={() => setSendOpen(false)}>
           <DialogHeader>
             <DialogTitle>发送微信消息</DialogTitle>
             <DialogDescription>{selectedChatTitle(selectedWxid, selectedContact)}</DialogDescription>
@@ -1324,7 +1400,11 @@ function App() {
               <Label htmlFor="send-target">发送对象</Label>
               <Input id="send-target" value={selectedChatTitle(selectedWxid, selectedContact)} readOnly />
             </div>
-            <div className="grid gap-2">
+            <TabsList aria-label="发送类型">
+              <TabsTrigger active={sendMode === "text"} onClick={() => setSendMode("text")}>文本</TabsTrigger>
+              <TabsTrigger active={sendMode === "file"} onClick={() => setSendMode("file")}>文件</TabsTrigger>
+            </TabsList>
+            {sendMode === "text" ? <div className="grid gap-2">
               <Label htmlFor="send-text">消息内容</Label>
               <Textarea
                 id="send-text"
@@ -1334,15 +1414,33 @@ function App() {
                 autoFocus
                 disabled={selectedModuleOffline || sending}
               />
-            </div>
+            </div> : <div className="grid min-w-0 gap-2">
+              {!fileTargetAllowed ? <p role="alert" className="text-xs leading-5">文件发送目前仅支持群聊和文件传输助手，请先选择相应会话。</p> : null}
+              {!fileDraft?.file && fileTargetAllowed ? <>
+                <Label htmlFor="send-file">选择文件</Label>
+                <Input id="send-file" type="file" disabled={sending || selectedModuleOffline}
+                  onChange={event => { selectFile(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
+              </> : null}
+              {fileDraft ? <div className="grid min-w-0 gap-2 rounded-md border p-3">
+                <p className="break-all text-sm" data-testid="file-draft-name">{fileDraft.name}</p>
+                <p className="text-xs text-muted-foreground">{formatFileSize(fileDraft.size)}</p>
+                {fileDraft.message ? <p role={fileDraft.stage === "submitting" ? "status" : "alert"} className="text-xs leading-5">{fileDraft.message}</p> : null}
+                {!fileScopeMatches ? <p role="alert" className="text-xs text-destructive">该文件请求属于原账号和会话，不能发送到当前会话。请切回原会话核查发送记录。</p> : null}
+                <Button type="button" size="sm" variant="outline" disabled={fileDraft.stage === "submitting"} onClick={discardFile}>取消选择</Button>
+              </div> : null}
+              {fileError ? <p role="alert" className="text-xs text-destructive">{fileError}</p> : null}
+              <p className="text-xs leading-5 text-muted-foreground">单个普通文件，最多 300 MiB；暂不支持图片和视频。提交后在发送记录查看结果。</p>
+              <p className="text-xs leading-5 text-muted-foreground">临时传输文件会自动清理；微信聊天中的原生附件会保留，请在微信内管理。</p>
+            </div>}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setSendOpen(false)}>
-              取消
+              {sendMode === "file" ? "收起" : "取消"}
             </Button>
-            <Button type="button" onClick={() => void submitSend()} disabled={sending || selectedModuleOffline || !draft.trim()}>
+            <Button type="button" onClick={() => void (sendMode === "file" ? submitFile() : submitSend())}
+              disabled={sending || selectedModuleOffline || (sendMode === "file" ? !fileTargetAllowed || !fileDraft?.file || !fileScopeMatches || fileDraft.stage === "submitting" : !draft.trim())}>
               <Send className="h-4 w-4" />
-              {sending ? "提交中" : "加入队列"}
+              {sending ? "提交中" : sendMode === "file" && fileDraft && fileDraft.stage !== "ready" ? "使用原请求重试" : "加入队列"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -104,6 +104,9 @@ func (s *Store) ApplyMigrations(ctx context.Context) error {
 	if err := s.ensureOutboxOwnerColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureFileTables(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureModuleContactOwnerKey(ctx); err != nil {
 		return err
 	}
@@ -1195,6 +1198,8 @@ func (s *Store) PollReplyActions(ctx context.Context, req bridge.ModulePollReque
 		FROM bridge_module_outbox
 		WHERE device = ?
 			AND owner_wxid = ?
+			AND (kind='text' OR (?=1 AND ?<>'' AND ?<>'' AND EXISTS(SELECT 1 FROM bridge_file_attachments a
+				WHERE a.id=attachment_id AND a.bytes_removed=FALSE AND a.expires_at>CURRENT_TIMESTAMP(6))))
 			AND (
 				status = 'pending'
 				OR (status = 'leased' AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP))
@@ -1203,6 +1208,7 @@ func (s *Store) PollReplyActions(ctx context.Context, req bridge.ModulePollReque
 		LIMIT ? FOR UPDATE`,
 		strings.TrimSpace(req.Device),
 		strings.TrimSpace(req.WxID),
+		req.FileProtocol, req.InstanceID, req.AccountSession,
 		limit,
 	)
 	if err != nil {
@@ -1224,7 +1230,11 @@ func (s *Store) PollReplyActions(ctx context.Context, req bridge.ModulePollReque
 		return nil, err
 	}
 	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, leaseOutboxItemStatement, id); err != nil {
+		token, err := fileLeaseToken()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, leaseOutboxItemStatement, token, req.InstanceID, req.AccountSession, id); err != nil {
 			return nil, err
 		}
 	}
@@ -1240,18 +1250,40 @@ func (s *Store) PollReplyActions(ctx context.Context, req bridge.ModulePollReque
 const leaseOutboxItemStatement = `
 	UPDATE bridge_module_outbox
 	SET status = 'leased', attempt_count = attempt_count + 1,
-		lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 60 SECOND)
+		lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 60 SECOND),
+		file_lease_token=IF(kind='file',?,NULL), file_instance_id=IF(kind='file',?,NULL),
+		file_account_session=IF(kind='file',?,NULL)
 	WHERE id = ?`
 
 const ackOutboxItemStatement = `
 	UPDATE bridge_module_outbox
 	SET status = ?, last_error = ?, chat_record_id = COALESCE(?, chat_record_id), lease_until = NULL
 	WHERE id = ? AND device = ? AND (? = '' OR owner_wxid = ?)
-		AND status = 'leased'`
+		AND status = 'leased' AND kind='text'`
 
 func (s *Store) AckReplyActions(ctx context.Context, req bridge.ModuleAckRequest) ([]bridge.ModuleOutboxItem, error) {
 	ids := make([]int64, 0, len(req.Items))
+	replays := map[int64]bool{}
 	for _, item := range req.Items {
+		var kind string
+		kindErr := s.executor(ctx).QueryRowContext(ctx, `SELECT kind FROM bridge_module_outbox WHERE id=? AND device=?`, item.ID, req.Device).Scan(&kind)
+		if kindErr != nil && !errors.Is(kindErr, sql.ErrNoRows) {
+			return nil, kindErr
+		}
+		if kind == "file" {
+			accepted, replay, err := s.ackFile(ctx, req, item)
+			if err != nil {
+				return nil, err
+			}
+			if accepted {
+				ids = append(ids, item.ID)
+				replays[item.ID] = replay
+			}
+			continue
+		}
+		if item.Status == "unknown" {
+			continue
+		}
 		result, err := s.executor(ctx).ExecContext(ctx, ackOutboxItemStatement,
 			item.Status,
 			nullString(item.Error),
@@ -1275,7 +1307,11 @@ func (s *Store) AckReplyActions(ctx context.Context, req bridge.ModuleAckRequest
 	if len(ids) == 0 {
 		return []bridge.ModuleOutboxItem{}, nil
 	}
-	return s.listOutboxItemsForDevice(ctx, ids, req.Device)
+	items, err := s.listOutboxItemsForDevice(ctx, ids, req.Device)
+	for i := range items {
+		items[i].AckReplay = replays[items[i].ID]
+	}
+	return items, err
 }
 
 func (s *Store) findOutboxItem(ctx context.Context, id int64) (bridge.ModuleOutboxItem, error) {
@@ -1296,7 +1332,15 @@ func (s *Store) findOutboxItem(ctx context.Context, id int64) (bridge.ModuleOutb
 	if err != nil {
 		return bridge.ModuleOutboxItem{}, err
 	}
-	return item, rows.Err()
+	if err = rows.Err(); err != nil {
+		return item, err
+	}
+	if err = rows.Close(); err != nil {
+		return item, err
+	}
+	items := []bridge.ModuleOutboxItem{item}
+	err = s.addFileMetadata(ctx, items)
+	return items[0], err
 }
 
 func (s *Store) listOutboxItems(ctx context.Context, ids []int64) ([]bridge.ModuleOutboxItem, error) {
@@ -1337,7 +1381,16 @@ func (s *Store) listOutboxItemsForDevice(ctx context.Context, ids []int64, devic
 		}
 		out = append(out, item)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	if err = s.addFileMetadata(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 const recordMessageEventStatement = `

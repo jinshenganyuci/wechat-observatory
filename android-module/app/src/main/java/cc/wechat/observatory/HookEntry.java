@@ -54,6 +54,11 @@ import javax.net.ssl.SSLSocketFactory;
 
 import cc.wechat.observatory.config.BridgeConfig;
 import cc.wechat.observatory.config.ConfigOperationGuard;
+import cc.wechat.observatory.files.FileDeliveryWorker;
+import cc.wechat.observatory.files.FileJob;
+import cc.wechat.observatory.files.FileResponseInputStream;
+import cc.wechat.observatory.files.OutgoingFileJournal;
+import cc.wechat.observatory.files.WeChat8079FileAdapter;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
 import cc.wechat.observatory.gateway.OutboxReconnectPolicy;
@@ -142,6 +147,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile long LAST_CONFIG_LOAD_ATTEMPT;
     private static volatile boolean MODULE_REMOVED;
     private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
+    private static volatile WeChat8079FileAdapter FILE_ADAPTER;
+    private static volatile FileDeliveryWorker FILE_WORKER;
 
     public static String runtimeStatusText() {
         return RUNTIME_ROLE + "\n通道：" + LAST_OUTBOX_STAGE
@@ -158,6 +165,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     static synchronized void acceptConfiguration(Properties settings) {
         CONFIG_REVISION++;
         Properties previous = BridgeConfig.readSettingsForEditor(null);
+        boolean hadConfiguration = !previous.isEmpty();
         boolean changedIdentity = !previous.getProperty("__installation_id", "").equals(
                 settings.getProperty("__installation_id", ""));
         previous.clear();
@@ -178,6 +186,13 @@ public final class HookEntry implements IXposedHookLoadPackage {
             RUNTIME_ROLE = "网关未配置，已停用";
             LAST_OUTBOX_STAGE = "disabled";
             configurationChanged();
+            // Registration may never have succeeded in this process (e.g. gateway offline),
+            // but a prior process can still have left safe staging files to remove.
+            if (FILE_WORKER == null && hadConfiguration && APP_CONTEXT != null) {
+                try { FILE_WORKER = FileDeliveryWorker.get(APP_CONTEXT); }
+                catch (Exception failure) { log("file staging cleanup unavailable"); }
+            }
+            if (FILE_WORKER != null) FILE_WORKER.clearSafeSources();
         }
         BridgeConfig config = BridgeConfig.load(APP_CONTEXT);
         RealtimeProtectionClient.update(APP_CONTEXT, !MODULE_REMOVED && config.enabled
@@ -648,6 +663,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                         continue;
                     }
                     stage = "contacts";
+                    if (fileDeliverySupported(classLoader)) FILE_WORKER.recover(fileHost(config, classLoader));
                     syncContactsIfDue(config);
                     stage = "poll";
                     pollMessagesIfDue(config);
@@ -2512,12 +2528,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static boolean pollOutbox(BridgeConfig config, ClassLoader classLoader) throws Exception {
         final AccountSession requestSession = config.runtimeAccount.session;
+        final boolean acceptFile = fileDeliverySupported(classLoader) && !FILE_WORKER.isBusy();
         String body = "{"
                 + "\"api_key\":\"" + json(config.apiKey) + "\","
                 + "\"device\":\"" + json(config.device) + "\","
                 + "\"wxid\":\"" + json(config.selfWxid) + "\","
                 + "\"account_session\":\"" + json(requestSession.id) + "\","
-                + "\"limit\":" + config.pollLimit
+                + "\"file_protocol\":" + (acceptFile ? 1 : 0) + ","
+                + "\"limit\":" + (acceptFile ? 1 : config.pollLimit)
                 + "}";
         long started = System.currentTimeMillis();
         String response = postJson(config, "/module/outbox/poll", body);
@@ -2544,6 +2562,143 @@ public final class HookEntry implements IXposedHookLoadPackage {
         String ackResponse = postJson(config, "/module/outbox/ack", ackBody.toString());
         logSlowOutboxStage("ack", ackItems.getJSONObject(0).optLong("id", 0), started);
         return ackConfirmed(ackResponse);
+    }
+
+    private static synchronized boolean fileDeliverySupported(ClassLoader loader) {
+        try {
+            if (!currentWeChatVersionProfile().is8079()) return false;
+            if (FILE_WORKER == null) FILE_WORKER = FileDeliveryWorker.get(bridgeContext());
+            if (FILE_ADAPTER == null) FILE_ADAPTER = new WeChat8079FileAdapter(loader);
+            return true;
+        } catch (Throwable unsupported) { return false; }
+    }
+
+    private static FileDeliveryWorker.Host fileHost(final BridgeConfig config, final ClassLoader loader) throws Exception {
+        final RuntimeAccount account = config.runtimeAccount;
+        final AccountSession session = account.session;
+        final String scope = OutgoingFileJournal.scope(config.baseUrl, config.apiKey, session.instanceId, account.wxid);
+        return new FileDeliveryWorker.Host() {
+            @Override public String scope() { return scope; }
+            @Override public String installation() { return session.instanceId; }
+            @Override public void validateCached() {
+                if (!currentStreamAllows(config, session) || CURRENT_ACCOUNT != account || ROLE.isStandby())
+                    throw new IllegalStateException("File delivery account or configuration changed");
+            }
+            @Override public void validate() throws Exception {
+                validateCached();
+                if (!isCurrentAccount(account) || !currentWeChatVersionProfile().is8079())
+                    throw new IllegalStateException("File delivery identity unavailable");
+            }
+            private JSONObject body(FileJob job) throws Exception {
+                validateCached();
+                if (!config.selfWxid.equals(job.owner) || !config.device.equals(job.device))
+                    throw new IllegalStateException("File delivery owner mismatch");
+                return new JSONObject().put("api_key", config.apiKey).put("device", config.device)
+                        .put("wxid", config.selfWxid).put("account_session", session.id)
+                        .put("id", job.id).put("lease_token", job.token).put("sha256", job.sha256);
+            }
+            @Override public JSONObject request(String action, FileJob job) throws Exception {
+                if (!java.util.Arrays.asList("renew", "begin", "status", "abandon").contains(action))
+                    throw new IllegalArgumentException("Invalid file action");
+                try (FileHttpResponse response = openFileRequest(config, "/module/outbox/file/" + action, body(job))) {
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[4096]; int count;
+                    while ((count = response.input.read(buffer)) != -1) {
+                        if (bytes.size() + count > 65536) throw new IOException("Oversized file response");
+                        bytes.write(buffer, 0, count);
+                    }
+                    String value = response.chunked ? decodeChunkedBody(bytes.toByteArray())
+                            : new String(bytes.toByteArray(), StandardCharsets.UTF_8);
+                    validateCached();
+                    return new JSONObject(value);
+                }
+            }
+            @Override public FileDeliveryWorker.Download download(FileJob job) throws Exception {
+                final FileHttpResponse response = openFileRequest(config, "/module/outbox/file/download", body(job));
+                if (response.chunked || response.length != job.size) {
+                    response.close(); throw new IOException("Unexpected attachment response length");
+                }
+                return new FileDeliveryWorker.Download() {
+                    @Override public InputStream input() { return response.input; }
+                    @Override public void close() throws Exception { response.close(); }
+                };
+            }
+            @Override public void submit(FileJob job, File source, WeChat8079FileAdapter.Observer observer) throws Exception {
+                // Unlike the text sender, the file has a durable one-shot intent before this
+                // bounded call. A timeout is UNKNOWN, never permission to invoke it again.
+                Handler main = new Handler(Looper.getMainLooper());
+                FutureTask<Void> task = new FutureTask<>(() -> {
+                    validate();
+                    if (!isWeChatReadyForSend(loader)) throw new IllegalStateException("WeChat send stack unavailable");
+                    FILE_ADAPTER.submit(job, source, observer);
+                    return null;
+                });
+                if (!main.post(task)) throw new IOException("Main thread rejected file handoff");
+                try { task.get(5000, java.util.concurrent.TimeUnit.MILLISECONDS); }
+                catch (java.util.concurrent.TimeoutException timeout) {
+                    main.removeCallbacks(task); task.cancel(false); throw timeout;
+                } catch (InterruptedException interrupted) {
+                    main.removeCallbacks(task); task.cancel(false);
+                    Thread.currentThread().interrupt(); throw interrupted;
+                }
+            }
+            @Override public WeChat8079FileAdapter.Proof inspect(FileJob job, long messageId) throws Exception {
+                validateCached();
+                WeChat8079FileAdapter.Proof proof = FILE_ADAPTER.inspect(job, messageId);
+                validateCached();
+                return proof;
+            }
+            @Override public boolean acknowledge(FileJob job, String status, long messageId, String error) throws Exception {
+                validate();
+                JSONObject ack = new JSONObject().put("id", job.id).put("status", status)
+                        .put("lease_token", job.token).put("error", error);
+                if (messageId > 0) ack.put("chat_record_id", messageId);
+                JSONObject request = body(job).put("items", new JSONArray().put(ack));
+                JSONObject response = new JSONObject(postJson(config, "/module/outbox/ack", request.toString()));
+                JSONArray items = response.optJSONArray("items");
+                for (int i = 0; items != null && i < items.length(); i++) {
+                    JSONObject item = items.getJSONObject(i);
+                    if (item.optLong("id") == job.id && status.equals(item.optString("status"))) return true;
+                }
+                return false;
+            }
+        };
+    }
+
+    /** Fixed authenticated routes only, no redirects; uses the gateway's existing TLS verification. */
+    private static FileHttpResponse openFileRequest(BridgeConfig config, String route, JSONObject request) throws Exception {
+        requireCurrentConfiguration(config);
+        GatewayEndpoint endpoint = GatewayEndpoint.parse(config.baseUrl);
+        Socket socket = openGatewaySocket(endpoint.host(), endpoint.port(), endpoint.isTls());
+        try {
+            socket.setSoTimeout(10000);
+            byte[] body = request.toString().getBytes(StandardCharsets.UTF_8);
+            String headers = "POST " + endpoint.requestPath(route) + " HTTP/1.1\r\nHost: " + endpoint.hostHeader()
+                    + "\r\nContent-Type: application/json\r\nContent-Length: " + body.length
+                    + "\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+            OutputStream output = socket.getOutputStream();
+            requireCurrentConfiguration(config);
+            output.write(headers.getBytes(StandardCharsets.ISO_8859_1)); output.write(body); output.flush();
+            InputStream input = socket.getInputStream();
+            String[] lines = readHttpHeaders(input).split("\r\n");
+            if (lines.length == 0 || !lines[0].matches("HTTP/1\\.[01] 200(?: .*|)"))
+                throw new IOException("File gateway request was not accepted");
+            long length = -1; boolean chunked = false;
+            for (String line : lines) {
+                String lower = line.toLowerCase(Locale.ROOT);
+                if (lower.startsWith("content-length:")) length = Long.parseLong(line.substring(15).trim());
+                if (lower.startsWith("transfer-encoding:")) chunked = lower.contains("chunked");
+            }
+            return new FileHttpResponse(socket, input, length, chunked);
+        } catch (Throwable failure) { try { socket.close(); } catch (IOException ignored) { } throw failure; }
+    }
+    private static final class FileHttpResponse implements AutoCloseable {
+        final Socket socket; final InputStream input; final long length; final boolean chunked;
+        FileHttpResponse(Socket socket, InputStream input, long length, boolean chunked) {
+            this.socket = socket; this.input = !chunked && length >= 0 ? new FileResponseInputStream(input, length) : input;
+            this.length = length; this.chunked = chunked;
+        }
+        @Override public void close() throws IOException { socket.close(); }
     }
 
     private static boolean ackConfirmed(String response) {
@@ -2603,7 +2758,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 + "?api_key=" + urlEncode(config.apiKey)
                 + "&device=" + urlEncode(config.device)
                 + "&wxid=" + urlEncode(config.selfWxid)
-                + "&account_session=" + urlEncode(streamSession.id);
+                + "&account_session=" + urlEncode(streamSession.id)
+                + "&file_protocol=" + (fileDeliverySupported(classLoader) ? "1" : "0");
         byte[] nonce = new byte[16];
         new SecureRandom().nextBytes(nonce);
         String key = Base64.encodeToString(nonce, Base64.NO_WRAP);
@@ -2721,6 +2877,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
+            if ("file".equals(item.optString("kind"))) {
+                if (fileDeliverySupported(classLoader)) {
+                    try { FILE_WORKER.enqueue(item, fileHost(config, classLoader)); }
+                    catch (Exception rejected) { log("file outbox id=" + item.optLong("id") + " stage=rejected"); }
+                }
+                // File download/native observation/HTTP ACK runs on the independent serial worker.
+                continue;
+            }
             long id = item.optLong("id", 0);
             String wxid = item.optString("wxid", "");
             String text = item.optString("text", "");
@@ -2900,8 +3064,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
         for (int i = 0; i < payload.length; i++) {
             frame.write(payload[i] ^ mask[i % 4]);
         }
-        output.write(frame.toByteArray());
-        output.flush();
+        synchronized (output) {
+            output.write(frame.toByteArray());
+            output.flush();
+        }
     }
 
     private static Socket openGatewaySocket(String host, int port, boolean tls) throws Exception {

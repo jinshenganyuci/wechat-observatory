@@ -84,6 +84,8 @@ services:
       BRIDGE_API_KEYS: "${BRIDGE_API_KEYS:-}"
       BRIDGE_MYSQL_DSN: "${OBS_DB_USER:?set OBS_DB_USER}:${OBS_DB_PASSWORD:?set OBS_DB_PASSWORD}@tcp(mysql:3306)/${OBS_DB_NAME:-wechat_observatory}?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai&time_zone=%27%2B08%3A00%27"
       BRIDGE_MYSQL_AUTO_MIGRATE: "false"
+      BRIDGE_FILE_SPOOL_DIR: /data/files
+      BRIDGE_FILE_SPOOL_MAX_BYTES: "${BRIDGE_FILE_SPOOL_MAX_BYTES:-536870912}"
       BRIDGE_OUTBOX_POLL_INTERVAL: "${BRIDGE_OUTBOX_POLL_INTERVAL:-3s}"
       BRIDGE_HISTORY_RETENTION_DAYS: "${BRIDGE_HISTORY_RETENTION_DAYS:-15}"
       BRIDGE_HISTORY_RETENTION_INTERVAL: "${BRIDGE_HISTORY_RETENTION_INTERVAL:-1h}"
@@ -94,6 +96,8 @@ services:
     ports:
       # Caddy reaches Observatory over the runtime network.
       - "127.0.0.1:${BRIDGE_HTTP_PORT:-8088}:8088"
+    volumes:
+      - observatory-files:/data/files
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8088/healthz"]
       interval: 20s
@@ -182,4 +186,5 @@ services:
       start_period: 10s
 
 volumes:
+  observatory-files:
   mysql-data:

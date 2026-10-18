@@ -197,6 +197,30 @@ export async function sendText(params: {
   });
 }
 
+/** The browser owns the multipart boundary; callers retain the key across uncertain replies. */
+export async function sendFile(params: {
+  password: string; device: string; ownerWxid: string; accountGeneration: number;
+  wxid: string; file: File; idempotencyKey: string;
+}) {
+  const body = new FormData();
+  body.set("device", params.device);
+  body.set("owner_wxid", params.ownerWxid);
+  body.set("account_generation", String(params.accountGeneration));
+  body.set("wxid", params.wxid);
+  body.set("file", params.file, params.file.name);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 20 * 60 * 1000);
+  try {
+    const response = await fetch(publicPath("/api/send/file"), {
+      method: "POST", body, signal: controller.signal,
+      headers: { "X-Bridge-Password": params.password, "Idempotency-Key": params.idempotencyKey }
+    });
+    const text = await response.text();
+    if (!response.ok) throw new ApiError(response.status, text || `HTTP ${response.status}`);
+    return JSON.parse(text) as { ok: boolean; outbox_id?: number; idempotent_replay?: boolean };
+  } finally { window.clearTimeout(timeout); }
+}
+
 export async function getOutbox(params: {
   password: string; device: string; ownerWxid: string; wxid?: string; status: OutboxFilter;
 }) {

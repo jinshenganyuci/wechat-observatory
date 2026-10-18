@@ -53,6 +53,46 @@ type OutboxStatusReader interface {
 	ListOutboxStatuses(context.Context, OutboxStatusFilter) ([]OutboxStatusItem, error)
 }
 
+type OutboxStatusByIDReader interface {
+	OutboxStatusByID(context.Context, int64, string, string) (OutboxStatusItem, bool, error)
+}
+
+func (s *HTTPServer) outboxStatusByID(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	device, owner := strings.TrimSpace(r.URL.Query().Get("device")), strings.TrimSpace(r.URL.Query().Get("owner_wxid"))
+	if err != nil || id <= 0 || device == "" || owner == "" {
+		writeError(w, 400, "invalid_request", "id, device and owner_wxid are required")
+		return
+	}
+	reader, ok := s.service.outbox.(OutboxStatusByIDReader)
+	if !ok {
+		writeError(w, 503, "outbox_read_unavailable", "outbox reader unavailable")
+		return
+	}
+	item, found, err := reader.OutboxStatusByID(r.Context(), id, device, owner)
+	if err != nil {
+		writeError(w, 500, "outbox_read_failed", "could not read message delivery status")
+		return
+	}
+	if !found {
+		writeError(w, 404, "outbox_not_found", "outbox item not found")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, map[string]any{"item": item, "server_time": s.service.now().UTC().Format(time.RFC3339Nano)})
+}
+
+func (o *MemoryOutbox) OutboxStatusByID(_ context.Context, id int64, device, owner string) (OutboxStatusItem, bool, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, item := range o.items {
+		if item.ID == id && item.Device == device && item.OwnerWxID == owner {
+			return OutboxStatusItem{ModuleOutboxItem: item.ModuleOutboxItem, LeaseUntil: formatRFC3339(item.leaseUntil)}, true, nil
+		}
+	}
+	return OutboxStatusItem{}, false, nil
+}
+
 func (s *HTTPServer) outboxStatuses(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit := 0
@@ -99,10 +139,10 @@ func (o *MemoryOutbox) ListOutboxStatuses(_ context.Context, filter OutboxStatus
 		if item.Device != filter.Device || item.OwnerWxID != filter.OwnerWxID || (filter.WxID != "" && item.WxID != filter.WxID) {
 			continue
 		}
-		if filter.Status == "active" && item.Status != "pending" && item.Status != "leased" {
+		if filter.Status == "active" && item.Status != "pending" && item.Status != "leased" && item.Status != "native_started" && item.Status != "unknown" {
 			continue
 		}
-		if filter.Status == "failed" && item.Status != "failed" {
+		if filter.Status == "failed" && item.Status != "failed" && item.Status != "unknown" {
 			continue
 		}
 		items = append(items, OutboxStatusItem{ModuleOutboxItem: item.ModuleOutboxItem, LeaseUntil: formatRFC3339(item.leaseUntil)})

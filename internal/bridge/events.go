@@ -237,6 +237,8 @@ func (req ModuleRegistrationRequest) Validate(defaultDevice string) (ModuleRegis
 }
 
 type ModulePollRequest struct {
+	FileProtocol   int    `json:"file_protocol,omitempty"`
+	InstanceID     string `json:"-"`
 	AccountSession string `json:"account_session,omitempty"`
 	APIKey         string `json:"api_key"`
 	Device         string `json:"device"`
@@ -267,6 +269,9 @@ func (req ModulePollRequest) Validate(defaultDevice string) (ModulePollRequest, 
 }
 
 type ModuleAckRequest struct {
+	InstanceID     string          `json:"-"`
+	CredentialID   string          `json:"-"`
+	AuthVersion    int64           `json:"-"`
 	AccountSession string          `json:"account_session,omitempty"`
 	APIKey         string          `json:"api_key"`
 	Device         string          `json:"device"`
@@ -277,6 +282,7 @@ type ModuleAckRequest struct {
 }
 
 type ModuleAckItem struct {
+	LeaseToken   string `json:"lease_token,omitempty"`
 	ID           int64  `json:"id"`
 	Status       string `json:"status"`
 	Error        string `json:"error,omitempty"`
@@ -306,8 +312,8 @@ func (req ModuleAckRequest) Validate(defaultDevice string) (ModuleAckRequest, er
 		if req.Items[i].Status == "" {
 			req.Items[i].Status = "sent"
 		}
-		if req.Items[i].Status != "sent" && req.Items[i].Status != "failed" {
-			return req, errors.New("ack item status must be sent or failed")
+		if req.Items[i].Status != "sent" && req.Items[i].Status != "failed" && req.Items[i].Status != "unknown" {
+			return req, errors.New("ack item status must be sent, failed or unknown")
 		}
 		req.Items[i].Error = strings.TrimSpace(req.Items[i].Error)
 	}
@@ -318,17 +324,22 @@ func (req ModuleAckRequest) Validate(defaultDevice string) (ModuleAckRequest, er
 }
 
 type ModuleOutboxItem struct {
-	ID           int64  `json:"id"`
-	Device       string `json:"device"`
-	OwnerWxID    string `json:"owner_wxid,omitempty"`
-	WxID         string `json:"wxid"`
-	Text         string `json:"text"`
-	ChatRecordID int64  `json:"chat_record_id,omitempty"`
-	Status       string `json:"status"`
-	AttemptCount int    `json:"attempt_count"`
-	LastError    string `json:"last_error,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	UpdatedAt    string `json:"updated_at,omitempty"`
+	Kind            string          `json:"kind,omitempty"`
+	Attachment      *FileAttachment `json:"attachment,omitempty"`
+	LeaseToken      string          `json:"lease_token,omitempty"`
+	NativeStartedAt string          `json:"native_started_at,omitempty"`
+	AckReplay       bool            `json:"-"`
+	ID              int64           `json:"id"`
+	Device          string          `json:"device"`
+	OwnerWxID       string          `json:"owner_wxid,omitempty"`
+	WxID            string          `json:"wxid"`
+	Text            string          `json:"text"`
+	ChatRecordID    int64           `json:"chat_record_id,omitempty"`
+	Status          string          `json:"status"`
+	AttemptCount    int             `json:"attempt_count"`
+	LastError       string          `json:"last_error,omitempty"`
+	CreatedAt       string          `json:"created_at,omitempty"`
+	UpdatedAt       string          `json:"updated_at,omitempty"`
 }
 
 type ModuleContactSnapshotRequest struct {

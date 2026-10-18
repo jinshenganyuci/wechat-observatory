@@ -3,10 +3,33 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"wechat-observatory/internal/bridge"
 )
+
+func (s *Store) OutboxStatusByID(ctx context.Context, id int64, device, owner string) (item bridge.OutboxStatusItem, found bool, err error) {
+	var lease sql.NullTime
+	err = s.executor(ctx).QueryRowContext(ctx, `SELECT lease_until FROM bridge_module_outbox WHERE id=? AND device=? AND owner_wxid=?`, id, device, owner).Scan(&lease)
+	if errors.Is(err, sql.ErrNoRows) {
+		return item, false, nil
+	}
+	if err != nil {
+		return
+	}
+	item.ModuleOutboxItem, err = s.findOutboxItem(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return item, false, nil
+	}
+	if err != nil {
+		return
+	}
+	if lease.Valid {
+		item.LeaseUntil = formatTime(lease.Time)
+	}
+	return item, true, nil
+}
 
 func (s *Store) ListOutboxStatuses(ctx context.Context, filter bridge.OutboxStatusFilter) ([]bridge.OutboxStatusItem, error) {
 	filter, err := filter.Normalize()
@@ -23,9 +46,9 @@ func (s *Store) ListOutboxStatuses(ctx context.Context, filter bridge.OutboxStat
 	}
 	switch filter.Status {
 	case "active":
-		query += " AND status IN ('pending','leased') ORDER BY id ASC"
+		query += " AND status IN ('pending','leased','native_started','unknown') ORDER BY id ASC"
 	case "failed":
-		query += " AND status='failed' ORDER BY id DESC"
+		query += " AND status IN ('failed','unknown') ORDER BY id DESC"
 	default:
 		query += " ORDER BY id DESC"
 	}
@@ -57,5 +80,21 @@ func (s *Store) ListOutboxStatuses(ctx context.Context, filter bridge.OutboxStat
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	base := make([]bridge.ModuleOutboxItem, len(items))
+	for i := range items {
+		base[i] = items[i].ModuleOutboxItem
+	}
+	if err = s.addFileMetadata(ctx, base); err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].ModuleOutboxItem = base[i]
+	}
+	return items, nil
 }

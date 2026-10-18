@@ -35,6 +35,8 @@ type Config struct {
 	Devices             map[string]Device
 	APIKeys             map[string]APIKey
 	MySQL               MySQLConfig
+	FileSpoolDir        string
+	FileSpoolMaxBytes   int64
 }
 
 type MySQLConfig struct {
@@ -78,6 +80,7 @@ func LoadFromEnv() (Config, error) {
 		RetentionDays:       getenvPositiveInt("BRIDGE_HISTORY_RETENTION_DAYS", 15),
 		RetentionPoll:       getenvDuration("BRIDGE_HISTORY_RETENTION_INTERVAL", time.Hour),
 		EventIdentityV2:     parseStringSet(os.Getenv("BRIDGE_EVENT_IDENTITY_V2_DEVICES")),
+		FileSpoolDir:        getenv("BRIDGE_FILE_SPOOL_DIR", "./data/files"),
 		Devices:             map[string]Device{},
 		APIKeys:             map[string]APIKey{},
 		MySQL: MySQLConfig{
@@ -88,6 +91,11 @@ func LoadFromEnv() (Config, error) {
 	if err := validateListenAddr("BRIDGE_HTTP_ADDR", cfg.HTTPAddr); err != nil {
 		return Config{}, err
 	}
+	quota, err := strconv.ParseInt(getenv("BRIDGE_FILE_SPOOL_MAX_BYTES", "536870912"), 10, 64)
+	if err != nil || quota <= 0 {
+		return Config{}, errors.New("BRIDGE_FILE_SPOOL_MAX_BYTES must be a positive integer")
+	}
+	cfg.FileSpoolMaxBytes = quota
 	if cfg.DeviceAdminPassword != "" && cfg.DeviceAdminPassword == cfg.AdminPassword {
 		return Config{}, errors.New("BRIDGE_DEVICE_ADMIN_PASSWORD must differ from BRIDGE_ADMIN_PASSWORD")
 	}

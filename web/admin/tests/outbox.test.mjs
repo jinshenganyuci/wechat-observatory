@@ -5,6 +5,8 @@ import { outboxStatusLabel, outboxWaitText, outboxLeaseExpired } from '../src/ou
 test('pending and leased never imply confirmed send; terminal states are distinct', () => {
   assert.equal(outboxStatusLabel('pending'), '等待微信领取');
   assert.equal(outboxStatusLabel('leased'), '已分派 · 待回执');
+  assert.equal(outboxStatusLabel('native_started'), '发送处理中 · 待确认');
+  assert.equal(outboxStatusLabel('unknown'), '结果未确认');
   assert.equal(outboxStatusLabel('sent'), '微信已确认发送');
   assert.equal(outboxStatusLabel('failed'), '发送失败');
   assert.equal(outboxStatusLabel('failed', 'WeChat message queued but delivery unconfirmed; local msgId=42'), '结果未确认');

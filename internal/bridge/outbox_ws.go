@@ -42,6 +42,10 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	device := strings.TrimSpace(r.URL.Query().Get("device"))
 	wxid := strings.TrimSpace(r.URL.Query().Get("wxid"))
 	accountSession := strings.TrimSpace(r.URL.Query().Get("account_session"))
+	fileProtocol := 0
+	if r.URL.Query().Get("file_protocol") == "1" {
+		fileProtocol = 1
+	}
 	if device == "" {
 		device = s.service.DefaultDevice()
 	}
@@ -99,6 +103,8 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	var lastInbound time.Time
 	var inFlight bool
+	var inFlightID int64
+	var inFlightFile bool
 	var deliveryRequested bool
 	var probeTimer *time.Timer
 	var probeDeadline <-chan time.Time
@@ -128,7 +134,7 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	deliver := func() bool {
 		deliveryRequested = false
-		items, err := s.service.PollOutbox(ctx, ModulePollRequest{APIKey: apiKey, Device: device, WxID: wxid, AccountSession: accountSession, Limit: 1})
+		items, err := s.service.PollOutbox(ctx, ModulePollRequest{APIKey: apiKey, Device: device, WxID: wxid, AccountSession: accountSession, Limit: 1, FileProtocol: fileProtocol})
 		if err != nil {
 			if !conn.writeJSON(outboxWSMessage{Type: "error", Error: err.Error(), Time: time.Now().Unix()}) {
 				return false
@@ -142,6 +148,31 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 		inFlight = true
+		inFlightID, inFlightFile = items[0].ID, items[0].Kind == "file"
+		return true
+	}
+	// File workers ACK over HTTP so their socket reader keeps serving Pings.
+	// Only the exact task's durable terminal/unknown state releases this slot.
+	refreshFileFlight := func() bool {
+		if !inFlight || !inFlightFile {
+			return true
+		}
+		result, err := s.service.FileTask(ctx, FileOperation{APIKey: apiKey, Device: device, WxID: wxid, AccountSession: accountSession, ID: inFlightID, Operation: "status"})
+		if err != nil {
+			return !isModuleAuthError(err) && !errors.Is(err, ErrFileConflict)
+		}
+		if result.LeaseExpired {
+			inFlight = false
+			inFlightID = 0
+			inFlightFile = false
+			return true
+		}
+		switch result.Item.Status {
+		case "sent", "failed", "unknown", "cancelled":
+			inFlight = false
+			inFlightID = 0
+			inFlightFile = false
+		}
 		return true
 	}
 	requestDelivery := func(forceProbe bool) bool {
@@ -188,18 +219,30 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			case "ack":
-				if msg.OK && len(msg.Items) > 0 {
-					inFlight = false
+				if msg.OK {
+					for _, item := range msg.Items {
+						if item.ID == inFlightID && (item.Status == "sent" || item.Status == "failed" || item.Status == "unknown") {
+							inFlight = false
+							inFlightID = 0
+							inFlightFile = false
+						}
+					}
 				}
 			}
 			if !conn.writeJSON(msg) {
 				return
 			}
 		case <-notify:
+			if !refreshFileFlight() {
+				return
+			}
 			if !requestDelivery(true) {
 				return
 			}
 		case <-poll.C:
+			if !refreshFileFlight() {
+				return
+			}
 			if !requestDelivery(false) {
 				return
 			}
