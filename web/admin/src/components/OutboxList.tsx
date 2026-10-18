@@ -8,18 +8,22 @@ import { formatFileSize } from "@/fileSend";
 import { outboxIsActive, outboxLeaseExpired, outboxResultUnconfirmed, outboxStatusLabel, outboxWaitText } from "@/outbox";
 import type { ModuleContact, OutboxFilter, OutboxStatusItem } from "@/types";
 
-export function OutboxList({ items, filter, onFilter, chatOnly, onChatOnly, hasChat, now, error, loading, enabled, offline, onRefresh, contacts, submittedId }: {
+export function OutboxList({ items, filter, onFilter, chatOnly, onChatOnly, hasChat, now, error, loading, enabled, offline, onRefresh, contacts, submittedId, fileTasks }: {
   items: OutboxStatusItem[]; filter: OutboxFilter; onFilter: (value: OutboxFilter) => void;
   chatOnly: boolean; onChatOnly: (value: boolean) => void; hasChat: boolean; now: number;
   error: string; loading: boolean; enabled: boolean; offline: boolean; onRefresh: () => void;
   contacts: Map<string, ModuleContact>; submittedId?: number;
+  fileTasks?: React.ReactNode;
 }) {
   return <section id="send-records" className="grid min-w-0 scroll-mt-32 gap-3 rounded-lg border bg-card p-3" aria-label="发送记录">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="text-sm font-semibold">发送记录</h3>
-      <Button variant="outline" size="xs" onClick={onRefresh} disabled={!enabled || loading}>
-        <RefreshCw className={loading ? "h-3 w-3 animate-spin" : "h-3 w-3"} />刷新记录
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        {fileTasks}
+        <Button variant="outline" size="xs" onClick={onRefresh} disabled={!enabled || loading}>
+          <RefreshCw className={loading ? "h-3 w-3 animate-spin" : "h-3 w-3"} />刷新记录
+        </Button>
+      </div>
     </div>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <TabsList className="h-auto flex-wrap">

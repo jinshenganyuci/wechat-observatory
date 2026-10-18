@@ -32,6 +32,9 @@ func (s *Store) ensureFileTables(ctx context.Context) error {
 		 UNIQUE KEY uq_file_idempotency(device,owner_wxid,idempotency_hash),
 		 KEY idx_file_cleanup(bytes_removed,expires_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`ALTER TABLE bridge_file_attachments ADD COLUMN cleanup_requested_at DATETIME(6) NULL`,
+		`ALTER TABLE bridge_file_attachments ADD COLUMN cleanup_updated_at DATETIME(6) NULL`,
+		`ALTER TABLE bridge_file_attachments ADD COLUMN cleanup_last_error VARCHAR(64) NULL`,
 	}
 	for _, statement := range statements {
 		if _, err := s.executor(ctx).ExecContext(ctx, statement); err != nil {
@@ -300,7 +303,7 @@ func (s *Store) FileCleanupCandidates(ctx context.Context) (ids []string, err er
 		return
 	}
 	rows, err := s.executor(ctx).QueryContext(ctx, `SELECT a.id FROM bridge_file_attachments a LEFT JOIN bridge_module_outbox o ON o.id=a.outbox_id
-	 WHERE a.bytes_removed=FALSE AND (o.id IS NULL OR o.status IN ('sent','failed','cancelled')) LIMIT 1000`)
+	 WHERE a.bytes_removed=FALSE AND (a.cleanup_requested_at IS NOT NULL OR o.id IS NULL OR o.status IN ('sent','failed','cancelled')) LIMIT 1000`)
 	if err != nil {
 		return
 	}
@@ -315,7 +318,7 @@ func (s *Store) FileCleanupCandidates(ctx context.Context) (ids []string, err er
 	return ids, rows.Err()
 }
 func (s *Store) MarkFileRemoved(ctx context.Context, id string) error {
-	_, err := s.executor(ctx).ExecContext(ctx, `UPDATE bridge_file_attachments SET bytes_removed=TRUE WHERE id=?`, id)
+	_, err := s.executor(ctx).ExecContext(ctx, `UPDATE bridge_file_attachments SET bytes_removed=TRUE,cleanup_updated_at=CURRENT_TIMESTAMP(6),cleanup_last_error=NULL WHERE id=?`, id)
 	return err
 }
 func (s *Store) FileBlobReferenced(ctx context.Context, id string) (bool, error) {
