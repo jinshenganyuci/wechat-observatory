@@ -6,9 +6,10 @@ import (
 )
 
 type memoryFile struct {
-	request  FileEnqueue
-	outboxID int64
-	removed  bool
+	request                                                FileEnqueue
+	outboxID                                               int64
+	removed                                                bool
+	cleanupRequestedAt, cleanupUpdatedAt, cleanupLastError string
 }
 
 func (o *MemoryOutbox) EnqueueFile(_ context.Context, req FileEnqueue) (ModuleOutboxItem, bool, error) {
@@ -150,7 +151,7 @@ func (o *MemoryOutbox) FileCleanupCandidates(_ context.Context) (ids []string, e
 				item.Status, item.LastError = "cancelled", "file expired before native submission"
 				item.leaseUntil = time.Time{}
 			}
-			if item.Status == "sent" || item.Status == "failed" || item.Status == "cancelled" {
+			if file.cleanupRequestedAt != "" || item.Status == "sent" || item.Status == "failed" || item.Status == "cancelled" {
 				ids = append(ids, item.Attachment.ID)
 			}
 		}
@@ -163,6 +164,7 @@ func (o *MemoryOutbox) MarkFileRemoved(_ context.Context, id string) error {
 	for _, f := range o.files {
 		if f.request.Attachment.ID == id {
 			f.removed = true
+			f.cleanupUpdatedAt, f.cleanupLastError = formatRFC3339(o.now()), ""
 		}
 	}
 	return nil

@@ -544,6 +544,7 @@ func retentionQueries(retentionDays int) (string, string, error) {
 		ORDER BY created_at LIMIT ?`, retentionDays)
 	outboxQuery := fmt.Sprintf(`DELETE FROM bridge_module_outbox
 		WHERE status IN ('sent', 'cancelled')
+			AND (kind<>'file' OR NOT EXISTS(SELECT 1 FROM bridge_file_attachments a WHERE a.outbox_id=bridge_module_outbox.id AND a.bytes_removed=FALSE))
 			AND updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %d DAY)
 		ORDER BY updated_at LIMIT ?`, retentionDays)
 	return messageQuery, outboxQuery, nil

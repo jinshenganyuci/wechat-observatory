@@ -1,4 +1,4 @@
-import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleStatus, ModuleSwitchRequest, StoredMessage, OutboxStatusItem, OutboxFilter } from "@/types";
+import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleStatus, ModuleSwitchRequest, StoredMessage, OutboxStatusItem, OutboxFilter, FileTaskView, FileTaskFilter, FileCleanupMode } from "@/types";
 
 type ApiOptions = {
   password: string;
@@ -227,6 +227,26 @@ export async function getOutbox(params: {
   const search = new URLSearchParams({ device: params.device, owner_wxid: params.ownerWxid, status: params.status, limit: "50" });
   if (params.wxid) search.set("wxid", params.wxid);
   return requestJSON<{ items: OutboxStatusItem[]; server_time: string }>(`/api/outbox?${search}`, { password: params.password, timeoutMs: 10000 });
+}
+
+type FileTaskScope = { password: string; device: string; ownerWxid: string; signal?: AbortSignal };
+
+export function getFileTasks(params: FileTaskScope & { status: FileTaskFilter; beforeId?: number }) {
+  const query = new URLSearchParams({ device: params.device, owner_wxid: params.ownerWxid, status: params.status, limit: "50" });
+  if (params.beforeId !== undefined) query.set("before_id", String(params.beforeId));
+  return requestJSON<{ items: FileTaskView[]; next_before_id: number | null; server_time: string }>(`/api/files?${query}`, params);
+}
+
+export function getFileTask(params: FileTaskScope & { id: number }) {
+  const query = new URLSearchParams({ device: params.device, owner_wxid: params.ownerWxid });
+  return requestJSON<{ item: FileTaskView; server_time: string }>(`/api/files/${params.id}?${query}`, params);
+}
+
+export function cleanupFileTask(params: FileTaskScope & { id: number; mode: FileCleanupMode }) {
+  return requestJSON<{ item: FileTaskView; server_time: string }>(`/api/files/${params.id}/cleanup`, {
+    password: params.password, signal: params.signal, method: "POST", timeoutMs: 15000,
+    body: { device: params.device, owner_wxid: params.ownerWxid, mode: params.mode }
+  });
 }
 
 export function openLiveEvents(password: string) {

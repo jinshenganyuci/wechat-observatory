@@ -194,6 +194,9 @@ func TestRetentionQueriesUseDatabaseClockAndOnlyDeleteTerminalOutbox(t *testing.
 	if !strings.Contains(outbox, "status IN ('sent', 'cancelled')") {
 		t.Fatalf("outbox cleanup must include only terminal sent/cancelled rows: %s", outbox)
 	}
+	if !strings.Contains(outbox, "a.bytes_removed=FALSE") {
+		t.Fatal("retention must retain file task history while its server blob remains")
+	}
 	for _, forbidden := range []string{"'pending'", "'leased'", "'failed'"} {
 		if strings.Contains(outbox, forbidden) {
 			t.Fatalf("outbox retention must keep %s rows: %s", forbidden, outbox)

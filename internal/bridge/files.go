@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -307,6 +306,8 @@ func writeFileError(w http.ResponseWriter, err error) {
 	status, code, message := http.StatusServiceUnavailable, "file_storage_unavailable", "file storage is unavailable"
 	var maxBytesError *http.MaxBytesError
 	switch {
+	case errors.Is(err, ErrFileTaskNotFound):
+		status, code, message = 404, "file_task_not_found", err.Error()
 	case errors.Is(err, ErrInvalidFile):
 		status, code, message = 400, "invalid_request", err.Error()
 	case errors.Is(err, ErrUnsupportedFileType):
@@ -336,13 +337,11 @@ func (s *Service) CleanupFiles(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, id := range ids {
-		if err = s.fileSpool.Remove(id); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if err = store.MarkFileRemoved(ctx, id); err != nil {
-			return err
+		if err = s.removeFileBytes(ctx, store, id); err != nil {
+			failures = append(failures, err)
 		}
 	}
-	return s.fileSpool.SweepOrphans(ctx, store.FileBlobReferenced)
+	return errors.Join(append(failures, s.fileSpool.SweepOrphans(ctx, store.FileBlobReferenced))...)
 }

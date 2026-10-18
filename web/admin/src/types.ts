@@ -65,6 +65,23 @@ export type OutboxStatusItem = {
 
 export type OutboxFilter = "active" | "failed" | "all";
 
+export type FileTaskFilter = "retained" | "unconfirmed" | "all";
+export type FileCleanupMode = "server_only" | "cancel_unstarted";
+export type FileTaskView = Omit<OutboxStatusItem, "text" | "kind"> & {
+  owner_wxid: string;
+  native_started_at?: string;
+  server_copy: {
+    state: "retained" | "cleanup_pending" | "removed";
+    cleanup_requested_at?: string;
+    updated_at?: string;
+    last_error?: string;
+  };
+  phone_copy_state: "not_reported";
+  can_cleanup_server: boolean;
+  can_cancel_unstarted: boolean;
+  cleanup_blocked_reason: string;
+};
+
 export type ApiKey = {
   code: string;
   api_key?: string;

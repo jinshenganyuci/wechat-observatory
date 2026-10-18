@@ -66,6 +66,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { OutboxList } from "@/components/OutboxList";
+import { FileTasksPanel } from "@/components/FileTasksPanel";
 import { InstallationList, InstallationSwitchHint, type InstallationNotice } from "@/components/InstallationList";
 import { INSTALLATION_ALREADY_ACTIVE, INSTALLATION_SWITCH_REQUESTED, installationDisplayName, installationIsStandby, parseApiError } from "@/installations";
 import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleInstallation, ModuleStatus, StoredMessage, OutboxStatusItem, OutboxFilter } from "@/types";
@@ -1204,7 +1205,10 @@ function App() {
                   chatOnly={outboxChatOnly} onChatOnly={changeOutboxChatOnly} hasChat={!!selectedWxid}
                   now={outboxNow} error={outboxError} loading={outboxLoading} offline={selectedModuleOffline}
                   enabled={!!adminPassword && !!selectedDevice && !!selectedOwnerWxid}
-                  onRefresh={() => void refreshOutbox()} contacts={contactByWxid} submittedId={submittedOutboxId} />
+                  onRefresh={() => void refreshOutbox()} contacts={contactByWxid} submittedId={submittedOutboxId}
+                  fileTasks={<FileTasksPanel key={JSON.stringify([selectedDevice, selectedOwnerWxid, selectedGeneration, !!adminPassword])}
+                    device={selectedDevice} ownerWxid={selectedOwnerWxid} enabled={!!adminPassword && !!selectedDevice && !!selectedOwnerWxid}
+                    currentSession={currentSession} handleError={handleError} contacts={contactByWxid} />} />
               </CardContent>
             </Card>
           </div>
