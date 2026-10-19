@@ -49,6 +49,8 @@ for name in ("telegram", "feishu"):
 extra = updated["platforms"]["observatory"]["extra"]
 assert updated["gateway"] == original["gateway"]
 assert extra["allow_from"] == extra["allow_admin_from"] == ["wxid_admin"]
+assert extra["group_admin_mentions"] is True
+assert extra["group_allow_from"] == extra["group_allow_admin_from"] == ["wxid_admin"]
 assert extra["unauthorized_dm_behavior"] == "pair"
 assert "model" not in extra["user_allowed_commands"]
 assert "unit-test-admin-password" not in (Path(os.environ["HERMES_HOME"]) / "config.yaml").read_text()
@@ -61,6 +63,13 @@ assert get_env_value("OBSERVATORY_ADMIN_PASSWORD") == "unit-test-admin-password"
 save_config({"gateway": {"standalone": True, "delivery_ledger": False}})
 module.configure("http://127.0.0.1:18189", "phone-a", "wxid_bot", "wxid_admin")
 assert read_raw_config()["gateway"] == {"standalone": True, "delivery_ledger": False}
+# Reconfiguration preserves explicit group disablement and narrower group lists.
+save_config({"platforms": {"observatory": {"extra": {"group_admin_mentions": False,
+    "group_allow_from": ["wxid_restricted"], "group_allow_admin_from": ["wxid_restricted"]}}}})
+module.configure("http://127.0.0.1:18189", "phone-a", "wxid_bot", "wxid_admin")
+group = read_raw_config()["platforms"]["observatory"]["extra"]
+assert group["group_admin_mentions"] is False
+assert group["group_allow_from"] == group["group_allow_admin_from"] == ["wxid_restricted"]
 print(json.dumps({"ok": True}))
 '''
     env = {**os.environ, "HERMES_HOME": str(tmp_path), "SETUP_FILE": str(SETUP)}
@@ -166,3 +175,15 @@ def test_unpatched_shared_gateway_setup_uses_only_native_writers(monkeypatch):
     assert set(update) == {"platforms"}
     assert set(update["platforms"]) == {"observatory"}
     assert write_config.call_args.kwargs == {"merge_existing": True}
+
+
+def test_reconfiguring_existing_dm_channel_does_not_enable_groups(monkeypatch):
+    import hermes_cli.config as hermes_config
+    current = {"platforms": {"observatory": {"extra": {"allow_admin_from": ["wxid_admin"]}}}}
+    monkeypatch.setattr(hermes_config, "require_readable_config_before_write", lambda: current)
+    write_config = Mock()
+    monkeypatch.setattr(hermes_config, "save_config", write_config)
+    monkeypatch.setattr(hermes_config, "save_env_value", Mock())
+    setup.configure("https://example.test", "phone-a", "wxid_bot", "wxid_admin", "unit-secret")
+    extra = write_config.call_args.args[0]["platforms"]["observatory"]["extra"]
+    assert extra["group_admin_mentions"] is False

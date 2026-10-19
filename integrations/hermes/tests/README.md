@@ -141,6 +141,14 @@ a second task: this is a documented upstream boundary, not hidden by a false
 exactly-once assertion. Old pending rows retain their original payload/key and
 become `needs_review`; connecting never scans them to resend.
 
+Group cases feed synthetic room envelopes through the plugin intake, then check
+native authorization, slash permissions, persisted SessionStore routing and the
+final reply destination. An ordinary DM-paired member still cannot trigger a
+group; an admitted administrator remains subject to native group authorization.
+Room/sender labels are separate from IDs and appear as untrusted per-message
+context. Session policy stays unchanged: with the current single administrator,
+different groups and DMs remain separate; multi-admin sharing is not invented.
+
 The shared tests also enter the real `hermes_cli.send_cmd.cmd_send` and
 `cron.scheduler_delivery._standalone_send` routes, including upstream target
 resolution, MEDIA extraction, filtering and `_send_to_platform` policy checks.

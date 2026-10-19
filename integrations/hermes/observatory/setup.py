@@ -34,6 +34,9 @@ def connection_settings(base_url: str, device: str, owner_wxid: str, admin_wxid:
         "owner_wxid": identifiers["owner_wxid"],
         "allow_from": [identifiers["admin_wxid"]],
         "allow_admin_from": [identifiers["admin_wxid"]],
+        "group_admin_mentions": True,
+        "group_allow_from": [identifiers["admin_wxid"]],
+        "group_allow_admin_from": [identifiers["admin_wxid"]],
         "user_allowed_commands": ["new", "status", "stop"],
         "unauthorized_dm_behavior": "pair",
     }
@@ -82,6 +85,14 @@ def configure(base_url: str, device: str, owner_wxid: str, admin_wxid: str,
     # Validate the existing document before writing either config or secret.
     current = require_readable_config_before_write()
     reject_pending_binding_change(current, settings)
+    previous = current.get("platforms", {}).get("observatory", {}).get("extra", {})
+    if previous:
+        # Reconfiguring a deployed DM channel must not silently enable groups
+        # or replace an operator's narrower native group access lists.
+        settings["group_admin_mentions"] = previous.get("group_admin_mentions", False)
+        for key in ("group_allow_from", "group_allow_admin_from"):
+            if key in previous:
+                settings[key] = previous[key]
     if password:
         save_env_value(SECRET_NAME, password)
     save_config({"platforms": {"observatory": {
@@ -105,7 +116,7 @@ def interactive_setup() -> None:
         value = input(f"{label}" + (f" [{default}]" if default else "") + ": ").strip()
         return value or default
 
-    print("Observatory 微信渠道：接收私聊文字，可与飞书等渠道共用当前 profile。")
+    print("Observatory 微信渠道：私聊及管理员在群内真实 @ 机器人的文字，可与飞书共用当前 profile。")
     print("使用真实 wxid；管理员应是向机器人发消息的另一个账号。")
     try:
         base_url = ask("后端服务地址", str(current.get("base_url", "")))
@@ -119,5 +130,6 @@ def interactive_setup() -> None:
         return
     print(f"已保存到 {get_config_path()}。管理员可聊天及使用 /new、/model。")
     print("其他账号须通过 hermes pairing approve observatory <配对码> 批准后才能聊天。")
+    print("新安装默认允许管理员在已加入群内 @ 机器人；普通用户的私聊配对不授予群聊触发权限。")
     print("已保留当前 profile 的投递账本、其他渠道及模型设置。")
     print("请在完成旧微信状态迁移后重启该 profile 的 gateway；本向导不会重启现有连接。")

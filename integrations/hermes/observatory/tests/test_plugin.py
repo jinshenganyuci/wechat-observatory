@@ -111,6 +111,8 @@ class FakeClient:
         self.generation_value = 1
         self.lose = 0
         self.ids = {}
+        self.name_calls = []
+        self.names = {}
 
     async def generation(self):
         return self.generation_value
@@ -129,6 +131,10 @@ class FakeClient:
 
     async def close(self):
         pass
+
+    async def contact_name(self, wxid):
+        self.name_calls.append(wxid)
+        return self.names.get(wxid, wxid)
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -158,6 +164,13 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         return {"device": "test", "owner_wxid": "wxid_bot", "from": "alice", "sender": "alice",
                 "to": "wxid_bot", "chat_id": "alice", "chat_kind": "direct", "direction": "recv",
                 "message_type": 1, "text": "hello", "event_key": "key-1", "id": "999999999", **values}
+
+    def group_event(self, **values):
+        return {"device": "test", "owner_wxid": "wxid_bot", "from_wxid": "123@chatroom",
+                "sender_wxid": "alice", "to_wxid": "wxid_bot", "chat_id": "123@chatroom",
+                "room_id": "123@chatroom", "chat_kind": "room", "direction": "recv",
+                "message_type": 1, "text": "@Bot hello", "event_key": "group-key",
+                "mentioned_wxids": ["wxid_bot"], **values}
 
     async def test_declares_public_media_route_when_host_supports_it(self):
         entry = platform_registry.get("observatory")
@@ -198,6 +211,73 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.adapter.state.cursor, 11)
         await self.adapter._ingest(self.event(text="/new", event_key="fresh"), 12)
         self.assertEqual(self.adapter.handle_message.await_count, 1)
+
+    async def test_group_requires_explicit_enablement_and_structured_admin_mention(self):
+        self.adapter.handle_message = AsyncMock()
+        self.config.extra["allow_admin_from"] = ["alice"]
+        await self.adapter._ingest(self.group_event(), 11)
+        self.config.extra["group_admin_mentions"] = True
+        await self.adapter._ingest(self.group_event(event_key="no-native-mention", mentioned_wxids=None), 12)
+        self.adapter.handle_message.assert_not_called()
+        self.assertEqual(self.adapter.state.cursor, 12)
+        self.assertFalse(self.client.name_calls)
+
+    async def test_group_identity_names_context_and_original_text_reach_native_boundary(self):
+        self.config.extra.update(group_admin_mentions=True, allow_admin_from=["alice"])
+        self.client.names.update({"123@chatroom": "Project room", "alice": "Administrator"})
+        self.adapter.handle_message = AsyncMock()
+        await self.adapter._ingest(self.group_event(), 11)
+        event = self.adapter.handle_message.call_args.args[0]
+        self.assertEqual(event.source.chat_id, self.adapter._chat_id("123@chatroom"))
+        self.assertEqual(event.source.chat_type, "group")
+        self.assertEqual(event.source.chat_name, "Project room")
+        self.assertEqual(event.source.user_id, "alice")
+        self.assertEqual(event.user_id, "alice")
+        self.assertEqual(event.user_name, "Administrator")
+        self.assertEqual(event.text, "@Bot hello")
+        self.assertTrue(event.reply_expected)
+        self.assertFalse(event.internal)
+        self.assertFalse(event.source.role_authorized)
+        self.assertIsNone(event.source.thread_id)
+        context = json.loads(event.channel_context.split("\n", 1)[1])
+        self.assertEqual(context, {"room_id": "123@chatroom", "room_name": "Project room",
+                                   "sender_wxid": "alice", "sender_name": "Administrator"})
+        await self.adapter._ingest(self.group_event(), 12)
+        self.assertEqual(self.adapter.handle_message.await_count, 1)
+        self.assertEqual(self.client.name_calls, ["123@chatroom", "alice"])
+
+    async def test_group_never_uses_names_pairing_or_malformed_identity_as_authority(self):
+        self.config.extra.update(group_admin_mentions=True, allow_admin_from="alice")
+        self.adapter.handle_message = AsyncMock()
+        rejected = [
+            {"sender_wxid": "paired-user"}, {"sender_wxid": "wxid_bot"}, {"sender_wxid": ""},
+            {"sender_wxid": "123@chatroom"}, {"sender_wxid": {"id": "alice"}},
+            {"sender": "impostor"}, {"from": "other@chatroom"}, {"to": "other_bot"},
+            {"chat_id": "other@chatroom"}, {"room_id": "other@chatroom"},
+            {"from_wxid": "alice"}, {"to_wxid": ""}, {"room_id": ""},
+            {"mentioned_wxids": []}, {"mentioned_wxids": "wxid_bot"},
+            {"mentioned_wxids": ["notify@all"]}, {"mentioned_wxids": ["wxid_bot_spoof"]},
+            {"mentioned_wxids": ["wxid_bot", {"id": "other"}]},
+            {"direction": "sent"}, {"is_send": True}, {"message_type": 3},
+            {"owner_wxid": "other_bot"}, {"device": "other"}, {"raw_provider": "module_ack"},
+        ]
+        for sequence, changes in enumerate(rejected, 11):
+            await self.adapter._ingest(self.group_event(event_key=str(sequence), **changes), sequence)
+        self.config.extra["allow_admin_from"] = ["*"]
+        await self.adapter._ingest(self.group_event(event_key="wildcard"), 100)
+        self.adapter.handle_message.assert_not_called()
+        self.assertFalse(self.client.name_calls)
+        self.assertEqual(self.adapter.state.cursor, 100)
+
+    async def test_historical_group_slash_commands_are_not_reexecuted(self):
+        self.config.extra.update(group_admin_mentions=True, allow_admin_from=["alice"])
+        self.adapter.handle_message = AsyncMock()
+        await self.adapter._ingest(self.group_event(text="/new @Bot"), 11, historical=True)
+        self.adapter.handle_message.assert_not_called()
+        await self.adapter._ingest(self.group_event(text="/status @Bot", event_key="fresh-group"), 12)
+        event = self.adapter.handle_message.call_args.args[0]
+        self.assertEqual(event.get_command(), "status")
+        self.assertTrue(event.allow_gateway_control)
 
     async def test_claim_precedes_async_admission_even_if_handler_crashes(self):
         self.adapter.handle_message = AsyncMock(side_effect=RuntimeError("admission crashed"))
@@ -583,9 +663,13 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.long_history = False
         self.fragment_response = False
         self.capability = True
+        self.contacts = []
+        self.contact_queries = []
+        self.contact_status = 200
         self.app = web.Application()
         self.app.router.add_get("/api/modules/status", self.modules)
         self.app.router.add_get("/api/messages", self.history)
+        self.app.router.add_get("/api/module-contacts", self.contact_lookup)
         self.app.router.add_get("/api/live/events", self.events)
         self.app.router.add_post("/api/send/text", self.send)
         self.app.router.add_post("/api/send/file", self.send_file)
@@ -610,6 +694,11 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             rows = [{"sequence_id": i, "text": "x" * 65536} for i in range(1, 51)]
             return web.json_response({"messages": rows})
         return web.json_response({"messages": [{"sequence_id": 45, "id": 999}]})
+
+    async def contact_lookup(self, request):
+        self.contact_queries.append(dict(request.query))
+        self.assertEqual(request.headers["X-Bridge-Password"], "test-secret")
+        return web.json_response({"contacts": self.contacts}, status=self.contact_status)
 
     async def events(self, request):
         self.seen.append(dict(request.headers))
@@ -648,6 +737,26 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(BridgeError, "idempotency_required"):
             await self.client.generation()
         self.assertFalse(self.seen)
+
+    async def test_contact_labels_are_account_scoped_bounded_and_cached(self):
+        self.contacts = [{"device": "test", "owner_wxid": "bot", "wxid": "123@chatroom",
+                          "nickname": "Room", "remark": "Friendly\nlabel\x00" + "x" * 200}]
+        name = await self.client.contact_name("123@chatroom")
+        self.assertEqual(len(name), 160)
+        self.assertNotIn("\n", name)
+        self.assertNotIn("\x00", name)
+        self.assertTrue(name.startswith("Friendly label"))
+        self.assertEqual(await self.client.contact_name("123@chatroom"), name)
+        self.assertEqual(self.contact_queries, [{"device": "test", "owner_wxid": "bot",
+                                                 "wxid": "123@chatroom", "limit": "1"}])
+
+    async def test_contact_failure_or_other_account_uses_id_without_blocking_chat(self):
+        self.contacts = [{"device": "test", "owner_wxid": "other", "wxid": "alice", "nickname": "Wrong"}]
+        self.assertEqual(await self.client.contact_name("alice"), "alice")
+        self.contact_status = 500
+        self.assertEqual(await self.client.contact_name("bob"), "bob")
+        self.assertEqual(await self.client.contact_name("bob"), "bob")
+        self.assertEqual(len(self.contact_queries), 2)
 
     async def test_text_request_has_single_recipient_and_idempotency_header(self):
         payload = {"kind": "text", "device": "test", "owner_wxid": "bot", "account_generation": 3,

@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func (s *Store) ListAPIKeys(ctx context.Context, limit int) ([]bridge.APIKeyView
 func (s *Store) ListStoredEvents(ctx context.Context, limit int) ([]bridge.StoredEventView, error) {
 	rows, err := s.executor(ctx).QueryContext(ctx, `
 		SELECT id, event_key, source_id, event_id, chat_record_id, device, owner_wxid, direction, from_wxid,
-			to_wxid, room_id, sender_wxid, text, message_type, media_kind,
+			to_wxid, room_id, sender_wxid, mentioned_wxids, text, message_type, media_kind,
 			media_mime, media_name, media_url, media_size, raw_provider, create_time, created_at
 		FROM bridge_message_events
 		ORDER BY id DESC
@@ -79,7 +80,7 @@ func (s *Store) ListLiveEventsAfter(ctx context.Context, afterID int64, device s
 	args = append(args, normalizeLimit(limit))
 	rows, err := s.executor(ctx).QueryContext(ctx, `
 		SELECT id, event_key, source_id, event_id, chat_record_id, device, owner_wxid,
-			direction, from_wxid, to_wxid, room_id, sender_wxid, text, message_type,
+			direction, from_wxid, to_wxid, room_id, sender_wxid, mentioned_wxids, text, message_type,
 			media_kind, media_mime, media_name, media_url, media_size, raw_provider, create_time
 		FROM bridge_message_events
 		WHERE `+strings.Join(conditions, " AND ")+`
@@ -141,7 +142,7 @@ func listMessagesQuery(filter bridge.MessageFilter) (string, []any) {
 	args = append(args, normalizeLimit(filter.Limit))
 	return `
 		SELECT id, event_key, source_id, event_id, chat_record_id, device, owner_wxid, direction, from_wxid,
-			to_wxid, room_id, sender_wxid, text, message_type, media_kind,
+			to_wxid, room_id, sender_wxid, mentioned_wxids, text, message_type, media_kind,
 			media_mime, media_name, media_url, media_size, raw_provider, create_time, created_at
 		FROM bridge_message_events
 		WHERE ` + strings.Join(conditions, " AND ") + `
@@ -155,6 +156,7 @@ func scanStoredEventViews(rows *sql.Rows) ([]bridge.StoredEventView, error) {
 		var item bridge.StoredEventView
 		var sourceID, ownerWxID, fromWxID, toWxID, roomID, senderWxID, rawProvider sql.NullString
 		var mediaKind, mediaMime, mediaName, mediaURL sql.NullString
+		var mentions sql.NullString
 		var eventID, chatRecordID, mediaSize sql.NullInt64
 		var createdAt time.Time
 		if err := rows.Scan(
@@ -170,6 +172,7 @@ func scanStoredEventViews(rows *sql.Rows) ([]bridge.StoredEventView, error) {
 			&toWxID,
 			&roomID,
 			&senderWxID,
+			&mentions,
 			&item.Text,
 			&item.MessageType,
 			&mediaKind,
@@ -191,6 +194,9 @@ func scanStoredEventViews(rows *sql.Rows) ([]bridge.StoredEventView, error) {
 		item.ToWxID = toWxID.String
 		item.RoomID = roomID.String
 		item.SenderWxID = senderWxID.String
+		if err := decodeMentionedWxIDs(mentions, &item.MentionedWxIDs); err != nil {
+			return nil, err
+		}
 		item.MediaKind = mediaKind.String
 		item.MediaMime = mediaMime.String
 		item.MediaName = mediaName.String
@@ -221,6 +227,7 @@ func scanMessageEvent(row rowScanner) (bridge.MessageEvent, error) {
 	var event bridge.MessageEvent
 	var sourceID, ownerWxID, fromWxID, toWxID, roomID, senderWxID, rawProvider sql.NullString
 	var mediaKind, mediaMime, mediaName, mediaURL sql.NullString
+	var mentions sql.NullString
 	var eventID, chatRecordID, mediaSize sql.NullInt64
 	var direction string
 	err := row.Scan(
@@ -236,6 +243,7 @@ func scanMessageEvent(row rowScanner) (bridge.MessageEvent, error) {
 		&toWxID,
 		&roomID,
 		&senderWxID,
+		&mentions,
 		&event.Text,
 		&event.MessageType,
 		&mediaKind,
@@ -258,6 +266,9 @@ func scanMessageEvent(row rowScanner) (bridge.MessageEvent, error) {
 	event.To = toWxID.String
 	event.RoomID = roomID.String
 	event.Sender = senderWxID.String
+	if err := decodeMentionedWxIDs(mentions, &event.MentionedWxIDs); err != nil {
+		return bridge.MessageEvent{}, err
+	}
 	event.MediaKind = mediaKind.String
 	event.MediaMime = mediaMime.String
 	event.MediaName = mediaName.String
@@ -265,6 +276,13 @@ func scanMessageEvent(row rowScanner) (bridge.MessageEvent, error) {
 	event.MediaSize = mediaSize.Int64
 	event.RawProvider = rawProvider.String
 	return event.Normalize(), nil
+}
+
+func decodeMentionedWxIDs(value sql.NullString, target *[]string) error {
+	if !value.Valid || value.String == "" {
+		return nil // Rows from older modules have no verified mention metadata.
+	}
+	return json.Unmarshal([]byte(value.String), target)
 }
 
 const listModuleStatusesStatement = `
