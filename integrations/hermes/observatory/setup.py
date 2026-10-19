@@ -60,7 +60,8 @@ def reject_pending_binding_change(config: dict, settings: dict) -> None:
     try:
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
             db.execute("PRAGMA query_only=ON")
-            pending = db.execute("SELECT 1 FROM outgoing WHERE status='pending' AND outbox_id IS NULL LIMIT 1").fetchone()
+            pending = db.execute("SELECT 1 FROM outgoing WHERE status IN ('pending','needs_review') "
+                                 "AND outbox_id IS NULL LIMIT 1").fetchone()
     except (sqlite3.Error, OSError) as exc:
         raise ValueError("无法只读核实旧发送状态，暂不能更改绑定；请先停止此 profile 的 gateway 并检查旧任务。") from exc
     if pending:
@@ -69,7 +70,6 @@ def reject_pending_binding_change(config: dict, settings: dict) -> None:
 
 def configure(base_url: str, device: str, owner_wxid: str, admin_wxid: str,
               password: str = "") -> None:
-    from .adapter import require_safe_delivery_config
     from hermes_cli.config import (
         get_env_value, require_readable_config_before_write, save_config, save_env_value,
     )
@@ -82,7 +82,6 @@ def configure(base_url: str, device: str, owner_wxid: str, admin_wxid: str,
     # Validate the existing document before writing either config or secret.
     current = require_readable_config_before_write()
     reject_pending_binding_change(current, settings)
-    require_safe_delivery_config(current)
     if password:
         save_env_value(SECRET_NAME, password)
     save_config({"platforms": {"observatory": {

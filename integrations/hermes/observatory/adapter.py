@@ -1,12 +1,10 @@
-"""Hermes v0.22.2 external platform: native routing/auth/commands, bridge transport."""
+"""Official Hermes platform adapter; Hermes owns conversation and reply recovery."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import json
 import logging
-import time
 
 import aiohttp
 from gateway.config import Platform
@@ -19,7 +17,6 @@ from .client import BridgeError, Client, Settings, HISTORY_PAGE_SIZE, file_descr
 from .state import State, digest
 
 log = logging.getLogger(__name__)
-_reply_identity = contextvars.ContextVar("observatory_reply_identity", default=None)
 _plugin_context = None
 
 
@@ -38,17 +35,6 @@ def validate_config(config) -> bool:
         return False
 
 
-def require_safe_delivery_config(config=None):
-    from gateway.delivery_ledger import ledger_enabled
-    if ledger_enabled(config) and not hasattr(BasePlatformAdapter, "idempotent_delivery"):
-        raise ValueError("Observatory requires Hermes delivery identity support when gateway.delivery_ledger is enabled; "
-                         "apply the documented Hermes compatibility patch before sharing default")
-    from hermes_constants import get_process_hermes_home
-    if get_process_hermes_home().resolve() != get_hermes_home().resolve():
-        raise ValueError("Launch this Observatory profile's own gateway (gateway.standalone: true); "
-                         "a secondary profile inside another gateway's multiplexer is unsupported")
-
-
 def valid_target(target: str) -> bool:
     return bool(target and target.strip() == target and len(target) <= 256
                 and not any(c.isspace() or ord(c) < 32 for c in target)
@@ -62,16 +48,10 @@ class ObservatoryAdapter(BasePlatformAdapter):
 
     def __init__(self, config):
         super().__init__(config, Platform("observatory"))
-        from gateway.delivery_ledger import ledger_enabled
-        # Keep one delivery policy for this adapter's lifetime. A config edit
-        # must not change the identity between ledger registration and HTTP.
-        self.idempotent_delivery = ledger_enabled()
         self.settings = settings_from_config(config)
         self.client = Client(self.settings)
         self.state = State(get_hermes_home() / "observatory" / (self.settings.scope + ".sqlite3"))
         self._reader = None
-        self._recovery = None
-        self._next_recovery_at = 0
         self._ready = asyncio.Event()
         self._send_lock = asyncio.Lock()
         self._receive_active = False
@@ -97,7 +77,6 @@ class ObservatoryAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect=False):
         if self._reader and not self._reader.done():
             return True
-        require_safe_delivery_config()
         if not self._acquire_platform_lock("observatory-account", self.settings.scope, "Observatory account"):
             return False
         try:
@@ -119,11 +98,6 @@ class ObservatoryAdapter(BasePlatformAdapter):
                 await self._reader
             self._reader = None
         self._receive_active = False
-        if self._recovery:
-            self._recovery.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._recovery
-            self._recovery = None
         await self.client.close()
         self._release_platform_lock()
         self._mark_disconnected()
@@ -158,13 +132,10 @@ class ObservatoryAdapter(BasePlatformAdapter):
                         self._mark_connected()
                         self._ready.set()
                         delay = 1
-                        self._schedule_recovery()
                     elif kind == "message":
                         if sequence is None:
                             raise BridgeError("durable_event_id_required")
                         await self._ingest(event, sequence)
-                    elif kind == "ping":
-                        self._schedule_recovery()
                     elif kind == "error":
                         raise BridgeError("event_stream_error")
                 raise BridgeError("event_stream_closed")
@@ -212,61 +183,27 @@ class ObservatoryAdapter(BasePlatformAdapter):
         # Intentionally no custom allowlist: native Hermes auth/pairing must run.
         await self.handle_message(event)
 
-    async def handle_message(self, event):
-        from gateway.delivery_ledger import ledger_enabled
-        if (event.internal is True and not event.text and event.message_type == MessageType.TEXT
-                and not event.message_id and not event.media_urls and not ledger_enabled()):
-            # Legacy isolated profiles have no native ledger to settle completed
-            # turns first. With the ledger enabled, Hermes can safely resume work
-            # which never reached a persisted final response.
-            log.info("Observatory skipped an unanchored startup resume; awaiting a new user message")
-            return
-        token = _reply_identity.set((event.source.chat_id, event.message_id))
-        try:
-            return await super().handle_message(event)
-        finally:
-            _reply_identity.reset(token)
-
-    async def on_processing_start(self, event):
-        # A queued turn may execute in the previous turn's Task/context.
-        _reply_identity.set((event.source.chat_id, event.ledger_message_id or event.message_id))
-
     async def get_chat_info(self, chat_id):
         peer = self._peer(chat_id)
         return {"name": peer, "type": "group" if peer.endswith("@chatroom") else "dm"}
 
-    def _identity(self, chat_id, reply_to, metadata, fingerprint):
-        delivery_id = (metadata or {}).get("delivery_id")
-        if delivery_id is not None:
-            if not isinstance(delivery_id, str) or not delivery_id:
-                raise ValueError("invalid Hermes delivery identity")
-            # Content is checked separately: a changed body under the same
-            # delivery ID must fail, never become a second backend task.
-            return "delivery:" + digest([chat_id, delivery_id])
-        # Cron's live adapter and standalone fallback carry the same native
-        # execution context, but different per-notification metadata.
+    def _identity(self, chat_id, reply_to, fingerprint):
+        # When Hermes supplies a cron execution context, both live and
+        # standalone sends can use it. Recovery does not always supply one.
         if _plugin_context:
             execution = _plugin_context.current_cron_execution()
             if execution and execution.execution_id:
                 return "cron:" + digest([execution.profile, execution.execution_id, chat_id, fingerprint])
-        supplied = (metadata or {}).get("observatory_intent")
-        current = _reply_identity.get()
-        anchor = supplied or reply_to or (current[1] if current else None)
-        if anchor:
-            return "reply:" + digest([chat_id, anchor, fingerprint])
+        if reply_to:
+            return "reply:" + digest([chat_id, reply_to, fingerprint])
         return None
 
     def _send_retry_is_final(self, result):
-        # Client retries preserve the exact request/key. Hermes' plaintext fallback
-        # changes content, so it must never run after an ambiguous bridge response.
+        # Upstream's platform-specific refusal hook (also used by Photon).
+        # We already send plain text and retry the SAME HTTP request here;
+        # changing the body cannot repair a rejection or an unknown outcome.
+        # Hermes' durable ledger still owns subsequent reply recovery.
         return True
-
-    async def send_final_ledgered(self, event, session_key, text_content, metadata, *, reply_to,
-                                  is_ephemeral_response=False):
-        metadata = dict(metadata or {})
-        metadata["observatory_intent"] = event.ledger_message_id or event.message_id
-        return await super().send_final_ledgered(event, session_key, text_content, metadata,
-            reply_to=reply_to, is_ephemeral_response=is_ephemeral_response)
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         if not content or len(content) > 8000:
@@ -274,7 +211,7 @@ class ObservatoryAdapter(BasePlatformAdapter):
         try:
             peer = self._peer(chat_id)
             return await self._send_payload(chat_id, {"kind": "text", "wx_ids": [peer], "text": content},
-                                            reply_to, metadata)
+                                            reply_to)
         except Exception as exc:
             detail = str(exc) if isinstance(exc, (ValueError, BridgeError)) else type(exc).__name__
             return SendResult(success=False, error=f"Observatory send refused: {detail}")
@@ -289,33 +226,20 @@ class ObservatoryAdapter(BasePlatformAdapter):
                 if not caption_result.success:
                     return caption_result
             return await self._send_payload(chat_id, {"kind": "file", "wxid": peer, "attachment": attachment},
-                                            reply_to, metadata)
+                                            reply_to)
         except Exception as exc:
             detail = str(exc) if isinstance(exc, (ValueError, BridgeError)) else type(exc).__name__
             return SendResult(success=False, error=f"Observatory document refused: {detail}")
 
-    async def _send_payload(self, chat_id, content, reply_to, metadata):
-        require_safe_delivery_config()
-        from gateway.delivery_ledger import ledger_enabled
-        if ledger_enabled() != self.idempotent_delivery:
-            raise ValueError("Hermes delivery mode changed; restart the gateway before sending")
+    async def _send_payload(self, chat_id, content, reply_to=None):
         # Local source path is not part of the logical file's identity.
         logical = dict(content)
         if "attachment" in logical:
             logical["attachment"] = {k: v for k, v in content["attachment"].items() if k != "path"}
         fingerprint = digest(logical)
-        identity = self._identity(chat_id, reply_to, metadata, fingerprint)
+        identity = self._identity(chat_id, reply_to, fingerprint)
         async with self._send_lock:
             previous = self.state.find_intent(identity) if identity else None
-            if previous is None and (metadata or {}).get("delivery_id"):
-                legacy = self._identity(chat_id, reply_to,
-                    {key: value for key, value in metadata.items() if key != "delivery_id"}, fingerprint)
-                if legacy:
-                    previous = self.state.alias_intent(identity, legacy, fingerprint)
-            if previous is None and identity is None:
-                pending = self.state.matching(fingerprint, unresolved=True)
-                if len(pending) == 1:
-                    previous = pending[0]
             if previous:
                 if previous["fingerprint"] != fingerprint:
                     raise ValueError("send identity already belongs to different content")
@@ -327,32 +251,13 @@ class ObservatoryAdapter(BasePlatformAdapter):
                 record = self.state.prepare(identity, fingerprint, payload)
             return await self._submit_record(record)
 
-    async def recover_pending(self):
-        """Only retry saved requests; never re-run a turn, re-render text or refresh its generation."""
-        require_safe_delivery_config()
-        for saved in self.state.unresolved():
-            async with self._send_lock:
-                current = self.state.find_intent(saved["intent"])
-                try:
-                    await self._submit_record(current)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log.warning("Observatory pending send retained (%s)", type(exc).__name__)
-
-    def _schedule_recovery(self):
-        # Use the existing SSE heartbeat; no additional polling timer or thread.
-        if time.monotonic() >= self._next_recovery_at and (self._recovery is None or self._recovery.done()):
-            self._next_recovery_at = time.monotonic() + 60
-            self._recovery = asyncio.create_task(self.recover_pending(), name="observatory-pending-sends")
-
     async def _submit_record(self, record):
         if record["outbox_id"]:
             return SendResult(success=True, message_id=str(record["outbox_id"]),
                               raw_response={"status": "accepted", "idempotent_replay": True})
         if record["status"] == "rejected":
             return SendResult(success=False, error=record["error"], raw_response={"status": "rejected"})
-        # This also gates journal recovery; a downgraded/replaced server must not
+        # A downgraded/replaced server must not
         # accept an old retry while silently ignoring its idempotency header.
         await self.client.ensure_idempotency()
         payload = json.loads(record["payload"])
@@ -375,12 +280,16 @@ class ObservatoryAdapter(BasePlatformAdapter):
                     rejected = rejected or (payload["kind"] == "text" and exc.status == 409 and exc.code == "send_failed")
                     if rejected:
                         self.state.rejected(record["intent"], str(exc))
+                    else:
+                        self.state.needs_review(record["intent"], str(exc))
                     return SendResult(success=False, error=str(exc), raw_response={"intent": record["intent"],
-                        "status": "rejected" if rejected else "unconfirmed"})
+                        "status": "rejected" if rejected else "needs_review"})
                 if attempt == 0:
                     await asyncio.sleep(0.25)
-        return SendResult(success=False, error="Observatory send unconfirmed; original request/key retained, do not create a new send",
-                          raw_response={"intent": record["intent"]}, retryable=False)
+        error = "Observatory send outcome unknown; original request/key retained for review"
+        self.state.needs_review(record["intent"], error)
+        return SendResult(success=False, error=error,
+                          raw_response={"intent": record["intent"], "status": "needs_review"}, retryable=False)
 
 
 async def standalone_sender(config, chat_id, message, *, thread_id=None, media_files=None, force_document=False):
@@ -398,7 +307,6 @@ async def standalone_sender(config, chat_id, message, *, thread_id=None, media_f
         message = message.strip()
     adapter = ObservatoryAdapter(config)
     try:
-        require_safe_delivery_config()
         files = []
         for item in media_files or []:
             path, is_voice = item if isinstance(item, (list, tuple)) else (item, False)
@@ -414,14 +322,14 @@ async def standalone_sender(config, chat_id, message, *, thread_id=None, media_f
         bundle = adapter.state.bundle(identity, chat_id, manifest)
         result = None
         if message:
-            result = await adapter.send(chat_id, message, metadata={"observatory_intent": bundle + ":text"})
+            result = await adapter.send(chat_id, message, reply_to=bundle + ":text")
             if not result.success:
                 if (result.raw_response or {}).get("status") == "rejected":
                     adapter.state.finish_bundle(bundle)
                 return {"error": result.error}
         for index, attachment in enumerate(files):
             result = await adapter.send_document(chat_id, attachment["path"],
-                metadata={"observatory_intent": bundle + ":file:" + str(index)})
+                reply_to=bundle + ":file:" + str(index))
             if not result.success:
                 if (result.raw_response or {}).get("status") == "rejected":
                     adapter.state.finish_bundle(bundle)

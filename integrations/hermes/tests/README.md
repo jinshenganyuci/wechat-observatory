@@ -86,29 +86,28 @@ metadata (IDs, hashes, lengths, timestamps), not credentials or message text.
 Private generated inputs and simulated phone ACK state use mode `0600`.
 Stop the launched server and simulator with SIGTERM when the lab is complete.
 
-## Shared-default delivery recovery tests
+## Native shared-default integration tests
 
-`test_shared_delivery.py` exercises the real Hermes final-response producer,
-delivery ledger, startup recovery and persisted transcript recovery against an
-in-memory synthetic bridge. It does not start a model, gateway service, phone or
-Feishu connection. Use the supported Hermes checkout with the opt-in
-`idempotent_delivery` / `metadata.delivery_id` contract described in
-[`docs/hermes.md`](../../../docs/hermes.md). The supported targets are v0.22.2
-(`d923a5eb487a17c0a68801bba9ef0f56c81040a8`) and
-`349e4f7e620ea1be6a8b5703d7152cf1e5ed9998`, each with its matching patch from
-[`compat/README.md`](../compat/README.md). An unadapted checkout is not a
-shared-default test target; do not downgrade or force an older patch onto newer
-queue lifecycle code.
+`test_shared_delivery.py` exercises the real, **unmodified** Hermes final-response
+producer, delivery ledger, startup recovery, native authorization and session
+routing against a synthetic bridge. It starts no real model, phone or Feishu
+connection. The official CI targets are:
 
-Build a disposable test interpreter through Hermes PM, including the declared
-`messaging` and `feishu` extras so both webhook and SDK-dependent regressions run.
-From this repository root, set `HERMES_SRC` to the adapted Hermes checkout; the `python` used for the PM build
-must be a bootstrapped Hermes Python. Do not install into a PM-managed interpreter
-with pip or uv.
+- v0.22.2: `d923a5eb487a17c0a68801bba9ef0f56c81040a8`
+- Current deployment baseline: `6e9b3e3b8852f12bf965f888213470574b72803e`
+
+No target applies an Observatory core patch. Plugin compatibility declarations
+are broader than these concrete regression targets; they are not a claim that
+all future upstream commits have passed. CI also checks that tracked Hermes
+gateway sources stay unmodified.
+
+Use a disposable test interpreter provisioned through Hermes PM with its declared
+`messaging` and `feishu` extras. Do not pip/uv-install into a PM-managed production
+runtime. From this repository root, use an unmodified Hermes checkout:
 
 ```sh
 OBSERVATORY_SRC="$(pwd)"
-HERMES_SRC="/absolute/path/to/adapted-hermes-agent"
+HERMES_SRC="/absolute/path/to/stock-hermes-agent"
 TEST_ROOT="$(mktemp -d)"
 mkdir -p "$TEST_ROOT/os-home" "$TEST_ROOT/hermes-home"
 cd "$HERMES_SRC"
@@ -127,46 +126,28 @@ env HOME="$TEST_ROOT/os-home" HERMES_HOME="$TEST_ROOT/hermes-home" \
   tests/gateway/test_delivery_ledger.py \
   tests/gateway/test_delivery_ledger_producer.py \
   tests/gateway/test_active_turn_recovery.py \
-  tests/gateway/test_idempotent_delivery.py \
-  tests/gateway/test*feishu*.py
+  tests/gateway/test_feishu*.py
 
-# Additional lifecycle coverage for the 349e4f7 target only:
-if test "$(git rev-parse HEAD)" = 349e4f7e620ea1be6a8b5703d7152cf1e5ed9998; then
-  env HOME="$TEST_ROOT/os-home" HERMES_HOME="$TEST_ROOT/hermes-home" \
-    HERMES_PYTHON="$TEST_ROOT/venv/bin/python" \
-    bash scripts/run_tests.sh \
-    tests/gateway/test_idempotent_marker_lifecycle.py \
-    tests/gateway/test_follower_marker_handoff.py \
-    tests/gateway/test_busy_followup_marker_handoff.py \
-    tests/gateway/test_busy_durable_acceptance.py
-fi
+git diff --exit-code HEAD -- gateway
 ```
 
-The canonical runner gives each test file a clean process and temporary Hermes
-home. Keeping its working directory in the adapted checkout also ensures the
-configuration tests' child processes import the same Hermes build.
+The canonical runner isolates each test file and temporary Hermes home. The
+shared tests check connection without a compatibility capability, first-send
+acceptance, lost HTTP ACK using the same request key, distinct legitimate equal
+texts, ingress replay deduplication, native authorization/session boundaries,
+native reply recovery and unchanged Feishu recovery in one runner. They also
+exercise an extreme accepted-before-crash case where native recovery can create
+a second task: this is a documented upstream boundary, not hidden by a false
+exactly-once assertion. Old pending rows retain their original payload/key and
+become `needs_review`; connecting never scans them to resend.
 
-The shared-default cases cover acceptance before a crash on either side of the
-plugin's local acknowledgement, local retry followed by native recovery, a reply
-not yet sent, identical text in distinct turns, changed content under one ID,
-queued-turn identity, old journal aliases, and refusal to send when the native
-ledger cannot be persisted. A live delivery-policy change refuses new requests
-until restart, while restart recovery retains previously stored request keys.
-A mixed runner checks that Feishu keeps its native
-recovery marker and thread routing. A prepared file recovers independently of an
-already accepted caption without duplicating it or deleting the source file.
-The existing plugin suite also covers partial multi-file notifications and cron
-live-to-standalone recovery. These tests establish recovery of durable requests;
-they do not claim that an attachment not yet prepared before a crash can be
-reconstructed from Hermes' text-only recovery ledger.
-
-The newer target also checks the distinction between retaining a durable turn
-marker and notifying a waiting session drain. Ledger failure must prevent a new
-transport request while still ending the adapter's lifecycle wait; the recovered
-no-waiter path must not clear that failed turn's marker. The existing follower and
-busy-follow-up tests retain normal marker hand-off behavior. A retained marker
-can be replaced by a later turn or discarded on clean startup, so these tests do
-not promise automatic redelivery after a local storage failure.
+Plugin tests cover the official standalone/CLI/cron routing contract, including
+ordinary files. An available public cron execution identity can anchor a retry;
+a new execution or an identity-free standalone invocation is new work. Tests do
+not invent a cron execution context for every upstream recovery path or claim
+that partial file notices automatically reconstruct themselves after a crash.
+The transport lab and its scope/credential guards above remain separate from
+these mocked-transport SDK tests.
 
 ## Checking native Hermes behavior without editing its state
 
