@@ -1,7 +1,7 @@
 name: observatory
 label: WeChat Observatory
 kind: platform
-version: 0.3.0
+version: 0.3.1
 requires_hermes: '>=0.22.2'
 description: Private WeChat conversations and document notifications through WeChat Observatory.
 requires_env:

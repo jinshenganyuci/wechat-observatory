@@ -99,6 +99,114 @@ def lane(tmp_path, monkeypatch):
         adapter.state.close()
 
 
+@pytest.fixture
+def native_media(lane, monkeypatch):
+    from hermes_cli.plugins import PluginContext
+
+    # Use Hermes' real ContextVar reader, not a fabricated cron identity.
+    monkeypatch.setattr(plugin._plugin_context, "current_cron_execution",
+                        lambda: PluginContext.current_cron_execution(None))
+    monkeypatch.setattr(plugin, "Client", lambda _settings: lane.bridge)
+    config = GatewayConfig(platforms={lane.adapter.platform: lane.config})
+    monkeypatch.setattr("gateway.config.load_gateway_config", lambda: config)
+    # Registration has already run in lane. Avoid discovering unrelated installed
+    # plugins; keep native target resolution, media filtering and send policy intact.
+    monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+    path = lane.home / "ordinary-report.txt"
+    path.write_text("Synthetic ordinary document.\n", encoding="utf-8")
+    lane.path = path
+    lane.media_policy = hasattr(platform_registry.get("observatory"), "standalone_send")
+    return lane
+
+
+@pytest.mark.parametrize("caption", ["", "Report ready\n"], ids=["file-only", "text-and-file"])
+def test_official_cli_media_route(native_media, capsys, caption):
+    from hermes_cli.send_cmd import cmd_send
+
+    lane = native_media
+    args = SimpleNamespace(to="observatory:filehelper", message=f"{caption}MEDIA:{lane.path}", json=True)
+    with pytest.raises(SystemExit) as stopped:
+        cmd_send(args)
+    result = json.loads(capsys.readouterr().out)
+    if not caption and not lane.media_policy:
+        # Stock v0.22.2 refuses this before calling any plugin sender.
+        assert stopped.value.code == 1
+        assert "only media attachments" in result["error"]
+        assert not lane.bridge.calls
+        return
+    assert stopped.value.code == 0, result
+    assert result.get("success") and result.get("media_delivered"), result
+    assert not result.get("warnings"), result
+    kinds = [body["kind"] for body, _key in lane.bridge.calls]
+    assert kinds == (["text", "file"] if caption else ["file"])
+    attachment = lane.bridge.calls[-1][0]["attachment"]
+    assert attachment["name"] == lane.path.name
+    assert attachment["size"] == lane.path.stat().st_size
+
+
+def cron_media_send(lane, caption, execution_id):
+    from cron.execution_identity import enter_cron_execution, exit_cron_execution
+    from cron.scheduler_delivery import _standalone_send
+
+    job = {"id": "synthetic-file-job", "name": "Synthetic file delivery"}
+    target = SimpleNamespace(job=job, platform=lane.adapter.platform, pconfig=lane.config,
+                             chat_id="filehelper", thread_id=None, where="observatory:filehelper")
+    token = enter_cron_execution(job, execution_id, {"source": "direct"})
+    try:
+        result, error = _standalone_send(target, caption, [(str(lane.path), False)])
+        assert error is None, error
+        return result
+    finally:
+        exit_cron_execution(token)
+
+
+@pytest.mark.parametrize("caption", ["", "Report ready\n"], ids=["file-only", "text-and-file"])
+def test_official_cron_original_execution_does_not_reupload_accepted_file(native_media, caption):
+    lane = native_media
+    first = cron_media_send(lane, caption, "original-execution")
+    if not caption and not lane.media_policy:
+        assert "only media attachments" in first["error"]
+        assert not lane.bridge.calls
+        return
+    assert first.get("success") and first.get("media_delivered"), first
+    original_calls = list(lane.bridge.calls)
+    second = cron_media_send(lane, caption, "original-execution")
+    assert second.get("success") and second["message_id"] == first["message_id"], second
+    assert lane.bridge.calls == original_calls  # receipt is known: no second upload at all
+    assert sum(body["kind"] == "file" for body, _key in original_calls) == 1
+
+    # A later execution is new work, even when its file and caption are identical.
+    later = cron_media_send(lane, caption, "later-execution")
+    assert later.get("success") and later["message_id"] != first["message_id"], later
+    assert sum(body["kind"] == "file" for body, _key in lane.bridge.calls) == 2
+
+
+def test_official_cron_lost_file_ack_reuses_original_key_then_stops_uploading(native_media):
+    lane = native_media
+    original_submit = lane.bridge.submit
+    losses = 2
+
+    async def lose_file_ack(body, key):
+        nonlocal losses
+        if body["kind"] == "file" and losses:
+            losses -= 1
+            lane.bridge.lose = 1
+        return await original_submit(body, key)
+
+    lane.bridge.submit = lose_file_ack
+    first = cron_media_send(lane, "Report ready", "lost-ack-execution")
+    assert first.get("error"), first
+    second = cron_media_send(lane, "Report ready", "lost-ack-execution")
+    assert second.get("success"), second
+    file_calls = [call for call in lane.bridge.calls if call[0]["kind"] == "file"]
+    assert len(file_calls) == 3 and all(call == file_calls[0] for call in file_calls)
+    assert len(lane.bridge.tasks) == 2  # one caption and one accepted attachment
+    assert sum(body["kind"] == "text" for body, _key in lane.bridge.calls) == 1
+    accepted_calls = list(lane.bridge.calls)
+    assert cron_media_send(lane, "Report ready", "lost-ack-execution").get("success")
+    assert lane.bridge.calls == accepted_calls
+
+
 def event_for(adapter, event_id="event-one", peer="alice"):
     return MessageEvent(text="a synthetic question", message_id=event_id,
                         source=adapter.build_source(chat_id=adapter._chat_id(peer), user_id=peer))

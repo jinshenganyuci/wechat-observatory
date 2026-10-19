@@ -141,11 +141,20 @@ a second task: this is a documented upstream boundary, not hidden by a false
 exactly-once assertion. Old pending rows retain their original payload/key and
 become `needs_review`; connecting never scans them to resend.
 
-Plugin tests cover the official standalone/CLI/cron routing contract, including
-ordinary files. An available public cron execution identity can anchor a retry;
-a new execution or an identity-free standalone invocation is new work. Tests do
-not invent a cron execution context for every upstream recovery path or claim
-that partial file notices automatically reconstruct themselves after a crash.
+The shared tests also enter the real `hermes_cli.send_cmd.cmd_send` and
+`cron.scheduler_delivery._standalone_send` routes, including upstream target
+resolution, MEDIA extraction, filtering and `_send_to_platform` policy checks.
+They replace bridge transport and test configuration, not the standalone sender
+or the media capability gate. File-only and text-plus-file cases run on both
+baselines: modern Hermes accepts both; stock v0.22.2 rejects file-only before
+upload because it predates the public `StandaloneSendPolicy` contract.
+
+Cron cases bind Hermes' real execution ContextVar and use the plugin's public
+context reader. A retry with a known task receipt causes no second file submit;
+a lost HTTP ACK reuses the original payload/key and creates one task even when
+the upload request is repeated. A new execution is new work. Tests do not invent
+a cron execution context for every upstream recovery path or claim that partial
+file notices automatically reconstruct themselves after a crash.
 The transport lab and its scope/credential guards above remain separate from
 these mocked-transport SDK tests.
 
