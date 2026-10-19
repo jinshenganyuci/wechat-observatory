@@ -37,8 +37,9 @@ from hermes_cli.config import save_config, read_raw_config, get_env_value
 sys.path.insert(0, str(Path(os.environ["SETUP_FILE"]).parent.parent))
 from observatory import setup as module
 original = {"model": {"provider": "custom:existing", "default": "original-model"},
-            "platforms": {"telegram": {"enabled": False, "token": "${TELEGRAM_BOT_TOKEN}"},
-                          "feishu": {"enabled": False, "extra": {"app_id": "existing-app"}}}}
+            "gateway": {"delivery_ledger": True, "standalone": False},
+            "platforms": {"telegram": {"enabled": True, "token": "${TELEGRAM_BOT_TOKEN}"},
+                          "feishu": {"enabled": True, "extra": {"app_id": "existing-app"}}}}
 save_config(original, strip_defaults=False)
 module.configure("http://127.0.0.1:18189/", "phone-a", "wxid_bot", "wxid_admin", "unit-test-admin-password")
 updated = read_raw_config()
@@ -46,8 +47,7 @@ assert updated["model"] == original["model"]
 for name in ("telegram", "feishu"):
     assert updated["platforms"][name] == original["platforms"][name]
 extra = updated["platforms"]["observatory"]["extra"]
-assert updated["gateway"]["standalone"] is True
-assert updated["gateway"]["delivery_ledger"] is False
+assert updated["gateway"] == original["gateway"]
 assert extra["allow_from"] == extra["allow_admin_from"] == ["wxid_admin"]
 assert extra["unauthorized_dm_behavior"] == "pair"
 assert "model" not in extra["user_allowed_commands"]
@@ -57,6 +57,10 @@ assert (Path(os.environ["HERMES_HOME"]) / ".env").stat().st_mode & 0o077 == 0
 # Blank password preserves the existing secret and reconfiguration is idempotent.
 module.configure("http://127.0.0.1:18189", "phone-a", "wxid_bot", "wxid_admin")
 assert get_env_value("OBSERVATORY_ADMIN_PASSWORD") == "unit-test-admin-password"
+# Existing isolated profiles keep their explicit legacy settings too.
+save_config({"gateway": {"standalone": True, "delivery_ledger": False}})
+module.configure("http://127.0.0.1:18189", "phone-a", "wxid_bot", "wxid_admin")
+assert read_raw_config()["gateway"] == {"standalone": True, "delivery_ledger": False}
 print(json.dumps({"ok": True}))
 '''
     env = {**os.environ, "HERMES_HOME": str(tmp_path), "SETUP_FILE": str(SETUP)}
@@ -143,5 +147,21 @@ def test_configure_refusal_happens_before_password_or_config_write(tmp_path, mon
     monkeypatch.setattr(hermes_config, "save_env_value", write_secret)
     with pytest.raises(ValueError, match="旧绑定仍有未确认发送"):
         setup.configure(old["base_url"], "phone-b", old["owner_wxid"], "wxid_admin", "replacement-secret")
+    write_config.assert_not_called()
+    write_secret.assert_not_called()
+
+
+def test_unpatched_shared_gateway_refuses_before_writing_any_settings(monkeypatch):
+    from observatory import adapter
+    import hermes_cli.config as hermes_config
+    monkeypatch.setattr(adapter, "BasePlatformAdapter", object)
+    current = {"gateway": {"delivery_ledger": True},
+               "platforms": {"feishu": {"enabled": True}}}
+    monkeypatch.setattr(hermes_config, "require_readable_config_before_write", lambda: current)
+    write_config, write_secret = Mock(), Mock()
+    monkeypatch.setattr(hermes_config, "save_config", write_config)
+    monkeypatch.setattr(hermes_config, "save_env_value", write_secret)
+    with pytest.raises(ValueError, match="delivery identity support"):
+        setup.configure("https://example.test", "phone-a", "wxid_bot", "wxid_admin", "unit-secret")
     write_config.assert_not_called()
     write_secret.assert_not_called()

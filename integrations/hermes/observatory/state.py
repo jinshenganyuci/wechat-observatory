@@ -42,6 +42,8 @@ class State:
             CREATE TABLE IF NOT EXISTS bundles (
                 identity TEXT PRIMARY KEY, target TEXT NOT NULL, fingerprint TEXT NOT NULL,
                 done INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS intent_aliases (
+                alias TEXT PRIMARY KEY, intent TEXT NOT NULL REFERENCES outgoing(intent));
         """)
         # Development installs made before the status column are upgraded in place.
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(outgoing)")}
@@ -75,8 +77,26 @@ class State:
             return accepted
 
     def find_intent(self, intent: str):
-        row = self.db.execute("SELECT * FROM outgoing WHERE intent=?", (intent,)).fetchone()
+        row = self.db.execute("SELECT * FROM outgoing WHERE intent=? OR intent="
+                              "(SELECT intent FROM intent_aliases WHERE alias=?)", (intent, intent)).fetchone()
         return dict(row) if row else None
+
+    def alias_intent(self, alias: str, original: str, fingerprint: str):
+        """Attach a native delivery ID to a legacy request without changing its key."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.find_intent(alias)
+            record = existing or self.find_intent(original)
+            if record:
+                if record["fingerprint"] != fingerprint:
+                    raise ValueError("send identity already belongs to different content")
+                if existing is None:
+                    self.db.execute("INSERT INTO intent_aliases VALUES (?, ?)", (alias, record["intent"]))
+            self.db.commit()
+            return record
+        except BaseException:
+            self.db.rollback()
+            raise
 
     def matching(self, fingerprint: str, *, unresolved: bool = False) -> list[dict]:
         sql = "SELECT * FROM outgoing WHERE fingerprint=?"

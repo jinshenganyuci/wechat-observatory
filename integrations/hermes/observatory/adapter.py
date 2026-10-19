@@ -38,11 +38,11 @@ def validate_config(config) -> bool:
         return False
 
 
-def require_safe_delivery_config():
+def require_safe_delivery_config(config=None):
     from gateway.delivery_ledger import ledger_enabled
-    if ledger_enabled():
-        raise ValueError("Observatory requires an isolated Hermes profile with gateway.delivery_ledger: false; "
-                         "its own journal preserves the original bridge idempotency key")
+    if ledger_enabled(config) and not hasattr(BasePlatformAdapter, "idempotent_delivery"):
+        raise ValueError("Observatory requires Hermes delivery identity support when gateway.delivery_ledger is enabled; "
+                         "apply the documented Hermes compatibility patch before sharing default")
     from hermes_constants import get_process_hermes_home
     if get_process_hermes_home().resolve() != get_hermes_home().resolve():
         raise ValueError("Launch this Observatory profile's own gateway (gateway.standalone: true); "
@@ -62,6 +62,10 @@ class ObservatoryAdapter(BasePlatformAdapter):
 
     def __init__(self, config):
         super().__init__(config, Platform("observatory"))
+        from gateway.delivery_ledger import ledger_enabled
+        # Keep one delivery policy for this adapter's lifetime. A config edit
+        # must not change the identity between ledger registration and HTTP.
+        self.idempotent_delivery = ledger_enabled()
         self.settings = settings_from_config(config)
         self.client = Client(self.settings)
         self.state = State(get_hermes_home() / "observatory" / (self.settings.scope + ".sqlite3"))
@@ -209,11 +213,12 @@ class ObservatoryAdapter(BasePlatformAdapter):
         await self.handle_message(event)
 
     async def handle_message(self, event):
+        from gateway.delivery_ledger import ledger_enabled
         if (event.internal is True and not event.text and event.message_type == MessageType.TEXT
-                and not event.message_id and not event.media_urls):
-            # v0.22.2 startup resume has no original inbound/delivery identity. A
-            # new LLM turn here could duplicate an accepted response after a crash.
-            # Only our persisted HTTP intents recover; a human can continue the chat.
+                and not event.message_id and not event.media_urls and not ledger_enabled()):
+            # Legacy isolated profiles have no native ledger to settle completed
+            # turns first. With the ledger enabled, Hermes can safely resume work
+            # which never reached a persisted final response.
             log.info("Observatory skipped an unanchored startup resume; awaiting a new user message")
             return
         token = _reply_identity.set((event.source.chat_id, event.message_id))
@@ -231,6 +236,13 @@ class ObservatoryAdapter(BasePlatformAdapter):
         return {"name": peer, "type": "group" if peer.endswith("@chatroom") else "dm"}
 
     def _identity(self, chat_id, reply_to, metadata, fingerprint):
+        delivery_id = (metadata or {}).get("delivery_id")
+        if delivery_id is not None:
+            if not isinstance(delivery_id, str) or not delivery_id:
+                raise ValueError("invalid Hermes delivery identity")
+            # Content is checked separately: a changed body under the same
+            # delivery ID must fail, never become a second backend task.
+            return "delivery:" + digest([chat_id, delivery_id])
         # Cron's live adapter and standalone fallback carry the same native
         # execution context, but different per-notification metadata.
         if _plugin_context:
@@ -284,6 +296,9 @@ class ObservatoryAdapter(BasePlatformAdapter):
 
     async def _send_payload(self, chat_id, content, reply_to, metadata):
         require_safe_delivery_config()
+        from gateway.delivery_ledger import ledger_enabled
+        if ledger_enabled() != self.idempotent_delivery:
+            raise ValueError("Hermes delivery mode changed; restart the gateway before sending")
         # Local source path is not part of the logical file's identity.
         logical = dict(content)
         if "attachment" in logical:
@@ -292,11 +307,18 @@ class ObservatoryAdapter(BasePlatformAdapter):
         identity = self._identity(chat_id, reply_to, metadata, fingerprint)
         async with self._send_lock:
             previous = self.state.find_intent(identity) if identity else None
+            if previous is None and (metadata or {}).get("delivery_id"):
+                legacy = self._identity(chat_id, reply_to,
+                    {key: value for key, value in metadata.items() if key != "delivery_id"}, fingerprint)
+                if legacy:
+                    previous = self.state.alias_intent(identity, legacy, fingerprint)
             if previous is None and identity is None:
                 pending = self.state.matching(fingerprint, unresolved=True)
                 if len(pending) == 1:
                     previous = pending[0]
             if previous:
+                if previous["fingerprint"] != fingerprint:
+                    raise ValueError("send identity already belongs to different content")
                 record = previous
             else:
                 generation = await self.client.generation()

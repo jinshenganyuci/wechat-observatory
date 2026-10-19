@@ -86,6 +86,65 @@ metadata (IDs, hashes, lengths, timestamps), not credentials or message text.
 Private generated inputs and simulated phone ACK state use mode `0600`.
 Stop the launched server and simulator with SIGTERM when the lab is complete.
 
+## Shared-default delivery recovery tests
+
+`test_shared_delivery.py` exercises the real Hermes final-response producer,
+delivery ledger, startup recovery and persisted transcript recovery against an
+in-memory synthetic bridge. It does not start a model, gateway service, phone or
+Feishu connection. Use the supported Hermes checkout with the opt-in
+`idempotent_delivery` / `metadata.delivery_id` contract described in
+[`docs/hermes.md`](../../../docs/hermes.md); an unadapted v0.22.2 checkout is not
+the shared-default test target.
+
+Build a disposable test interpreter through Hermes PM, including the declared
+`messaging` and `feishu` extras so both webhook and SDK-dependent regressions run.
+From this repository root, set `HERMES_SRC` to the adapted Hermes checkout; the `python` used for the PM build
+must be a bootstrapped Hermes Python. Do not install into a PM-managed interpreter
+with pip or uv.
+
+```sh
+OBSERVATORY_SRC="$(pwd)"
+HERMES_SRC="/absolute/path/to/adapted-hermes-agent"
+TEST_ROOT="$(mktemp -d)"
+mkdir -p "$TEST_ROOT/os-home" "$TEST_ROOT/hermes-home"
+cd "$HERMES_SRC"
+env HOME="$TEST_ROOT/os-home" HERMES_HOME="$TEST_ROOT/hermes-home" \
+  HERMES_RUNTIME_DIR="$TEST_ROOT/runtime" \
+  python -m pm.build_env --source "$HERMES_SRC" --out "$TEST_ROOT/venv" \
+  --extra messaging --extra feishu --group dev --group test
+
+env HOME="$TEST_ROOT/os-home" HERMES_HOME="$TEST_ROOT/hermes-home" \
+  HERMES_PYTHON="$TEST_ROOT/venv/bin/python" \
+  bash scripts/run_tests.sh \
+  "$OBSERVATORY_SRC/integrations/hermes/observatory/tests/test_plugin.py" \
+  "$OBSERVATORY_SRC/integrations/hermes/tests/test_setup.py" \
+  "$OBSERVATORY_SRC/integrations/hermes/tests/test_shared_delivery.py" \
+  "$OBSERVATORY_SRC/integrations/hermes/tests/test_observatory_lab.py" \
+  tests/gateway/test_delivery_ledger.py \
+  tests/gateway/test_delivery_ledger_producer.py \
+  tests/gateway/test_active_turn_recovery.py \
+  tests/gateway/test_idempotent_delivery.py \
+  tests/gateway/test*feishu*.py
+```
+
+The canonical runner gives each test file a clean process and temporary Hermes
+home. Keeping its working directory in the adapted checkout also ensures the
+configuration tests' child processes import the same Hermes build.
+
+The shared-default cases cover acceptance before a crash on either side of the
+plugin's local acknowledgement, local retry followed by native recovery, a reply
+not yet sent, identical text in distinct turns, changed content under one ID,
+queued-turn identity, old journal aliases, and refusal to send when the native
+ledger cannot be persisted. A live delivery-policy change refuses new requests
+until restart, while restart recovery retains previously stored request keys.
+A mixed runner checks that Feishu keeps its native
+recovery marker and thread routing. A prepared file recovers independently of an
+already accepted caption without duplicating it or deleting the source file.
+The existing plugin suite also covers partial multi-file notifications and cron
+live-to-standalone recovery. These tests establish recovery of durable requests;
+they do not claim that an attachment not yet prepared before a crash can be
+reconstructed from Hermes' text-only recovery ledger.
+
 ## Checking native Hermes behavior without editing its state
 
 The isolated runtime wrapper uses `work/hermes-lab/home` as `HERMES_HOME`. Inspect

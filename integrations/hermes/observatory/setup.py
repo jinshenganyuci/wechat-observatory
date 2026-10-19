@@ -69,7 +69,7 @@ def reject_pending_binding_change(config: dict, settings: dict) -> None:
 
 def configure(base_url: str, device: str, owner_wxid: str, admin_wxid: str,
               password: str = "") -> None:
-    from gateway.config import load_gateway_config
+    from .adapter import require_safe_delivery_config
     from hermes_cli.config import (
         get_env_value, require_readable_config_before_write, save_config, save_env_value,
     )
@@ -82,15 +82,10 @@ def configure(base_url: str, device: str, owner_wxid: str, admin_wxid: str,
     # Validate the existing document before writing either config or secret.
     current = require_readable_config_before_write()
     reject_pending_binding_change(current, settings)
-    others = [platform.value for platform, cfg in load_gateway_config().platforms.items()
-              if cfg.enabled and platform.value != "observatory"]
-    if others:
-        raise ValueError("请在微信专用 profile 中配置；当前还启用了 " + ", ".join(sorted(others))
-                         + "。先运行 hermes profile create wechat --clone，再用 hermes --profile wechat setup gateway。")
+    require_safe_delivery_config(current)
     if password:
         save_env_value(SECRET_NAME, password)
-    save_config({"gateway": {"standalone": True, "delivery_ledger": False},
-                 "platforms": {"observatory": {
+    save_config({"platforms": {"observatory": {
         "enabled": True,
         "typing_indicator": False,
         "gateway_restart_notification": False,
@@ -111,7 +106,7 @@ def interactive_setup() -> None:
         value = input(f"{label}" + (f" [{default}]" if default else "") + ": ").strip()
         return value or default
 
-    print("Observatory 微信专用 profile：接收私聊文字，复用 Hermes 会话与命令。")
+    print("Observatory 微信渠道：接收私聊文字，可与飞书等渠道共用当前 profile。")
     print("使用真实 wxid；管理员应是向机器人发消息的另一个账号。")
     try:
         base_url = ask("后端服务地址", str(current.get("base_url", "")))
@@ -125,5 +120,5 @@ def interactive_setup() -> None:
         return
     print(f"已保存到 {get_config_path()}。管理员可聊天及使用 /new、/model。")
     print("其他账号须通过 hermes pairing approve observatory <配对码> 批准后才能聊天。")
-    print("已启用该 profile 的独立运行，发送恢复由 Observatory 保留的原请求 ID 处理。")
-    print("请启动该 profile 的 gateway；本向导不会重启现有 Telegram 或飞书连接。")
+    print("已保留当前 profile 的投递账本、其他渠道及模型设置。")
+    print("请在完成旧微信状态迁移后重启该 profile 的 gateway；本向导不会重启现有连接。")
