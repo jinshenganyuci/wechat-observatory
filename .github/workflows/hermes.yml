@@ -15,10 +15,11 @@ jobs:
   delivery:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      HERMES_HOME: ${{ runner.temp }}/hermes-home
-      HERMES_RUNTIME_DIR: ${{ runner.temp }}/hermes-runtime
     steps:
+      - name: Isolate test state
+        run: |
+          echo "HERMES_HOME=$RUNNER_TEMP/hermes-home" >> "$GITHUB_ENV"
+          echo "HERMES_RUNTIME_DIR=$RUNNER_TEMP/hermes-runtime" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: observatory
