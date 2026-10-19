@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -157,6 +158,17 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         return {"device": "test", "owner_wxid": "wxid_bot", "from": "alice", "sender": "alice",
                 "to": "wxid_bot", "chat_id": "alice", "chat_kind": "direct", "direction": "recv",
                 "message_type": 1, "text": "hello", "event_key": "key-1", "id": "999999999", **values}
+
+    async def test_declares_public_media_route_when_host_supports_it(self):
+        entry = platform_registry.get("observatory")
+        self.assertIs(entry.standalone_sender_fn, module.standalone_sender)
+        policy = getattr(entry, "standalone_send", None)
+        if importlib.util.find_spec("gateway.platforms.send_targets") is None:
+            self.assertIsNone(policy)  # Legacy host still supports text and captioned files.
+        else:
+            self.assertTrue(policy.media)
+            self.assertFalse(policy.all_sends)  # Text keeps Hermes' ordinary live routing.
+            self.assertFalse(policy.captionable)  # The plugin sends captions as separate text.
 
     async def test_only_private_received_text_reaches_native_auth_boundary(self):
         self.adapter.handle_message = AsyncMock()
@@ -353,6 +365,22 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(call[0]["kind"] == "text" for call in self.client.calls), 1)
         self.assertEqual(len(self.client.ids), 2)
 
+    async def test_attachment_only_notification_retries_one_original_file_request(self):
+        path = Path(self.temp.name) / "notice.txt"
+        path.write_text("ordinary notification attachment")
+        self.client.lose = 1
+        with patch.object(module, "Client", return_value=self.client):
+            result = await module.standalone_sender(self.config, "filehelper", "",
+                media_files=[(str(path), False)])
+        self.assertTrue(result["success"])
+        self.assertTrue(result["media_delivered"])
+        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual(self.client.calls[0], self.client.calls[1])
+        self.assertEqual(self.client.calls[0][0]["kind"], "file")
+        self.assertEqual(len(self.client.ids), 1)
+        self.assertEqual(path.read_text(), "ordinary notification attachment")
+        self.assertFalse(self.adapter.state.unresolved())
+
     async def test_cron_live_and_standalone_share_caption_and_file_identity(self):
         path = Path(self.temp.name) / "cron.txt"
         path.write_text("cron attachment")
@@ -517,7 +545,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         from tools import send_message_tool as native
         path = Path(self.temp.name) / "group.txt"
         path.write_text("group attachment")
-        with patch.object(native, "_live_adapter", return_value=(SimpleNamespace(), self.adapter)):
+        with patch.object(native, "_live_adapter", return_value=(SimpleNamespace(), self.adapter)), \
+                patch.object(module, "Client", return_value=self.client):
             for _ in range(2):
                 result = await native._send_to_platform(self.adapter.platform, self.config, "123@chatroom", "caption",
                     media_files=[(str(path), False)])

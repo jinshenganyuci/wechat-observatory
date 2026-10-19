@@ -347,6 +347,16 @@ def register(ctx):
     global _plugin_context
     _plugin_context = ctx
     from .setup import interactive_setup
+    send_options = {}
+    try:
+        from gateway.platforms.send_targets import StandaloneSendPolicy
+    except ModuleNotFoundError as exc:
+        if exc.name != "gateway.platforms.send_targets":
+            raise
+        # v0.22.2 predates this public capability; its generic notification
+        # route still requires text alongside an attachment.
+    else:
+        send_options["standalone_send"] = StandaloneSendPolicy(label="Observatory", media=True)
     ctx.register_platform("observatory", "WeChat Observatory", ObservatoryAdapter,
                           check_fn=lambda: True, validate_config=validate_config,
                           setup_fn=interactive_setup, standalone_sender_fn=standalone_sender,
@@ -357,4 +367,5 @@ def register(ctx):
                           validate_target_ref_fn=valid_target, display_tier="low",
                           cron_deliver_env_var="OBSERVATORY_HOME_CHANNEL",
                           allow_update_command=False, trusted_inbound=False,
-                          platform_hint="Private WeChat text conversation through Observatory. File sends support ordinary documents.")
+                          platform_hint="Private WeChat text conversation through Observatory. File sends support ordinary documents.",
+                          **send_options)

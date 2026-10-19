@@ -220,11 +220,15 @@ hermes --profile default send --to observatory:123456789@chatroom \
   "报告文件 MEDIA:/absolute/path/report.pdf"
 ```
 
-目标应使用管理台看到的好友 wxid 或群 ID。`hermes send --file report.txt` 读取的是文本正文；发送附件使用 `MEDIA:`。所有文件通知（包括 cron）都应带一句简短说明，v0.22.2 的通用通知路由会拒绝仅有附件的空正文。通知正文最多 8000 字符，超限整条拒绝，不拆成多个发送任务；图片和视频目前仍不支持。
+目标应使用管理台看到的好友 wxid 或群 ID。`hermes send --file report.txt` 读取的是文本正文；发送附件使用 `MEDIA:`。通知正文最多 8000 字符，超限整条拒绝，不拆成多个发送任务；图片和视频目前仍不支持。
+
+插件 0.3.1 在提供公开 `StandaloneSendPolicy` 的 Hermes 上声明附件发送能力；已验证的 `6e9b3e3` 基线支持只有附件的 CLI 和 cron 通知，例如 `hermes --profile default send --to observatory:filehelper "MEDIA:/absolute/path/report.pdf"`。v0.22.2 没有这个公开接口，其通用通知路由会先拒绝空正文；该版本的文件通知仍须带一句简短说明。插件不修改旧版核心来绕过限制。
 
 Hermes cron 的投递目标同样使用 `observatory:<目标>`，在 `default` 中创建或选择已有任务即可。文件原件由产生它的工具管理，插件不会删除用户原文件；后端和手机的传输暂存按[文件发送与清理约定](file-send.md)处理。
 
 文件上传结果未确认时保留原文件路径和内容，先查看原任务。已经获得任务 ID 后，后端和手机继续处理该任务，插件不会因尚未显示 `sent` 再发一份。重新执行一次 CLI 命令或手动触发 cron 是**新的发送请求**；不能把它当成原上传的安全重试。
+
+在同一个官方 cron 执行身份中重试，已经记录任务 ID 的文件不会再次上传。若上传响应丢失、尚不知道任务 ID，HTTP 重试仍可能重新传输文件字节，但沿用原幂等键，后端不会创建第二个发送任务；这不等于网络字节只传一次。
 
 ## 连接、恢复与防重复
 
