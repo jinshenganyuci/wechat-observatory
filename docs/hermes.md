@@ -9,6 +9,7 @@ Observatory 是 Hermes 官方平台插件接口上的微信渠道。微信与飞
 | 功能 | 用法与边界 |
 | --- | --- |
 | 私聊文字对话 | 已授权微信账号私聊机器人；每个发送人独立会话 |
+| 管理员群聊问答 | 机器人已加入的群内，配置中的管理员真正 @ 机器人后触发；回复当前群 |
 | 新建对话 | `/new`，使用 Hermes 原生会话重置 |
 | 切换模型 | 管理员发送 `/model` 查看，`/model 模型名 --session` 切换当前会话 |
 | 管理员绑定 | 在本机配置向导填写管理员真实 wxid；聊天账号不能自行抢占管理员 |
@@ -16,7 +17,7 @@ Observatory 是 Hermes 官方平台插件接口上的微信渠道。微信与飞
 | 文本通知 | Hermes CLI、cron 通过 Observatory 发给好友、群或文件传输助手 |
 | 普通文件通知 | 复用文件上传 API，单文件最多 300 MiB；不复制一套手机上传逻辑 |
 
-当前不接入群聊问答，不识别收到的图片、语音和文件。微信侧不提供本适配所需的消息编辑、按钮或输入状态能力，因此回复按普通文本发出，不模拟 Telegram 的流式编辑。发送成功也不代表收件人已读。
+当前不识别收到的图片、语音和文件。微信侧不提供本适配所需的消息编辑、按钮或输入状态能力，因此回复按普通文本发出，不模拟 Telegram 的流式编辑。发送成功也不代表收件人已读。
 
 ## 安装与管理员绑定
 
@@ -62,6 +63,9 @@ platforms:
       owner_wxid: wxid_robot
       allow_from: [wxid_admin]
       allow_admin_from: [wxid_admin]
+      group_admin_mentions: true
+      group_allow_from: [wxid_admin]
+      group_allow_admin_from: [wxid_admin]
       user_allowed_commands: [new, status, stop]
       unauthorized_dm_behavior: pair
 ```
@@ -84,6 +88,18 @@ hermes --profile default pairing approve observatory <配对码>
 `/new` 按 Hermes 现有审批设置可能先提示确认，此时回复 `/approve` 即可；这是 Hermes 的原生确认流程。
 
 共享 default 保留 Hermes 默认开启的投递账本。旧版为了独立微信而设置的 `delivery_ledger: false` 不再是本插件要求；不要把旧 profile 的全局 gateway 配置复制进 default。原生恢复有自己的重试与不确定结果边界，见[连接、恢复与防重复](#连接恢复与防重复)。
+
+## 管理员在群内 @ 机器人
+
+插件 0.4.0 支持机器人已加入的所有群，不需要逐群登记。仅当 `group_admin_mentions: true`，**真实发送者 wxid 在 `allow_admin_from` 中，且手机上报的结构化 `mentioned_wxids` 精确包含机器人 wxid** 时，群文字才交给 Hermes。手打 `@昵称`、只 @ 其他人、`@所有人`、普通群成员以及仅获私聊配对的用户均不能触发。群内的未知用户不会收到配对提示。
+
+旧配置未设置该开关时保持关闭；新安装向导会为绑定管理员开启。重跑向导不会自动给旧私聊渠道开启群聊，也不会覆盖已有更窄的群权限。为现有渠道启用时，只在 `platforms.observatory.extra` 添加上例的三个 `group_*` 字段，管理员列表使用已有真实 wxid。`group_allow_from` 和 `group_allow_admin_from` 分别是 Hermes 原生的群聊天及群命令授权；插件的管理员门槛不会绕过它们。不要修改 `gateway` 全局设置或飞书配置。
+
+手机需要 Observatory **0.1.24 或更新 APK**，后端也需更新到本次包含 `mentioned_wxids` 的版本，并对原数据库执行新版迁移。旧 APK、旧后端、历史消息缺少该字段或字段为空时，插件不会从正文猜测 @ 关系。只有群名和昵称属于显示信息：插件通过账号隔离的通讯录接口查询，最多缓存 5 分钟；查询失败时显示原 ID，不影响已核实的触发。模型每条消息都获得当前群 ID、群名、真实发送者 wxid 和昵称，回复使用当前群 ID，不会变成私聊。
+
+会话沿用 Hermes 的原生策略。当前绑定单一管理员时，同一群连续对话、不同群和私聊彼此隔离。插件不改全局 `group_sessions_per_user`；将来绑定多个管理员时，默认仍按“群＋发送者”隔离，不承诺自动共享为一个跨管理员会话。名称不参与身份判断，群改名不会改变会话。
+
+群消息正文不改写；要使用原生命令，命令放在正文开头，例如 `/status @机器人`，并通过微信真正选择机器人作为 @ 对象。历史补读不重新执行以 `/` 开头的命令。第一次验证应由管理员在测试群主动 @，不要向未知群批量发送测试消息。
 
 ## 从旧 wechat profile 迁移到 default
 
@@ -236,7 +252,7 @@ Hermes cron 的投递目标同样使用 `observatory:<目标>`，在 `default` �
 
 | 层次 | 负责的恢复和去重 |
 | --- | --- |
-| 微信入站传输 | SSE 断线后按持久游标补读，按 `event_key` 去重；只接收绑定账号的私聊文字 |
+| 微信入站传输 | SSE 断线后按持久游标补读，按 `event_key` 去重；接收绑定账号私聊文字及通过管理员真实 @ 校验的群文字 |
 | Hermes | 原生授权、配对、会话、命令、队列、最终文本账本及崩溃后恢复；飞书保持同一套原生行为 |
 | 插件的一次发送 | 请求落盘后再发 HTTP，短暂重试沿用同一幂等键、原内容及原账号代次；不扫描旧记录自动补发 |
 | Observatory 后端与手机 | 按原任务 ID 执行、记录实际发送状态及处理传输暂存文件 |

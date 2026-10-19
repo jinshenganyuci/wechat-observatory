@@ -165,6 +165,8 @@ type StoredEventView struct {
 	ChatKind     string `json:"chat_kind,omitempty"`
 	CreateTime   int64  `json:"create_time"`
 	CreatedAt    string `json:"created_at,omitempty"`
+
+	MentionedWxIDs []string `json:"mentioned_wxids,omitempty"`
 }
 
 type MessageFilter struct {

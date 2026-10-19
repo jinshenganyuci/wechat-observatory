@@ -1,9 +1,9 @@
 name: observatory
 label: WeChat Observatory
 kind: platform
-version: 0.3.1
+version: 0.4.0
 requires_hermes: '>=0.22.2'
-description: Private WeChat conversations and document notifications through WeChat Observatory.
+description: WeChat private conversations, administrator group mentions and document notifications.
 requires_env:
   - name: OBSERVATORY_ADMIN_PASSWORD
     description: Observatory backend admin password

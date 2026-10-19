@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -87,6 +88,9 @@ func (s *Store) ApplyMigrations(ctx context.Context) error {
 		}
 	}
 	if err := s.ensureMessageEventMediaColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureMessageEventMentionColumn(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureMessageEventOwnerColumns(ctx); err != nil {
@@ -241,6 +245,14 @@ func (s *Store) ensureMessageEventOwnerColumns(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureMessageEventMentionColumn(ctx context.Context) error {
+	_, err := s.executor(ctx).ExecContext(ctx, `ALTER TABLE bridge_message_events ADD COLUMN mentioned_wxids TEXT NULL AFTER sender_wxid`)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return nil
+	}
+	return err
 }
 
 func (s *Store) ensureMessageEventEventKey(ctx context.Context) error {
@@ -407,6 +419,7 @@ func Migrations() []string {
 			to_wxid VARCHAR(191) NULL,
 			room_id VARCHAR(191) NULL,
 			sender_wxid VARCHAR(191) NULL,
+			mentioned_wxids TEXT NULL,
 			chat_id VARCHAR(191) GENERATED ALWAYS AS (` + messageEventChatIDExpression + `) VIRTUAL,
 			text TEXT NOT NULL,
 			message_type INT NOT NULL,
@@ -1400,9 +1413,9 @@ func (s *Store) listOutboxItemsForDevice(ctx context.Context, ids []int64, devic
 const recordMessageEventStatement = `
 		INSERT INTO bridge_message_events (
 			event_key, source_id, event_id, chat_record_id, device, owner_wxid, direction, from_wxid,
-			to_wxid, room_id, sender_wxid, text, message_type, media_kind,
+			to_wxid, room_id, sender_wxid, mentioned_wxids, text, message_type, media_kind,
 			media_mime, media_name, media_url, media_size, raw_provider, create_time
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`
 
 func storedMessageEventKey(event bridge.MessageEvent) string {
@@ -1415,6 +1428,10 @@ func storedMessageEventKey(event bridge.MessageEvent) string {
 func (s *Store) recordMessageEvent(ctx context.Context, event bridge.MessageEvent) (bridge.MessageEvent, error) {
 	event = event.Normalize()
 	event.EventKey = storedMessageEventKey(event)
+	mentions, err := json.Marshal(event.MentionedWxIDs)
+	if err != nil {
+		return bridge.MessageEvent{}, err
+	}
 	result, err := s.executor(ctx).ExecContext(ctx, recordMessageEventStatement,
 		event.EventKey,
 		nullString(event.ID),
@@ -1427,6 +1444,7 @@ func (s *Store) recordMessageEvent(ctx context.Context, event bridge.MessageEven
 		nullString(event.To),
 		nullString(event.RoomID),
 		nullString(event.Sender),
+		string(mentions),
 		event.Text,
 		event.MessageType,
 		nullString(event.MediaKind),
@@ -1450,7 +1468,7 @@ func (s *Store) recordMessageEvent(ctx context.Context, event bridge.MessageEven
 func (s *Store) messageEventByID(ctx context.Context, id int64) (bridge.MessageEvent, error) {
 	row := s.executor(ctx).QueryRowContext(ctx, `
 		SELECT id, event_key, source_id, event_id, chat_record_id, device, owner_wxid,
-			direction, from_wxid, to_wxid, room_id, sender_wxid, text, message_type,
+			direction, from_wxid, to_wxid, room_id, sender_wxid, mentioned_wxids, text, message_type,
 			media_kind, media_mime, media_name, media_url, media_size, raw_provider, create_time
 		FROM bridge_message_events
 		WHERE id = ?`, id)

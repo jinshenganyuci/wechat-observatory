@@ -61,6 +61,9 @@ class Bridge:
     async def close(self):
         return None
 
+    async def contact_name(self, wxid):
+        return "Synthetic group" if wxid.endswith("@chatroom") else "Synthetic " + wxid
+
 
 @pytest.fixture
 def lane(tmp_path, monkeypatch):
@@ -346,6 +349,96 @@ def test_native_auth_and_session_isolation_remain_in_charge(lane):
     assert first != build_session_key(stranger)
     assert ":observatory:" in first
     assert build_session_key(alice, profile="separate") != first
+
+
+@pytest.mark.asyncio
+async def test_group_admin_mention_uses_native_auth_context_sessions_and_group_reply(lane):
+    from gateway.session import SessionStore
+    from gateway.slash_access import policy_for_source
+    from hermes_state import SessionDB
+
+    adapter = lane.adapter
+    lane.config.extra.update(group_admin_mentions=True, group_allow_from=["alice"],
+                             group_allow_admin_from=["alice"])
+    adapter.state.initialize(10)
+    runner = runner_for(adapter)
+    runner.config = GatewayConfig(platforms={adapter.platform: lane.config})
+    original_isolation = runner.config.group_sessions_per_user
+    captured = []
+
+    async def native_boundary(event):
+        # Keep the real native authorization decision. The synthetic handler
+        # below only stands in for the model and records admitted events.
+        assert runner._is_user_authorized(event.source)
+        captured.append(event)
+
+    adapter.handle_message = native_boundary
+    def group(room, event_key):
+        return {"device": "synthetic", "owner_wxid": "wxid_synthetic_bot", "direction": "recv",
+                "message_type": 1, "chat_kind": "room", "from_wxid": room, "chat_id": room,
+                "room_id": room, "sender_wxid": "alice", "to_wxid": "wxid_synthetic_bot",
+                "mentioned_wxids": ["wxid_synthetic_bot"], "text": "@Bot synthetic question",
+                "event_key": event_key}
+
+    await adapter._ingest(group("111@chatroom", "group-a-one"), 11)
+    await adapter._ingest(group("222@chatroom", "group-b-one"), 12)
+    await adapter._ingest(group("111@chatroom", "group-a-two"), 13)
+    assert len(captured) == 3
+    first, other, later = captured
+    assert first.source.user_id == first.user_id == "alice"
+    assert first.source.chat_type == "group" and first.source.thread_id is None
+    assert not first.source.role_authorized and not first.internal
+    assert policy_for_source(runner.config, first.source).is_admin("alice")
+    prompt_text = runner._prefix_inbound_sender_context(first, first.source, first.text)
+    for value in ("111@chatroom", '"sender_wxid": "alice"', "Synthetic group", "Synthetic alice"):
+        assert value in prompt_text
+
+    store = SessionStore(sessions_dir=lane.home / "sessions", config=runner.config)
+    if store._db is not None:
+        store._db.close()
+    store._db = SessionDB(db_path=lane.home / "state.db")
+    try:
+        entry_a = store.get_or_create_session(first.source)
+        entry_b = store.get_or_create_session(other.source)
+        entry_dm = store.get_or_create_session(event_for(adapter).source)
+        assert store.get_or_create_session(later.source).session_id == entry_a.session_id
+        assert len({entry_a.session_id, entry_b.session_id, entry_dm.session_id}) == 3
+        assert adapter._source_session_key(first.source) == entry_a.session_key
+        assert runner.config.group_sessions_per_user == original_isolation
+        assert "group_sessions_per_user" not in lane.config.extra
+    finally:
+        store._db.close()
+    assert (await final(adapter, first, "synthetic group answer")).success
+    assert lane.bridge.calls[-1][0]["wx_ids"] == ["111@chatroom"]
+
+
+@pytest.mark.asyncio
+async def test_paired_dm_user_cannot_trigger_group_and_native_restriction_still_applies(lane):
+    adapter = lane.adapter
+    lane.config.extra.update(group_admin_mentions=True, group_allow_from=["alice"],
+                             group_allow_admin_from=["alice"])
+    adapter.state.initialize(10)
+    runner = runner_for(adapter)
+    runner.config = GatewayConfig(platforms={adapter.platform: lane.config})
+    runner.pairing_store = SimpleNamespace(is_approved=lambda platform, user: user == "paired-user")
+    pair_source = adapter.build_source(chat_id=adapter._chat_id("111@chatroom"),
+                                      chat_type="group", user_id="paired-user")
+    assert runner._is_user_authorized(pair_source)  # native pairing alone is a broad grant
+    row = {"device": "synthetic", "owner_wxid": "wxid_synthetic_bot", "direction": "recv",
+           "message_type": 1, "chat_kind": "room", "from": "111@chatroom", "chat_id": "111@chatroom",
+           "room_id": "111@chatroom", "sender": "paired-user", "to": "wxid_synthetic_bot",
+           "mentioned_wxids": ["wxid_synthetic_bot"], "text": "@Bot synthetic question", "event_key": "paired-group"}
+    handler = adapter.handle_message = AsyncMock()
+    await adapter._ingest(row, 11)
+    handler.assert_not_awaited()  # plugin's narrower group gate applies before native pairing
+    assert not lane.bridge.calls
+
+    # The plugin never bypasses a narrower native allowlist for an admitted admin.
+    lane.config.extra["group_allow_from"] = ["someone-else"]
+    await adapter._ingest({**row, "sender": "alice", "event_key": "admin-restricted"}, 12)
+    event = handler.call_args.args[0]
+    assert not runner._is_user_authorized(event.source)
+    assert not event.source.role_authorized
 
 
 @pytest.mark.asyncio

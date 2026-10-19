@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import time
 import unicodedata
 from urllib.parse import urlsplit
 
@@ -76,6 +77,7 @@ class Client:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._session: aiohttp.ClientSession | None = None
+        self._contact_names: dict[str, tuple[float, str]] = {}
 
     async def session(self):
         if self._session is None or self._session.closed:
@@ -131,6 +133,35 @@ class Client:
         if after is not None:
             params["after_id"] = after
         return (await self._json("GET", "/api/messages", params=params)).get("messages", [])
+
+    async def contact_name(self, wxid: str) -> str:
+        """Best-effort display label; never an authorization or mention identity."""
+        now = time.monotonic()
+        cached = self._contact_names.get(wxid)
+        if cached and cached[0] > now:
+            return cached[1]
+        name = wxid
+        try:
+            body = await self._json("GET", "/api/module-contacts", params={
+                "device": self.settings.device, "owner_wxid": self.settings.owner_wxid,
+                "wxid": wxid, "limit": 1}, timeout=aiohttp.ClientTimeout(total=3, connect=2))
+            contacts = body.get("contacts", []) if isinstance(body, dict) else []
+            for contact in contacts if isinstance(contacts, list) else []:
+                if (not isinstance(contact, dict) or contact.get("device") != self.settings.device
+                        or contact.get("owner_wxid") != self.settings.owner_wxid
+                        or contact.get("wxid") != wxid or contact.get("deleted")):
+                    continue
+                label = contact.get("remark") or contact.get("nickname")
+                if isinstance(label, str):
+                    name = " ".join("".join(" " if unicodedata.category(c).startswith("C") else c
+                                            for c in label).split())[:160] or wxid
+                break
+        except (BridgeError, aiohttp.ClientError, TimeoutError):
+            pass  # A missing name must not lose an otherwise valid message.
+        if len(self._contact_names) >= 256:
+            self._contact_names.pop(next(iter(self._contact_names)))
+        self._contact_names[wxid] = (now + 300, name)
+        return name
 
     async def events(self, cursor: int | None):
         headers = {"Last-Event-ID": str(cursor)} if cursor is not None else {}

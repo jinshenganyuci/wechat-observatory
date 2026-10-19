@@ -3,6 +3,7 @@ package bridge
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -51,6 +52,9 @@ type MessageEvent struct {
 	RawProvider    string    `json:"raw_provider"`
 	ChatKind       ChatKind  `json:"chat_kind,omitempty"`
 	Conversation   string    `json:"chat_id,omitempty"`
+
+	// Native module mention metadata; never infer these IDs from message text.
+	MentionedWxIDs []string `json:"mentioned_wxids,omitempty"`
 }
 
 func (e MessageEvent) Validate() error {
@@ -65,6 +69,19 @@ func (e MessageEvent) Validate() error {
 	}
 	if e.ChatID() == "" {
 		return errors.New("one of from, to, room_id, or chat_id is required")
+	}
+	if len(e.MentionedWxIDs) > 512 {
+		return errors.New("mentioned_wxids cannot exceed 512 entries")
+	}
+	for _, wxid := range e.MentionedWxIDs {
+		if wxid == "" || len(wxid) > 191 || strings.TrimSpace(wxid) != wxid {
+			return errors.New("mentioned_wxids entries must be nonempty IDs of at most 191 bytes without surrounding whitespace")
+		}
+	}
+	// The webhook allows media-sized bodies; mention metadata must separately
+	// fit its TEXT column, including JSON escaping, before any persistence retry.
+	if encoded, err := json.Marshal(e.MentionedWxIDs); err != nil || len(encoded) > 32<<10 {
+		return errors.New("mentioned_wxids cannot exceed 32 KiB of encoded metadata")
 	}
 	return nil
 }
