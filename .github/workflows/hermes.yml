@@ -69,7 +69,11 @@ jobs:
             tests/gateway/test_idempotent_marker_lifecycle.py \
             tests/gateway/test_follower_marker_handoff.py \
             tests/gateway/test_busy_followup_marker_handoff.py \
-            tests/gateway/test_busy_durable_acceptance.py
+            tests/gateway/test_busy_durable_acceptance.py \
+            tests/gateway/test_native_reply_delivered_once.py \
+            tests/gateway/test_session_authority.py \
+            tests/gateway/test_session_authority_cancel_settlement.py \
+            tests/gateway/test_relay_authority.py
       - name: Test plugin, shared gateway, configuration and lab guards
         working-directory: hermes
         run: |
