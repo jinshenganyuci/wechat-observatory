@@ -239,9 +239,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["wxid"], "filehelper")
         self.assertEqual(len(self.client.calls), 1)
 
-    async def test_ledger_enabled_refuses_before_http(self):
+    async def test_unpatched_ledger_refuses_before_http(self):
         self.safe.stop()
-        with patch("gateway.delivery_ledger.ledger_enabled", return_value=True):
+        with patch("gateway.delivery_ledger.ledger_enabled", return_value=True), \
+                patch.object(module, "BasePlatformAdapter", object):
             result = await self.adapter.send("alice", "hello")
         self.safe.start()
         self.assertFalse(result.success)
@@ -266,7 +267,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_internal_resume_never_calls_agent_or_bridge_but_new_user_turn_can(self):
         source = self.adapter.build_source(chat_id=self.adapter._chat_id("alice"), user_id="alice")
         resume = MessageEvent(text="", source=source, internal=True, message_type=MessageType.TEXT)
-        with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native:
+        with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native, \
+                patch("gateway.delivery_ledger.ledger_enabled", return_value=False):
             await self.adapter.handle_message(resume)
             await self.adapter.handle_message(resume)
             native.assert_not_called()
@@ -283,11 +285,20 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         runner = SimpleNamespace(
             _peek_session_state=lambda key: SimpleNamespace(turn=SimpleNamespace(agent=_AGENT_PENDING_SENTINEL)),
             _release_running_agent_state=Mock())
-        with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native:
+        with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native, \
+                patch("gateway.delivery_ledger.ledger_enabled", return_value=False):
             await GatewayStartupMixin._run_startup_resume_event(runner, self.adapter, resume, "session-key")
             native.assert_not_called()
         runner._release_running_agent_state.assert_called_once_with("session-key")
         self.assertFalse(self.client.calls)
+
+    async def test_native_ledger_allows_unfinished_turn_resume(self):
+        source = self.adapter.build_source(chat_id=self.adapter._chat_id("alice"), user_id="alice")
+        resume = MessageEvent(text="", source=source, internal=True)
+        with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native, \
+                patch("gateway.delivery_ledger.ledger_enabled", return_value=True):
+            await self.adapter.handle_message(resume)
+            native.assert_awaited_once_with(resume)
 
     async def test_partial_notification_retry_does_not_duplicate_successful_caption(self):
         path = Path(self.temp.name) / "note.txt"
