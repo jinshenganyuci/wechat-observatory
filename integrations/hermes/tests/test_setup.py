@@ -87,18 +87,19 @@ def binding_fixture(tmp_path, monkeypatch, *, status="pending", outbox_id=None, 
     return {"platforms": {"observatory": {"extra": old}}}, old, path, db
 
 
+@pytest.mark.parametrize("status", ["pending", "needs_review"])
 @pytest.mark.parametrize("change", [
     {"base_url": "https://new.example.test"}, {"device": "phone-b"}, {"owner_wxid": "wxid_other"},
 ])
-def test_pending_binding_cannot_change(tmp_path, monkeypatch, change):
-    config, old, path, db = binding_fixture(tmp_path, monkeypatch, wal=True)
+def test_pending_binding_cannot_change(tmp_path, monkeypatch, change, status):
+    config, old, path, db = binding_fixture(tmp_path, monkeypatch, wal=True, status=status)
     try:
         # Read the live WAL too, not an immutable snapshot that misses committed pending rows.
         before = path.read_bytes()
         with pytest.raises(ValueError, match="旧绑定仍有未确认发送"):
             setup.reject_pending_binding_change(config, {**old, **change})
         assert path.read_bytes() == before
-        assert db.execute("SELECT status FROM outgoing").fetchone()[0] == "pending"
+        assert db.execute("SELECT status FROM outgoing").fetchone()[0] == status
     finally:
         db.close()
 
@@ -151,17 +152,17 @@ def test_configure_refusal_happens_before_password_or_config_write(tmp_path, mon
     write_secret.assert_not_called()
 
 
-def test_unpatched_shared_gateway_refuses_before_writing_any_settings(monkeypatch):
-    from observatory import adapter
+def test_unpatched_shared_gateway_setup_uses_only_native_writers(monkeypatch):
     import hermes_cli.config as hermes_config
-    monkeypatch.setattr(adapter, "BasePlatformAdapter", object)
     current = {"gateway": {"delivery_ledger": True},
                "platforms": {"feishu": {"enabled": True}}}
     monkeypatch.setattr(hermes_config, "require_readable_config_before_write", lambda: current)
     write_config, write_secret = Mock(), Mock()
     monkeypatch.setattr(hermes_config, "save_config", write_config)
     monkeypatch.setattr(hermes_config, "save_env_value", write_secret)
-    with pytest.raises(ValueError, match="delivery identity support"):
-        setup.configure("https://example.test", "phone-a", "wxid_bot", "wxid_admin", "unit-secret")
-    write_config.assert_not_called()
-    write_secret.assert_not_called()
+    setup.configure("https://example.test", "phone-a", "wxid_bot", "wxid_admin", "unit-secret")
+    write_secret.assert_called_once_with("OBSERVATORY_ADMIN_PASSWORD", "unit-secret")
+    update = write_config.call_args.args[0]
+    assert set(update) == {"platforms"}
+    assert set(update["platforms"]) == {"observatory"}
+    assert write_config.call_args.kwargs == {"merge_existing": True}

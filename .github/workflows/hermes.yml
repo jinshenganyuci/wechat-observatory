@@ -22,11 +22,9 @@ jobs:
         include:
           - target: v0.22.2
             ref: d923a5eb487a17c0a68801bba9ef0f56c81040a8
-            patch: hermes-v0.22.2-delivery.patch
             marker_lifecycle: false
-          - target: 349e4f7
-            ref: 349e4f7e620ea1be6a8b5703d7152cf1e5ed9998
-            patch: hermes-349e4f7-delivery.patch
+          - target: 6e9b3e3
+            ref: 6e9b3e3b8852f12bf965f888213470574b72803e
             marker_lifecycle: true
     steps:
       - name: Isolate test state
@@ -44,11 +42,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.14'
-      - name: Apply explicit Hermes compatibility patch
-        working-directory: hermes
-        run: |
-          git apply --check ../observatory/integrations/hermes/compat/${{ matrix.patch }}
-          git apply ../observatory/integrations/hermes/compat/${{ matrix.patch }}
       - name: Build locked Hermes test environment with Feishu SDK
         working-directory: hermes
         run: python -m pm.build_env --source . --out "$RUNNER_TEMP/hermes-tests" --group dev --group test --extra messaging --extra feishu
@@ -56,7 +49,6 @@ jobs:
         working-directory: hermes
         run: |
           HERMES_PYTHON="$RUNNER_TEMP/hermes-tests/bin/python" scripts/run_tests.sh \
-            tests/gateway/test_idempotent_delivery.py \
             tests/gateway/test_delivery_ledger.py \
             tests/gateway/test_delivery_ledger_producer.py \
             tests/gateway/test_active_turn_recovery.py \
@@ -66,7 +58,6 @@ jobs:
         working-directory: hermes
         run: |
           HERMES_PYTHON="$RUNNER_TEMP/hermes-tests/bin/python" scripts/run_tests.sh \
-            tests/gateway/test_idempotent_marker_lifecycle.py \
             tests/gateway/test_follower_marker_handoff.py \
             tests/gateway/test_busy_followup_marker_handoff.py \
             tests/gateway/test_busy_durable_acceptance.py \
@@ -77,8 +68,11 @@ jobs:
       - name: Test plugin, shared gateway, configuration and lab guards
         working-directory: hermes
         run: |
-          "$RUNNER_TEMP/hermes-tests/bin/python" -m pytest -q \
+          HERMES_PYTHON="$RUNNER_TEMP/hermes-tests/bin/python" scripts/run_tests.sh \
             ../observatory/integrations/hermes/observatory/tests/test_plugin.py \
             ../observatory/integrations/hermes/tests/test_setup.py \
             ../observatory/integrations/hermes/tests/test_shared_delivery.py \
             ../observatory/integrations/hermes/tests/test_observatory_lab.py
+      - name: Verify Hermes tracked source stayed unmodified
+        working-directory: hermes
+        run: git diff --exit-code HEAD -- gateway

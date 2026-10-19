@@ -51,6 +51,20 @@ class State:
             self.db.execute("ALTER TABLE outgoing ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
             self.db.execute("ALTER TABLE outgoing ADD COLUMN error TEXT NOT NULL DEFAULT ''")
             self.db.commit()
+        # Old versions independently replayed these rows. Native Hermes now owns
+        # reply recovery: retain unknown requests for inspection. Migrate once,
+        # not whenever a standalone sender opens the live adapter's journal.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            if self.db.execute("INSERT OR IGNORE INTO meta VALUES ('native_delivery_v3', 1)").rowcount:
+                self.db.execute("UPDATE outgoing SET status='needs_review', "
+                                "error=CASE WHEN error='' THEN "
+                                "'Legacy send outcome unknown; original request retained' ELSE error END "
+                                "WHERE status='pending' AND outbox_id IS NULL")
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
 
     @property
     def cursor(self) -> int | None:
@@ -81,54 +95,22 @@ class State:
                               "(SELECT intent FROM intent_aliases WHERE alias=?)", (intent, intent)).fetchone()
         return dict(row) if row else None
 
-    def alias_intent(self, alias: str, original: str, fingerprint: str):
-        """Attach a native delivery ID to a legacy request without changing its key."""
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            existing = self.find_intent(alias)
-            record = existing or self.find_intent(original)
-            if record:
-                if record["fingerprint"] != fingerprint:
-                    raise ValueError("send identity already belongs to different content")
-                if existing is None:
-                    self.db.execute("INSERT INTO intent_aliases VALUES (?, ?)", (alias, record["intent"]))
-            self.db.commit()
-            return record
-        except BaseException:
-            self.db.rollback()
-            raise
-
-    def matching(self, fingerprint: str, *, unresolved: bool = False) -> list[dict]:
-        sql = "SELECT * FROM outgoing WHERE fingerprint=?"
-        if unresolved:
-            sql += " AND outbox_id IS NULL AND status='pending'"
-        return [dict(row) for row in self.db.execute(sql, (fingerprint,))]
-
     def unresolved(self) -> list[dict]:
         return [dict(row) for row in self.db.execute(
-            "SELECT * FROM outgoing WHERE outbox_id IS NULL AND status='pending' ORDER BY created_at")]
+            "SELECT * FROM outgoing WHERE outbox_id IS NULL "
+            "AND status IN ('pending','needs_review') ORDER BY created_at")]
 
     def prepare(self, intent: str | None, fingerprint: str, payload: dict) -> dict:
         # BEGIN IMMEDIATE also serializes a standalone sender against the live gateway.
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            if intent:
-                existing = self.find_intent(intent)
-            else:
-                matches = self.matching(fingerprint, unresolved=True)
-                if len(matches) > 1:
-                    raise ValueError("ambiguous outstanding notification; manual reconciliation required")
-                existing = matches[0] if matches else None
+            existing = self.find_intent(intent) if intent else None
             if existing:
                 if existing["fingerprint"] != fingerprint:
                     raise ValueError("send identity already belongs to different content")
                 self.db.commit()
                 return existing
-            peer = payload.get("wxid") or payload.get("wx_ids", [None])[0]
-            for pending in self.unresolved():
-                old = json.loads(pending["payload"])
-                if (old.get("wxid") or old.get("wx_ids", [None])[0]) == peer:
-                    raise ValueError("target has an unconfirmed send; reconcile the original request before sending again")
+            # Equal text is not an identity. Unanchored invocations stay distinct.
             intent = intent or "notification:" + uuid.uuid4().hex
             self.db.execute("INSERT INTO outgoing (intent,idem,fingerprint,payload,outbox_id,created_at) VALUES (?, ?, ?, ?, NULL, ?)",
                             (intent, "hermes-" + uuid.uuid4().hex, fingerprint,
@@ -147,6 +129,11 @@ class State:
         with self.db:
             self.db.execute("UPDATE outgoing SET status='rejected',error=?,payload='{}' WHERE intent=?", (error, intent))
 
+    def needs_review(self, intent: str, error: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE outgoing SET status='needs_review',error=? "
+                            "WHERE intent=? AND outbox_id IS NULL", (error, intent))
+
     def bundle(self, identity: str | None, target: str, fingerprint: str) -> str:
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -155,9 +142,7 @@ class State:
                 if row and (row["target"] != target or row["fingerprint"] != fingerprint):
                     raise ValueError("notification identity already belongs to a different manifest")
             else:
-                row = self.db.execute("SELECT * FROM bundles WHERE target=? AND done=0", (target,)).fetchone()
-                if row and row["fingerprint"] != fingerprint:
-                    raise ValueError("target has an unfinished notification; retry its original manifest")
+                row = None  # A new standalone invocation is not a retry by content.
             if row:
                 self.db.commit()
                 return row["identity"]

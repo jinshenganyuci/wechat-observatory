@@ -1,4 +1,4 @@
-"""External platform plugin for Hermes v0.22.2."""
+"""WeChat platform plugin using Hermes' official adapter contract."""
 
 
 def register(ctx):

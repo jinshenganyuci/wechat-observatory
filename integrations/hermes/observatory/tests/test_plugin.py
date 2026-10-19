@@ -1,4 +1,4 @@
-"""Run with Hermes v0.22.2 on PYTHONPATH; all traffic uses an ephemeral fake server."""
+"""Run with stock Hermes on PYTHONPATH; all traffic uses an ephemeral fake server."""
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -51,25 +51,58 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different content"):
             self.state.prepare("turn-1", "different", {})
 
-    def test_unknown_blocks_new_identity_but_successful_new_notification_is_distinct(self):
+    def test_unknown_does_not_merge_or_block_new_notifications(self):
         body = {"wx_ids": ["alice"], "text": "hello"}
         first = self.state.prepare(None, "same", body)
-        self.assertEqual(self.state.prepare(None, "same", body)["idem"], first["idem"])
-        with self.assertRaisesRegex(ValueError, "unconfirmed"):
-            self.state.prepare("new-turn", "different", body)
-        self.state.accepted(first["intent"], 7)
-        later = self.state.prepare(None, "same", body)
-        self.assertNotEqual(first["idem"], later["idem"])
-        self.assertEqual(self.state.find_intent(first["intent"])["payload"], "{}")
+        second = self.state.prepare(None, "same", body)
+        self.state.needs_review(first["intent"], "response lost")
+        third = self.state.prepare("new-turn", "different", body)
+        self.assertEqual(len({first["idem"], second["idem"], third["idem"]}), 3)
+        saved = self.state.find_intent(first["intent"])
+        self.assertEqual(saved["status"], "needs_review")
+        self.assertEqual(json.loads(saved["payload"]), body)
+        self.assertEqual(saved["idem"], first["idem"])
 
-    def test_notification_manifest_retains_partial_identity_without_permanent_content_dedup(self):
-        first = self.state.bundle(None, "alice", "caption-and-two-files")
-        self.assertEqual(first, self.state.bundle(None, "alice", "caption-and-two-files"))
-        with self.assertRaisesRegex(ValueError, "unfinished notification"):
-            self.state.bundle(None, "alice", "different-files")
-        self.state.finish_bundle(first)
-        self.assertNotEqual(first, self.state.bundle(None, "alice", "caption-and-two-files"))
+    def test_only_identified_notification_reuses_manifest(self):
+        first = self.state.bundle("cron-1", "alice", "caption-and-two-files")
+        self.assertEqual(first, self.state.bundle("cron-1", "alice", "caption-and-two-files"))
+        with self.assertRaisesRegex(ValueError, "different manifest"):
+            self.state.bundle("cron-1", "alice", "different-files")
+        self.assertNotEqual(self.state.bundle(None, "alice", "same"), self.state.bundle(None, "alice", "same"))
 
+    def test_legacy_migration_preserves_requests_cursor_bundles_and_aliases(self):
+        self.state.initialize(41)
+        self.state.claim(42, "event-legacy")
+        old = self.state.prepare("old-turn", "fingerprint", {"text": "old", "account_generation": 7})
+        self.state.db.execute("UPDATE outgoing SET error='original diagnostic' WHERE intent='old-turn'")
+        self.state.db.commit()
+        accepted = self.state.prepare("accepted", "accepted", {"text": "accepted"})
+        self.state.accepted(accepted["intent"], 73)
+        rejected = self.state.prepare("rejected", "rejected", {"text": "rejected"})
+        self.state.rejected(rejected["intent"], "original rejection")
+        terminal = [self.state.find_intent(identity) for identity in ("accepted", "rejected")]
+        bundle = self.state.bundle("old-cron", "alice", "manifest")
+        self.state.db.execute("INSERT INTO intent_aliases VALUES (?, ?)", ("old-alias", old["intent"]))
+        self.state.db.execute("DELETE FROM meta WHERE key='native_delivery_v3'")
+        self.state.db.commit()
+        self.state.close()
+        self.state = State(self.path)
+        saved = self.state.find_intent("old-alias")
+        self.assertEqual(saved["status"], "needs_review")
+        self.assertEqual(saved["error"], "original diagnostic")
+        self.assertEqual([self.state.find_intent(identity) for identity in ("accepted", "rejected")], terminal)
+        for field in ("intent", "idem", "payload", "fingerprint", "created_at"):
+            self.assertEqual(saved[field], old[field])
+        self.assertEqual(self.state.cursor, 42)
+        self.assertFalse(self.state.claim(43, "event-legacy"))
+        self.assertEqual(self.state.bundle("old-cron", "alice", "manifest"), bundle)
+        # Opening a second sender must not quarantine another live sender's request.
+        live = self.state.prepare("live-turn", "new", {"text": "new"})
+        another = State(self.path)
+        try:
+            self.assertEqual(another.find_intent(live["intent"])["status"], "pending")
+        finally:
+            another.close()
 
 class FakeClient:
     def __init__(self):
@@ -107,9 +140,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.context.start()
         module.register(context)
         self.home = patch.object(module, "get_hermes_home", return_value=Path(self.temp.name))
-        self.safe = patch.object(module, "require_safe_delivery_config")
         self.home.start()
-        self.safe.start()
         self.config = PlatformConfig(enabled=True, extra={"base_url": "http://127.0.0.1:1", "device": "test",
             "owner_wxid": "wxid_bot", "admin_password": "test-secret"})
         self.adapter = ObservatoryAdapter(self.config)
@@ -118,7 +149,6 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.adapter.state.close()
-        self.safe.stop()
         self.home.stop()
         self.context.stop()
         self.temp.cleanup()
@@ -175,36 +205,47 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.client.ids), 1)
         self.assertEqual(self.client.calls[0], self.client.calls[1])
 
-    async def test_unknown_restart_replays_exact_generation_and_body(self):
+    async def test_explicit_same_reply_retry_reuses_original_generation_after_restart(self):
         self.client.lose = 2
         result = await self.adapter.send("alice", "hello", reply_to="event-1")
         self.assertFalse(result.success)
+        self.assertEqual(self.adapter.state.unresolved()[0]["status"], "needs_review")
         self.adapter.state.close()
         self.adapter = ObservatoryAdapter(self.config)
         self.adapter.client = self.client
         self.client.generation_value = 9
-        await self.adapter.recover_pending()
+        self.assertEqual(len(self.client.calls), 2)  # Opening the journal sends nothing.
+        result = await self.adapter.send("alice", "hello", reply_to="event-1")
+        self.assertTrue(result.success)
         self.assertEqual(len(self.client.ids), 1)
         self.assertEqual({call[0]["account_generation"] for call in self.client.calls}, {1})
         self.assertFalse(self.adapter.state.unresolved())
 
-    async def test_old_server_capability_blocks_existing_journal_recovery(self):
+    async def test_old_server_capability_blocks_explicit_retry(self):
         self.client.lose = 2
         await self.adapter.send("alice", "hello", reply_to="event-1")
         self.client.ensure_idempotency = AsyncMock(side_effect=BridgeError("server_text_idempotency_required_upgrade_observatory"))
-        await self.adapter.recover_pending()
+        result = await self.adapter.send("alice", "hello", reply_to="event-1")
+        self.assertFalse(result.success)
         self.assertEqual(len(self.client.calls), 2)
         self.assertEqual(len(self.adapter.state.unresolved()), 1)
 
-    async def test_unknown_blocks_new_turn_and_plaintext_fallback(self):
-        self.client.lose = 4
+    async def test_unknown_stops_plaintext_fallback_but_not_new_turn(self):
+        self.client.lose = 2
         result = await self.adapter._send_with_retry("alice", "hello", reply_to="event-1")
         self.assertFalse(result.success)
         self.assertEqual(len(self.client.calls), 2)
         another = await self.adapter.send("alice", "changed", reply_to="event-2")
-        self.assertFalse(another.success)
-        self.assertIn("unconfirmed", another.error)
-        self.assertEqual(len(self.client.calls), 2)
+        self.assertTrue(another.success)
+        self.assertEqual(len(self.client.calls), 3)
+        self.assertEqual(len(self.client.ids), 2)
+
+    async def test_unknown_unanchored_send_does_not_absorb_identical_new_send(self):
+        self.client.lose = 2
+        self.assertFalse((await self.adapter.send("alice", "hello")).success)
+        self.assertTrue((await self.adapter.send("alice", "hello")).success)
+        self.assertEqual(len(self.client.ids), 2)
+        self.assertEqual(len(self.adapter.state.unresolved()), 1)
 
     async def test_distinct_anchored_turns_can_send_same_text(self):
         first = await self.adapter.send("alice", "hello", reply_to="event-1")
@@ -239,15 +280,17 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["wxid"], "filehelper")
         self.assertEqual(len(self.client.calls), 1)
 
-    async def test_unpatched_ledger_refuses_before_http(self):
-        self.safe.stop()
-        with patch("gateway.delivery_ledger.ledger_enabled", return_value=True), \
-                patch.object(module, "BasePlatformAdapter", object):
+    async def test_unpatched_ledger_and_other_channels_do_not_block_send(self):
+        with patch("gateway.delivery_ledger.ledger_enabled", return_value=True):
             result = await self.adapter.send("alice", "hello")
-        self.safe.start()
-        self.assertFalse(result.success)
-        self.assertIn("gateway.delivery_ledger", result.error)
-        self.assertFalse(self.client.calls)
+        self.assertTrue(result.success)
+        self.assertEqual(len(self.client.calls), 1)
+
+    async def test_unknown_metadata_never_supplies_a_delivery_identity(self):
+        metadata = {"delivery_id": "old-patch", "observatory_intent": "hidden-anchor"}
+        first = await self.adapter.send("alice", "hello", metadata=metadata)
+        second = await self.adapter.send("alice", "hello", metadata=metadata)
+        self.assertNotEqual(first.message_id, second.message_id)
 
     async def test_permanent_rejection_not_recovered_or_blocking_new_notification(self):
         original = self.client.submit
@@ -255,7 +298,6 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         result = await self.adapter.send("alice", "bad", reply_to="bad-turn")
         self.assertFalse(result.success)
         self.assertFalse(self.adapter.state.unresolved())
-        await self.adapter.recover_pending()
         self.assertEqual(self.client.submit.await_count, 1)
         self.client.submit = original
         good = await self.adapter.send("alice", "good", reply_to="good-turn")
@@ -264,33 +306,21 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(again.success)
         self.assertEqual(len(self.client.calls), 1)
 
-    async def test_empty_internal_resume_never_calls_agent_or_bridge_but_new_user_turn_can(self):
+    async def test_internal_resume_is_owned_by_native_gateway_even_with_ledger_disabled(self):
         source = self.adapter.build_source(chat_id=self.adapter._chat_id("alice"), user_id="alice")
         resume = MessageEvent(text="", source=source, internal=True, message_type=MessageType.TEXT)
         with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native, \
                 patch("gateway.delivery_ledger.ledger_enabled", return_value=False):
             await self.adapter.handle_message(resume)
-            await self.adapter.handle_message(resume)
-            native.assert_not_called()
-            self.assertFalse(self.client.calls)
-            user = MessageEvent(text="continue", source=source, message_id="fresh-event")
-            await self.adapter.handle_message(user)
-            native.assert_awaited_once_with(user)
+            native.assert_awaited_once_with(resume)
 
-    async def test_real_startup_dispatch_releases_sentinel_without_agent_or_post(self):
-        from gateway.run import _AGENT_PENDING_SENTINEL
-        from gateway.run_startup import GatewayStartupMixin
-        source = self.adapter.build_source(chat_id=self.adapter._chat_id("alice"), user_id="alice")
-        resume = MessageEvent(text="", source=source, internal=True)
-        runner = SimpleNamespace(
-            _peek_session_state=lambda key: SimpleNamespace(turn=SimpleNamespace(agent=_AGENT_PENDING_SENTINEL)),
-            _release_running_agent_state=Mock())
-        with patch.object(BasePlatformAdapter, "handle_message", new_callable=AsyncMock) as native, \
-                patch("gateway.delivery_ledger.ledger_enabled", return_value=False):
-            await GatewayStartupMixin._run_startup_resume_event(runner, self.adapter, resume, "session-key")
-            native.assert_not_called()
-        runner._release_running_agent_state.assert_called_once_with("session-key")
-        self.assertFalse(self.client.calls)
+    async def test_distinct_public_reply_anchors_stay_distinct_after_restart(self):
+        first = await self.adapter.send("alice", "same", reply_to="inbound-1")
+        self.adapter.state.close()
+        self.adapter = ObservatoryAdapter(self.config)
+        self.adapter.client = self.client
+        second = await self.adapter.send("alice", "same", reply_to="inbound-2")
+        self.assertNotEqual(first.message_id, second.message_id)
 
     async def test_native_ledger_allows_unfinished_turn_resume(self):
         source = self.adapter.build_source(chat_id=self.adapter._chat_id("alice"), user_id="alice")
@@ -314,7 +344,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             return await original(body, key)
 
         self.client.submit = partial
-        with patch.object(module, "Client", return_value=self.client):
+        context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-partial-bundle", profile="default"))
+        with patch.object(module, "Client", return_value=self.client), patch.object(module, "_plugin_context", context):
             first = await module.standalone_sender(self.config, "alice", "caption", media_files=[(str(path), False)])
             second = await module.standalone_sender(self.config, "alice", "caption", media_files=[(str(path), False)])
         self.assertIn("error", first)
@@ -446,7 +477,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.adapter.state.db.execute("SELECT COUNT(*) FROM bundles").fetchone()[0], 0)
         self.assertEqual(self.adapter.state.db.execute("SELECT COUNT(*) FROM outgoing").fetchone()[0], 0)
 
-    async def test_native_cli_notification_retry_preserves_whole_manifest(self):
+    async def test_native_cli_new_invocation_does_not_guess_previous_manifest(self):
         from gateway.config import GatewayConfig
         from tools import send_message_tool as native
         path = Path(self.temp.name) / "cli.txt"
@@ -477,26 +508,22 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             second = json.loads(await asyncio.to_thread(native._handle_send, args))
         self.assertIn("error", first)
         self.assertTrue(second.get("success"), second)
-        self.assertEqual(sum(body["kind"] == "text" for body, _key in self.client.calls), 1)
-        self.assertEqual(len(self.client.ids), 3)
+        self.assertEqual(sum(body["kind"] == "text" for body, _key in self.client.calls), 2)
+        self.assertEqual(len(self.client.ids), 6)
         self.assertEqual(sum(body["kind"] == "file" and body["attachment"]["name"] == path.name
-                             for body, _key in self.client.calls), 1)
+                             for body, _key in self.client.calls), 2)
 
-    async def test_live_notification_to_other_target_uses_original_turn_identity(self):
+    async def test_live_notifications_without_public_identity_are_distinct(self):
         from tools import send_message_tool as native
         path = Path(self.temp.name) / "group.txt"
         path.write_text("group attachment")
-        token = module._reply_identity.set((self.adapter._chat_id("alice"), "inbound-1"))
-        try:
-            with patch.object(native, "_live_adapter", return_value=(SimpleNamespace(), self.adapter)):
-                for _ in range(2):
-                    result = await native._send_to_platform(self.adapter.platform, self.config, "123@chatroom", "caption",
-                        media_files=[(str(path), False)])
-                    self.assertTrue(result["success"])
-        finally:
-            module._reply_identity.reset(token)
-        self.assertEqual(len(self.client.ids), 2)
-        self.assertEqual(len(self.client.calls), 2)
+        with patch.object(native, "_live_adapter", return_value=(SimpleNamespace(), self.adapter)):
+            for _ in range(2):
+                result = await native._send_to_platform(self.adapter.platform, self.config, "123@chatroom", "caption",
+                    media_files=[(str(path), False)])
+                self.assertTrue(result["success"])
+        self.assertEqual(len(self.client.ids), 4)
+        self.assertEqual(len(self.client.calls), 4)
 
     async def test_first_connection_skips_head_and_reconnects_with_durable_cursor(self):
         handled = []
@@ -519,8 +546,6 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             await self.adapter._receive_loop()
         self.assertEqual(handled, ["fresh"])
         self.assertEqual(self.adapter.state.cursor, 41)
-        if self.adapter._recovery:
-            await self.adapter._recovery
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):

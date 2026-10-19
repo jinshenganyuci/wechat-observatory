@@ -1,7 +1,7 @@
-"""Real Hermes delivery lifecycle, with a synthetic in-memory bridge only.
+"""Stock Hermes auth, sessions and recovery with bounded transport/runner fixtures.
 
-Run against the supported Hermes build carrying the opt-in delivery-ID contract.
-No gateway service, model, phone, provider key or real channel is started here.
+No gateway service, real account, model or phone is contacted. These tests retain
+upstream's uncertain-delivery boundary instead of asserting a patched guarantee.
 """
 from __future__ import annotations
 
@@ -22,20 +22,19 @@ from gateway.platform_registry import PlatformEntry, platform_registry
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent
 from gateway.run import GatewayRunner
+from gateway.session import build_session_key
 from observatory import adapter as plugin
 from observatory.adapter import ObservatoryAdapter
-from observatory.state import digest
 
 
 class Bridge:
-    """Commit before simulating lost responses, as the real API may do."""
+    """A backend that can commit and then lose its HTTP response."""
 
     def __init__(self):
         self.calls = []
         self.tasks = {}
         self.generation_value = 1
         self.lose = 0
-        self.crash = False
 
     async def generation(self):
         return self.generation_value
@@ -43,16 +42,20 @@ class Bridge:
     async def ensure_idempotency(self):
         return None
 
+    async def history(self, cursor):
+        return []
+
+    async def events(self, cursor):
+        yield "ready", None, {"cursor": 10 if cursor is None else cursor}
+        await asyncio.Event().wait()
+
     async def submit(self, payload, key):
         self.calls.append((json.loads(json.dumps(payload)), key))
         replay = key in self.tasks
         self.tasks.setdefault(key, len(self.tasks) + 100)
-        if self.crash:
-            self.crash = False
-            raise asyncio.CancelledError("crash after backend commit, before local acknowledgement")
         if self.lose:
             self.lose -= 1
-            raise TimeoutError("backend committed; response was lost")
+            raise TimeoutError("backend committed; HTTP response was lost")
         return {"ok": True, "outbox_id": self.tasks[key], "idempotent_replay": replay}
 
     async def close(self):
@@ -61,10 +64,10 @@ class Bridge:
 
 @pytest.fixture
 def lane(tmp_path, monkeypatch):
-    # Patch only storage location and HTTP transport. Native ledger gates,
-    # producer, claims, redelivery and recovery-marker decisions remain real.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.delenv("OBSERVATORY_ADMIN_PASSWORD", raising=False)
+    for name in ("OBSERVATORY_ADMIN_PASSWORD", "OBSERVATORY_ALLOWED_USERS",
+                 "GATEWAY_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS"):
+        monkeypatch.delenv(name, raising=False)
     (tmp_path / "config.yaml").write_text("gateway:\n  delivery_ledger: true\n", encoding="utf-8")
     monkeypatch.setattr(ledger, "_db_path", lambda: tmp_path / "state.db")
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
@@ -78,9 +81,10 @@ def lane(tmp_path, monkeypatch):
     config = PlatformConfig(enabled=True, extra={
         "base_url": "http://127.0.0.1:1", "device": "synthetic",
         "owner_wxid": "wxid_synthetic_bot", "admin_password": "synthetic-only",
+        "allow_from": ["alice"], "allow_admin_from": ["alice"],
+        "unauthorized_dm_behavior": "pair",
     })
-    bridge = Bridge()
-    adapters = []
+    bridge, adapters = Bridge(), []
 
     def new_adapter():
         adapter = ObservatoryAdapter(config)
@@ -88,29 +92,21 @@ def lane(tmp_path, monkeypatch):
         adapters.append(adapter)
         return adapter
 
-    token = plugin._reply_identity.set(None)
     value = SimpleNamespace(home=tmp_path, config=config, bridge=bridge, new_adapter=new_adapter)
     value.adapter = new_adapter()
-    try:
-        yield value
-    finally:
-        plugin._reply_identity.reset(token)
-        for adapter in adapters:
-            adapter.state.close()
+    yield value
+    for adapter in adapters:
+        adapter.state.close()
 
 
-def event_for(adapter, event_id="event-one"):
+def event_for(adapter, event_id="event-one", peer="alice"):
     return MessageEvent(text="a synthetic question", message_id=event_id,
-                        source=adapter.build_source(chat_id=adapter._chat_id("alice"), user_id="alice"))
-
-
-def session_key(event):
-    return "agent:main:observatory:dm:" + event.source.chat_id
+                        source=adapter.build_source(chat_id=adapter._chat_id(peer), user_id=peer))
 
 
 async def final(adapter, event, text="same answer"):
     result, _owner = await adapter.send_final_ledgered(
-        event, session_key(event), text, {}, reply_to=event.message_id)
+        event, build_session_key(event.source), text, {}, reply_to=event.message_id)
     return result
 
 
@@ -130,220 +126,161 @@ def runner_for(*adapters):
     runner.adapters = {adapter.platform: adapter for adapter in adapters}
     runner._profile_adapters = {}
     runner._active_profile_name = lambda: "default"
+    runner.config = GatewayConfig()
     runner.session_store = None
     runner._async_session_store = MagicMock()
     runner._async_session_store._store = None
     runner._async_session_store.clear_resume_pending = AsyncMock()
     runner._running = False
+    runner.pairing_store = None
     return runner
 
 
+def test_adapter_inherits_stock_lifecycle(lane):
+    for name in ("handle_message", "send_final_ledgered", "on_processing_start"):
+        assert getattr(ObservatoryAdapter, name) is getattr(BasePlatformAdapter, name)
+    assert not hasattr(lane.adapter, "recover_pending")
+    assert "idempotent_delivery" not in ObservatoryAdapter.__dict__
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("crash_before_local_ack", [False, True])
-async def test_backend_accept_then_crash_recovers_one_original_task(lane, crash_before_local_ack):
-    adapter, bridge = lane.adapter, lane.bridge
-    event = event_for(adapter)
-    if crash_before_local_ack:
-        bridge.crash = True
-        with pytest.raises(asyncio.CancelledError):
-            await final(adapter, event)
-    else:
-        with patch.object(ledger, "mark_delivered", side_effect=asyncio.CancelledError):
-            with pytest.raises(asyncio.CancelledError):
-                await final(adapter, event)
-    assert len(bridge.tasks) == 1
-    assert rows()[0]["state"] == "attempting"
-    original = bridge.calls[0]
-    bridge.generation_value = 9
+async def test_connect_on_stock_hermes_does_not_replay_old_unknown_records(lane):
+    adapter = lane.adapter
+    body = {"kind": "text", "wx_ids": ["alice"], "text": "old request", "account_generation": 1}
+    old = adapter.state.prepare("old-patch-id", "old-fingerprint", body)
+    adapter.state.initialize(10)
+    adapter.state.claim(11, "old-inbound")
+    adapter.state.db.execute("DELETE FROM meta WHERE key='native_delivery_v3'")
+    adapter.state.db.commit()
     restarted = lane.new_adapter()
-    orphan()
-    assert await runner_for(restarted)._redeliver_pending_obligations() == 1
+    saved = restarted.state.find_intent(old["intent"])
+    assert saved["status"] == "needs_review"
+    assert saved["idem"] == old["idem"] and saved["payload"] == old["payload"]
+    assert restarted.state.cursor == 11
+    assert not restarted.state.claim(12, "old-inbound")
+    try:
+        assert await restarted.connect()
+        assert restarted.send_path_degraded is False
+        assert not lane.bridge.calls
+    finally:
+        await restarted.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_native_final_reply_uses_enabled_ledger_without_patch(lane):
+    result = await final(lane.adapter, event_for(lane.adapter))
+    assert result.success
+    assert len(lane.bridge.tasks) == 1
     assert rows()[0]["state"] == "delivered"
-    assert len(bridge.tasks) == 1
-    assert all(call == original for call in bridge.calls)
-    assert not restarted.state.unresolved()
+    assert (lane.home / "config.yaml").read_text() == "gateway:\n  delivery_ledger: true\n"
 
 
 @pytest.mark.asyncio
-async def test_timeout_and_local_recovery_before_native_sweep_keep_original_key(lane):
+async def test_lost_http_ack_retries_exact_request_with_one_backend_task(lane):
+    lane.bridge.lose = 1
+    result = await final(lane.adapter, event_for(lane.adapter))
+    assert result.success
+    assert len(lane.bridge.calls) == 2 and lane.bridge.calls[0] == lane.bridge.calls[1]
+    assert len(lane.bridge.tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_original_reply_identity_can_resolve_unknown_after_restart(lane):
     lane.bridge.lose = 2
-    assert not (await final(lane.adapter, event_for(lane.adapter))).success
-    assert rows()[0]["state"] == "failed"
-    lane.bridge.generation_value = 99
-    restarted = lane.new_adapter()
-    await restarted.recover_pending()
-    orphan()
-    assert await runner_for(restarted)._redeliver_pending_obligations() == 1
-    assert len(lane.bridge.tasks) == 1
-    assert {body["account_generation"] for body, _key in lane.bridge.calls} == {1}
-    assert len({key for _body, key in lane.bridge.calls}) == 1
-
-
-@pytest.mark.asyncio
-async def test_native_pending_reply_with_no_previous_http_really_sends(lane):
-    event = event_for(lane.adapter)
-    oid = ledger.compute_obligation_id(session_key(event), event.message_id, "never sent")
-    ledger.record_obligation(obligation_id=oid, session_key=session_key(event), platform="observatory",
-                             chat_id=event.source.chat_id, thread_id=None, content="never sent")
-    orphan()
-    assert await runner_for(lane.adapter)._redeliver_pending_obligations() == 1
-    assert len(lane.bridge.tasks) == 1
-    assert lane.bridge.calls[0][0]["text"] == "never sent"
-    assert rows()[0]["state"] == "delivered"
-
-
-@pytest.mark.asyncio
-async def test_equal_text_in_distinct_turns_is_not_content_deduplicated(lane):
-    first = await final(lane.adapter, event_for(lane.adapter, "one"))
-    second = await final(lane.adapter, event_for(lane.adapter, "two"))
-    assert first.success and second.success
-    assert first.message_id != second.message_id
-    assert len(lane.bridge.tasks) == len(rows()) == 2
-
-
-@pytest.mark.asyncio
-async def test_delivery_id_cannot_be_reused_with_changed_content(lane):
-    metadata = {"delivery_id": "synthetic-stable-delivery"}
-    first = await lane.adapter.send("alice", "original", metadata=metadata)
-    changed = await lane.adapter.send("alice", "changed", metadata=metadata)
-    assert first.success and not changed.success
-    assert "different content" in changed.error
-    assert len(lane.bridge.calls) == len(lane.bridge.tasks) == 1
-
-
-@pytest.mark.asyncio
-async def test_queued_turn_identity_survives_native_recovery(lane):
-    event = event_for(lane.adapter, "queue-opener")
-    event.ledger_message_id = "queue-tail"
-    with patch.object(ledger, "mark_delivered", side_effect=asyncio.CancelledError):
-        with pytest.raises(asyncio.CancelledError):
-            await final(lane.adapter, event)
-    assert rows()[0]["obligation_id"] == ledger.compute_obligation_id(
-        session_key(event), "queue-tail", "same answer")
-    orphan()
-    assert await runner_for(lane.new_adapter())._redeliver_pending_obligations() == 1
-    assert len(lane.bridge.tasks) == 1
-
-
-@pytest.mark.asyncio
-async def test_native_text_and_prepared_file_recover_independently_without_duplicate_caption(lane):
-    event = event_for(lane.adapter)
-    await lane.adapter.on_processing_start(event)
-    assert (await final(lane.adapter, event, "file caption")).success
-    attachment = lane.home / "synthetic.txt"
-    attachment.write_text("small synthetic attachment", encoding="utf-8")
-    lane.bridge.crash = True
-    with pytest.raises(asyncio.CancelledError):
-        await lane.adapter._deliver_media_attachments(
-            event, [(str(attachment), False)], [], force_document_attachments=True,
-            human_delay=0, metadata={}, record_delivery=lambda _result: None)
-    assert len(lane.bridge.tasks) == 2
-    assert len(lane.adapter.state.unresolved()) == 1
-    restarted = lane.new_adapter()
-    await restarted.recover_pending()
-    orphan()
-    assert await runner_for(restarted)._redeliver_pending_obligations() == 0
-    assert not restarted.state.unresolved()
-    assert len(lane.bridge.tasks) == 2
-    assert sum(body["kind"] == "text" for body, _key in lane.bridge.calls) == 1
-    file_calls = [(body, key) for body, key in lane.bridge.calls if body["kind"] == "file"]
-    assert len(file_calls) == 2 and file_calls[0] == file_calls[1]
-    assert attachment.read_text(encoding="utf-8") == "small synthetic attachment"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("accepted", [False, True])
-async def test_legacy_reply_is_aliased_without_replacing_its_backend_task(lane, accepted):
-    event = event_for(lane.adapter)
-    logical = {"kind": "text", "wx_ids": ["alice"], "text": "same answer"}
-    fingerprint = digest(logical)
-    legacy = "reply:" + digest([event.source.chat_id, event.message_id, fingerprint])
-    record = lane.adapter.state.prepare(legacy, fingerprint, {
-        **logical, "device": "synthetic", "owner_wxid": "wxid_synthetic_bot", "account_generation": 1})
-    lane.bridge.tasks[record["idem"]] = 100
-    if accepted:
-        lane.adapter.state.accepted(legacy, 100)
-    with patch.object(ledger, "mark_delivered", side_effect=asyncio.CancelledError):
-        with pytest.raises(asyncio.CancelledError):
-            await final(lane.adapter, event)
-    orphan()
-    assert await runner_for(lane.new_adapter())._redeliver_pending_obligations() == 1
-    assert len(lane.bridge.tasks) == 1
-    assert all(key == record["idem"] for _body, key in lane.bridge.calls)
-    assert lane.adapter.state.find_intent(legacy)["outbox_id"] == 100
-
-
-@pytest.mark.asyncio
-async def test_ledger_write_failure_prevents_http_and_keeps_turn_marker(lane):
-    event = event_for(lane.adapter)
-    event._turn_marker_handoff = True
-    event._gateway_active_turn_token = "active-token"
-    runner = MagicMock()
-    runner._delivery_adapter_for.return_value = lane.adapter
-    runner._clear_durable_active_turn = AsyncMock()
-    lane.adapter.gateway_runner = runner
-    with patch.object(ledger, "record_obligation", side_effect=OSError("synthetic disk failure")):
-        result = await final(lane.adapter, event)
-    assert not result.success
-    assert "delivery_ledger_unavailable" in result.error
-    assert not lane.bridge.calls
-    runner._clear_durable_active_turn.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("initial", [False, True])
-async def test_live_policy_change_refuses_new_sends_and_restart_recovers_original_request(lane, initial):
-    config_path = lane.home / "config.yaml"
-    config_path.write_text(f"gateway:\n  delivery_ledger: {str(initial).lower()}\n", encoding="utf-8")
-    adapter = lane.new_adapter()
-    assert adapter.idempotent_delivery is initial
-    metadata = {"delivery_id": "before-policy-edit"} if initial else None
-    lane.bridge.lose = 2
-    assert not (await adapter.send("alice", "uncertain", reply_to="original-turn", metadata=metadata)).success
+    assert not (await lane.adapter.send("alice", "same answer", reply_to="turn-one")).success
     original = lane.bridge.calls[0]
-    assert len(lane.bridge.tasks) == 1
-
-    config_path.write_text(f"gateway:\n  delivery_ledger: {str(not initial).lower()}\n", encoding="utf-8")
-    refused = await adapter.send("alice", "a new request", reply_to="new-turn")
-    assert not refused.success and "restart the gateway" in refused.error
-    assert len(lane.bridge.calls) == 2
-    assert adapter.idempotent_delivery is initial
-
+    assert lane.adapter.state.unresolved()[0]["status"] == "needs_review"
     lane.bridge.generation_value = 99
     restarted = lane.new_adapter()
-    assert restarted.idempotent_delivery is (not initial)
-    await restarted.recover_pending()
-    assert not restarted.state.unresolved()
+    assert (await restarted.send("alice", "same answer", reply_to="turn-one")).success
     assert len(lane.bridge.tasks) == 1
     assert all(call == original for call in lane.bridge.calls)
 
 
 @pytest.mark.asyncio
-async def test_feishu_in_same_runner_keeps_its_native_recovery_semantics(lane):
-    from plugins.platforms.feishu.adapter import FeishuAdapter
-
-    # Construct the real adapter without connecting its SDK. Only transport is
-    # mocked; inherited capability, routing and recovery decisions remain real.
-    feishu = FeishuAdapter(PlatformConfig(enabled=True))
-    feishu.send = AsyncMock(return_value=SendResult(success=True, message_id="feishu-message"))
-    assert feishu.idempotent_delivery is False
-    ledger.record_obligation(obligation_id="feishu-owed", session_key="agent:main:feishu:dm:test",
-        platform="feishu", chat_id="synthetic-feishu-chat", thread_id="synthetic-thread", content="Feishu answer")
-    ledger.mark_attempting("feishu-owed")
-    with patch.object(ledger, "mark_delivered", side_effect=asyncio.CancelledError):
-        with pytest.raises(asyncio.CancelledError):
-            await final(lane.adapter, event_for(lane.adapter))
-    orphan()
-    assert await runner_for(lane.new_adapter(), feishu)._redeliver_pending_obligations() == 2
-    feishu.send.assert_awaited_once_with(chat_id="synthetic-feishu-chat",
-        content=ledger.RECOVERED_MARKER + "Feishu answer", metadata={"thread_id": "synthetic-thread"})
-    assert len(lane.bridge.tasks) == 1
-    assert all(row["state"] == "delivered" for row in rows())
-    assert BasePlatformAdapter.idempotent_delivery is False
+async def test_equal_text_in_distinct_requests_stays_distinct(lane):
+    first = await final(lane.adapter, event_for(lane.adapter, "one"))
+    second = await final(lane.adapter, event_for(lane.adapter, "two"))
+    third = await lane.adapter.send("alice", "same answer")
+    fourth = await lane.adapter.send("alice", "same answer")
+    assert all(result.success for result in (first, second, third, fourth))
+    assert len({result.message_id for result in (first, second, third, fourth)}) == 4
+    assert len(lane.bridge.tasks) == 4
 
 
 @pytest.mark.asyncio
-async def test_persisted_unledgered_transcript_reply_recovers_without_regeneration(lane):
+async def test_ingress_replay_reaches_native_admission_once(lane):
+    adapter = lane.adapter
+    adapter.state.initialize(10)
+    row = {"device": "synthetic", "owner_wxid": "wxid_synthetic_bot", "direction": "recv",
+           "message_type": 1, "chat_kind": "direct", "from_wxid": "alice",
+           "to_wxid": "wxid_synthetic_bot", "text": "/status", "event_key": "inbound-one"}
+    adapter.set_message_handler(AsyncMock())
+    # Keep the native intake/identity code; stop at its background task boundary.
+    with patch.object(adapter, "_start_session_processing", return_value=True) as admitted:
+        await adapter._ingest(row, 11)
+        await adapter._ingest(row, 12)
+    assert admitted.call_count == 1
+    assert admitted.call_args.args[0].message_id == "inbound-one"
+    assert adapter.state.cursor == 12
+    assert not lane.bridge.calls
+
+
+def test_native_auth_and_session_isolation_remain_in_charge(lane):
+    runner = runner_for(lane.adapter)
+    alice = event_for(lane.adapter).source
+    stranger = event_for(lane.adapter, peer="stranger").source
+    assert runner._is_user_authorized(alice)
+    assert not runner._is_user_authorized(stranger)
+    assert runner._get_unauthorized_dm_behavior(lane.adapter.platform) == "pair"
+    first = build_session_key(alice)
+    assert first == build_session_key(event_for(lane.adapter, "later").source)
+    assert first != build_session_key(stranger)
+    assert ":observatory:" in first
+    assert build_session_key(alice, profile="separate") != first
+
+
+@pytest.mark.asyncio
+async def test_feishu_and_wechat_use_same_native_recovery_rules(lane):
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+
+    feishu = FeishuAdapter(PlatformConfig(enabled=True))
+    feishu.send = AsyncMock(return_value=SendResult(success=True, message_id="feishu-message"))
+    for oid, platform, chat, text, thread in (
+        ("wechat-owed", "observatory", "alice", "WeChat answer", None),
+        ("feishu-owed", "feishu", "synthetic-feishu-chat", "Feishu answer", "synthetic-thread"),
+    ):
+        ledger.record_obligation(obligation_id=oid, session_key=f"agent:main:{platform}:dm:test",
+            platform=platform, chat_id=chat, thread_id=thread, content=text)
+        ledger.mark_attempting(oid)
+    orphan()
+    runner = runner_for(lane.adapter, feishu)
+    assert await runner._redeliver_pending_obligations() == 2
+    assert lane.bridge.calls[0][0]["text"] == ledger.RECOVERED_MARKER + "WeChat answer"
+    feishu.send.assert_awaited_once_with(chat_id="synthetic-feishu-chat",
+        content=ledger.RECOVERED_MARKER + "Feishu answer", metadata={"thread_id": "synthetic-thread"})
+    assert all(row["state"] == "delivered" for row in rows())
+    assert await runner._redeliver_pending_obligations() == 0
+
+
+@pytest.mark.asyncio
+async def test_native_crash_recovery_does_not_claim_end_to_end_exactly_once(lane):
+    # Backend acceptance is durable, but native Hermes has not recorded success.
+    # Stock recovery supplies no original reply identity and changes the text.
+    # Document this boundary instead of silently merging legitimate equal sends.
+    with patch.object(ledger, "mark_delivered", side_effect=asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await final(lane.adapter, event_for(lane.adapter))
+    assert len(lane.bridge.tasks) == 1
+    orphan()
+    assert await runner_for(lane.new_adapter())._redeliver_pending_obligations() == 1
+    assert len(lane.bridge.tasks) == 2
+    assert lane.bridge.calls[1][0]["text"] == ledger.RECOVERED_MARKER + "same answer"
+    assert lane.bridge.calls[0][1] != lane.bridge.calls[1][1]
+
+
+@pytest.mark.asyncio
+async def test_native_persisted_transcript_reply_recovers_without_model(lane):
     from gateway.session import SessionStore
     from hermes_state import SessionDB
 
@@ -352,18 +289,15 @@ async def test_persisted_unledgered_transcript_reply_recovers_without_regenerati
         store._db.close()
     store._db = SessionDB(db_path=lane.home / "state.db")
     runner = runner_for(lane.adapter)
-    runner.session_store = store
-    runner._async_session_store = None
-    source = event_for(lane.adapter).source
+    runner.session_store, runner._async_session_store = store, None
     try:
-        entry = store.get_or_create_session(source)
+        entry = store.get_or_create_session(event_for(lane.adapter).source)
         store.mark_turn_active(entry.session_key)
         store.append_to_transcript(entry.session_id, {"role": "user", "content": "synthetic question"})
         store.append_to_transcript(entry.session_id, {"role": "assistant", "content": "persisted answer"})
         assert await runner._ledger_crash_left_replies(3600) == 1
         assert await runner._redeliver_pending_obligations() == 1
-        assert len(lane.bridge.tasks) == 1
-        assert lane.bridge.calls[0][0]["text"] == "persisted answer"
+        assert lane.bridge.calls[0][0]["text"] == ledger.RECOVERED_MARKER + "persisted answer"
         assert await runner._ledger_crash_left_replies(3600) == 0
         assert await runner._redeliver_pending_obligations() == 0
         assert len(lane.bridge.tasks) == 1
