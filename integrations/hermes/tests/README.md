@@ -93,8 +93,12 @@ delivery ledger, startup recovery and persisted transcript recovery against an
 in-memory synthetic bridge. It does not start a model, gateway service, phone or
 Feishu connection. Use the supported Hermes checkout with the opt-in
 `idempotent_delivery` / `metadata.delivery_id` contract described in
-[`docs/hermes.md`](../../../docs/hermes.md); an unadapted v0.22.2 checkout is not
-the shared-default test target.
+[`docs/hermes.md`](../../../docs/hermes.md). The supported targets are v0.22.2
+(`d923a5eb487a17c0a68801bba9ef0f56c81040a8`) and
+`349e4f7e620ea1be6a8b5703d7152cf1e5ed9998`, each with its matching patch from
+[`compat/README.md`](../compat/README.md). An unadapted checkout is not a
+shared-default test target; do not downgrade or force an older patch onto newer
+queue lifecycle code.
 
 Build a disposable test interpreter through Hermes PM, including the declared
 `messaging` and `feishu` extras so both webhook and SDK-dependent regressions run.
@@ -125,6 +129,17 @@ env HOME="$TEST_ROOT/os-home" HERMES_HOME="$TEST_ROOT/hermes-home" \
   tests/gateway/test_active_turn_recovery.py \
   tests/gateway/test_idempotent_delivery.py \
   tests/gateway/test*feishu*.py
+
+# Additional lifecycle coverage for the 349e4f7 target only:
+if test "$(git rev-parse HEAD)" = 349e4f7e620ea1be6a8b5703d7152cf1e5ed9998; then
+  env HOME="$TEST_ROOT/os-home" HERMES_HOME="$TEST_ROOT/hermes-home" \
+    HERMES_PYTHON="$TEST_ROOT/venv/bin/python" \
+    bash scripts/run_tests.sh \
+    tests/gateway/test_idempotent_marker_lifecycle.py \
+    tests/gateway/test_follower_marker_handoff.py \
+    tests/gateway/test_busy_followup_marker_handoff.py \
+    tests/gateway/test_busy_durable_acceptance.py
+fi
 ```
 
 The canonical runner gives each test file a clean process and temporary Hermes
@@ -144,6 +159,14 @@ The existing plugin suite also covers partial multi-file notifications and cron
 live-to-standalone recovery. These tests establish recovery of durable requests;
 they do not claim that an attachment not yet prepared before a crash can be
 reconstructed from Hermes' text-only recovery ledger.
+
+The newer target also checks the distinction between retaining a durable turn
+marker and notifying a waiting session drain. Ledger failure must prevent a new
+transport request while still ending the adapter's lifecycle wait; the recovered
+no-waiter path must not clear that failed turn's marker. The existing follower and
+busy-follow-up tests retain normal marker hand-off behavior. A retained marker
+can be replaced by a later turn or discarded on clean startup, so these tests do
+not promise automatic redelivery after a local storage failure.
 
 ## Checking native Hermes behavior without editing its state
 

@@ -1,0 +1,582 @@
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index b1ffb8dd52..07c52c8498 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1878,6 +1878,10 @@ class BasePlatformAdapter(ABC):
+     supports_async_delivery: bool = True
+     # ``send()`` chunks natively via ``truncate_message()`` -> the router skips its truncation.
+     splits_long_messages: bool = False
++    # Opt in only when send() durably deduplicates metadata["delivery_id"]. The
++    # ledger supplies that identity on first send and every recovery, preserving
++    # the original body. A failed ledger write must then prevent the first send.
++    idempotent_delivery: bool = False
+     # Prefix users can always TYPE for Hermes commands ("!" where the client eats a leading "/").
+     typed_command_prefix: str = "/"
+     # ``in_channel`` continuable-cron surface: job delivered FLAT, plain replies continue it via
+@@ -4213,36 +4217,10 @@ class BasePlatformAdapter(ABC):
+     async def _record_delivery_obligation(
+         self, event: MessageEvent, session_key: str, text_content: str,
+         delivery_adapter: "BasePlatformAdapter", is_ephemeral_response: bool) -> Optional[str]:
+-        """Ledger the final response BEFORE the send so a crash before platform ACK redelivers on
+-        next boot; best-effort, skips slash-command and ephemeral replies. Returns the obligation id
+-        or None."""
+-        if is_ephemeral_response or str(event.text or "").lstrip().startswith(
+-            ("/", self.typed_command_prefix or "!")):
+-            return None
+-        try:
+-            from gateway.delivery_ledger import (
+-                compute_obligation_id, ledger_enabled, mark_attempting, record_obligation)
+-            if not await asyncio.to_thread(ledger_enabled):
+-                return None
+-            source = event.source
+-            # ``ledger_message_id`` wins when set: a queued chain's final answers the last message
+-            # of the chain, not the event that opened it (see ``MessageEvent.ledger_message_id``).
+-            _ledger_id = getattr(event, "ledger_message_id", None)
+-            if _ledger_id is None:
+-                _ledger_id = getattr(event, "message_id", "")
+-            obligation_id = compute_obligation_id(
+-                session_key, str(_ledger_id or ""), text_content)
+-            await asyncio.to_thread(
+-                record_obligation, obligation_id=obligation_id, session_key=session_key,
+-                platform=str(getattr(source.platform, "value", source.platform)),
+-                chat_id=source.chat_id, thread_id=getattr(source, "thread_id", None),
+-                content=text_content,
+-                adapter_profile=getattr(delivery_adapter, "_owner_profile", None))
+-            await asyncio.to_thread(mark_attempting, obligation_id)
+-            return obligation_id
+-        except Exception:
+-            logger.debug("delivery ledger record failed", exc_info=True)
+-            return None
++        from gateway.platforms.base_delivery import record_delivery_obligation
++        return await record_delivery_obligation(
++            event, session_key, text_content, delivery_adapter,
++            is_ephemeral_response=is_ephemeral_response, typed_command_prefix=self.typed_command_prefix)
+ 
+     async def _finalize_delivery_obligation(
+         self, obligation_id: str, result: Any, event: MessageEvent,
+@@ -4359,7 +4337,11 @@ class BasePlatformAdapter(ABC):
+                     len(text_content), event.source.chat_id)
+         obligation_id = await self._record_delivery_obligation(
+             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
++        if getattr(event, "_delivery_ledger_unavailable", False):
++            return SendResult(success=False, error="delivery_ledger_unavailable"), delivery_adapter
+         if obligation_id is not None:
++            if getattr(delivery_adapter, "idempotent_delivery", False) is True:
++                metadata = {**(metadata or {}), "delivery_id": obligation_id}
+             await self._release_turn_marker(event)  # the ledger now owns the crash recovery
+         result = await delivery_adapter._send_with_retry(
+             chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+@@ -4371,9 +4353,11 @@ class BasePlatformAdapter(ABC):
+     async def _release_turn_marker(self, event: MessageEvent) -> None:
+         """Clear the crash marker handed to this delivery lifecycle only once the final reply is ledgered or
+         nothing more is owed (no kill leaves a persisted reply with neither), then wake the drain. Idempotent."""
+-        if (getattr(event, "_turn_marker_handoff", False) and getattr(event, "_gateway_active_turn_token", None)
+-                and self.gateway_runner is not None):
++        if (not getattr(event, "_delivery_ledger_unavailable", False)
++                and getattr(event, "_turn_marker_handoff", False)
++                and getattr(event, "_gateway_active_turn_token", None) and self.gateway_runner is not None):
+             await self.gateway_runner._clear_durable_active_turn(event)
++        # Preserving a recovery marker must not block the live FIFO's completion notification.
+         getattr(event, "_gateway_marker_released", asyncio.Event()).set()
+ 
+     async def _send_final_text(
+diff --git a/gateway/platforms/base_delivery.py b/gateway/platforms/base_delivery.py
+new file mode 100644
+index 0000000000..6f9d6d5b3f
+--- /dev/null
++++ b/gateway/platforms/base_delivery.py
+@@ -0,0 +1,64 @@
++"""Durable final-text obligations shared by platform adapters."""
++from __future__ import annotations
++
++import asyncio
++import logging
++from typing import Any
++
++from gateway.platforms.event import MessageEvent
++
++logger = logging.getLogger(__name__)
++
++
++async def record_delivery_obligation(
++    event: MessageEvent, session_key: str, text_content: str, delivery_adapter: Any, *,
++    is_ephemeral_response: bool, typed_command_prefix: str,
++) -> str | None:
++    """Record before HTTP; idempotent transports refuse sends when recording fails.
++
++    Command and ephemeral replies keep their separate delivery behavior. Other
++    adapters retain the historical best-effort ledger policy.
++    """
++    event._delivery_ledger_unavailable = False
++    if is_ephemeral_response or str(event.text or "").lstrip().startswith(
++        ("/", typed_command_prefix or "!")):
++        return None
++    try:
++        from gateway.delivery_ledger import (
++            compute_obligation_id, ledger_enabled, mark_attempting, record_obligation)
++        if not await asyncio.to_thread(ledger_enabled):
++            if getattr(delivery_adapter, "idempotent_delivery", False) is True:
++                raise RuntimeError("idempotent delivery requires the delivery ledger")
++            return None
++        source = event.source
++        # ``ledger_message_id`` wins when set: a queued chain's final answers the last message
++        # of the chain, not the event that opened it (see ``MessageEvent.ledger_message_id``).
++        _ledger_id = getattr(event, "ledger_message_id", None)
++        if _ledger_id is None:
++            _ledger_id = getattr(event, "message_id", "")
++        if not _ledger_id and getattr(delivery_adapter, "idempotent_delivery", False) is True:
++            # Internal/resumed turns have no inbound id. Distinct turns may
++            # legitimately answer with identical text; never merge them.
++            token = getattr(event, "_gateway_active_turn_token", None)
++            if not token:
++                raise RuntimeError("idempotent delivery requires a durable turn identity")
++            _ledger_id = "turn:" + str(token)
++        obligation_id = compute_obligation_id(
++            session_key, str(_ledger_id or ""), text_content)
++        await asyncio.to_thread(
++            record_obligation, obligation_id=obligation_id, session_key=session_key,
++            platform=str(getattr(source.platform, "value", source.platform)),
++            chat_id=source.chat_id, thread_id=getattr(source, "thread_id", None),
++            content=text_content,
++            adapter_profile=getattr(delivery_adapter, "_owner_profile", None))
++        await asyncio.to_thread(mark_attempting, obligation_id)
++        return obligation_id
++    except Exception:
++        if getattr(delivery_adapter, "idempotent_delivery", False) is True:
++            # No transport request may escape without a recoverable identity.
++            # Keep the marker for possible unclean-start recovery of the transcript.
++            event._delivery_ledger_unavailable = True
++            logger.warning("Idempotent final send deferred: delivery ledger unavailable", exc_info=True)
++            return None
++        logger.debug("delivery ledger record failed", exc_info=True)
++        return None
+diff --git a/gateway/run_startup.py b/gateway/run_startup.py
+index 3a72869114..97c92c705b 100644
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -465,9 +465,12 @@ class GatewayStartupMixin:
+             if adapter is None:
+                 continue
+             content = row["content"]
+-            if row.get("needs_marker"):
++            idempotent = getattr(adapter, "idempotent_delivery", False) is True
++            if row.get("needs_marker") and not idempotent:
+                 content = row.get("marker", RECOVERED_MARKER) + content
+             metadata = {"thread_id": row["thread_id"]} if row.get("thread_id") else None
++            if idempotent:
++                metadata = {**(metadata or {}), "delivery_id": row["obligation_id"]}
+             try:
+                 result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
+             except Exception as send_err:
+diff --git a/gateway/session_ingress.py b/gateway/session_ingress.py
+index 992c2a9089..c2e162f3c8 100644
+--- a/gateway/session_ingress.py
++++ b/gateway/session_ingress.py
+@@ -179,7 +179,8 @@ async def deliver_resolved(authority, admission_id, *, owed):
+ 
+ 
+ async def _release_turn_marker(authority, event):
+-    if getattr(event, '_gateway_active_turn_token', None):
++    if (not getattr(event, '_delivery_ledger_unavailable', False)
++            and getattr(event, '_gateway_active_turn_token', None)):
+         await authority.runner._clear_durable_active_turn(event)
+ 
+ 
+@@ -386,7 +387,7 @@ async def deliver_settled(authority, admission_id):
+     finally:
+         # Held until the send returns: an empty map means every settled reply was handed over.
+         authority.pending_deliveries.pop(admission_id, None)
+-        # The ledgered send already released the marker; an empty or failed send owes no more.
++        # A ledgered send already released the marker. A failed ledger write still needs it.
+         await _release_turn_marker(authority, event)
+ 
+ 
+diff --git a/tests/gateway/test_idempotent_delivery.py b/tests/gateway/test_idempotent_delivery.py
+new file mode 100644
+index 0000000000..6e46a1d1d5
+--- /dev/null
++++ b/tests/gateway/test_idempotent_delivery.py
+@@ -0,0 +1,206 @@
++"""Idempotent transports keep one identity across native final-reply recovery.
++
++The ordinary Feishu contract stays best-effort with visible recovery markers.
++No network, platform credentials, or user Hermes state are used.
++"""
++
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++
++from gateway import delivery_ledger as dl
++from gateway.config import Platform, PlatformConfig
++from gateway.platforms.base import BasePlatformAdapter, SendResult
++from gateway.platforms.event import MessageEvent
++from gateway.run import GatewayRunner
++from gateway.session import SessionSource
++
++
++class _Adapter(BasePlatformAdapter):
++    def __init__(self, *, idempotent=True, accepted=None, platform=Platform.FEISHU):
++        super().__init__(PlatformConfig(enabled=True), platform)
++        self.idempotent_delivery = idempotent
++        self.accepted = {} if accepted is None else accepted
++        self.requests = []
++        self.lose_ack = False
++
++    async def connect(self, *, is_reconnect=False):
++        return True
++
++    async def disconnect(self):
++        pass
++
++    async def get_chat_info(self, chat_id):
++        return {"name": chat_id}
++
++    def _send_retry_is_final(self, result):
++        return True
++
++    async def send(self, chat_id, content, reply_to=None, metadata=None):
++        self.requests.append((chat_id, content, metadata))
++        identity = (metadata or {}).get("delivery_id")
++        if identity:
++            previous = self.accepted.setdefault(identity, content)
++            assert previous == content, "one identity must never change payload"
++        if self.lose_ack:
++            return SendResult(success=False, error="send_path_degraded")
++        return SendResult(success=True, message_id="m1")
++
++
++@pytest.fixture(autouse=True)
++def _isolated_ledger(tmp_path, monkeypatch):
++    monkeypatch.setattr(dl, "_db_path", lambda: tmp_path / "state.db")
++
++
++def _event(platform=Platform.FEISHU):
++    return MessageEvent(text="question", message_id="inbound-42",
++                        source=SessionSource(platform=platform, chat_id="chat-1", chat_type="dm"))
++
++
++def _rows():
++    with dl._connect() as db:
++        return db.execute("SELECT obligation_id,state,content FROM delivery_obligations").fetchall()
++
++
++def _runner(adapter):
++    runner = object.__new__(GatewayRunner)
++    runner.adapters = {adapter.platform: adapter}
++    runner._profile_adapters = {}
++    runner._active_profile_name = lambda: "default"
++    runner.session_store = None
++    runner._async_session_store = MagicMock()
++    runner._async_session_store.clear_resume_pending = AsyncMock()
++    runner._async_session_store._store = None
++    runner._running = False
++    return runner
++
++
++async def _live(adapter, event=None, metadata=None):
++    return await adapter.send_final_ledgered(
++        event or _event(adapter.platform), "agent:main:feishu:dm:chat-1", "original reply",
++        metadata or {}, reply_to="inbound-42")
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("recovery", ["boot", "runtime"])
++async def test_lost_ack_reuses_original_identity_and_body(recovery):
++    original = _Adapter()
++    original.lose_ack = True
++    metadata = {"notify": True}
++    result, _ = await _live(original, metadata=metadata)
++    assert not result.success
++    identity = _rows()[0][0]
++    assert original.requests[0][2] == {"notify": True, "delivery_id": identity}
++    assert metadata == {"notify": True}
++
++    restored = _Adapter(accepted=original.accepted)
++    runner = _runner(restored)
++    if recovery == "boot":
++        with dl._connect() as db:
++            db.execute("UPDATE delivery_obligations SET owner_pid=999999999,owner_started_at=1")
++        assert await runner._redeliver_pending_obligations() == 1
++    else:
++        assert await runner._redeliver_failed_obligations_for_platform(Platform.FEISHU) == 1
++    assert restored.requests == [("chat-1", "original reply", {"delivery_id": identity})]
++    assert restored.accepted == {identity: "original reply"}
++    assert _rows() == [(identity, "delivered", "original reply")]
++    assert await runner._redeliver_pending_obligations() == 0
++
++
++@pytest.mark.asyncio
++async def test_default_feishu_keeps_marker_and_metadata_contract():
++    adapter = _Adapter(idempotent=False)
++    adapter.lose_ack = True
++    await _live(adapter)
++    assert adapter.requests == [("chat-1", "original reply", {})]
++    adapter.lose_ack = False
++    runner = _runner(adapter)
++    assert await runner._redeliver_failed_obligations_for_platform(Platform.FEISHU) == 1
++    assert adapter.requests[-1] == ("chat-1", dl.RECONNECTED_MARKER + "original reply", None)
++
++
++@pytest.mark.asyncio
++async def test_internal_turns_with_identical_replies_keep_distinct_ids():
++    adapter = _Adapter()
++    for token in ("first-turn", "second-turn"):
++        event = _event()
++        event.message_id = None
++        event.internal = True
++        event._gateway_active_turn_token = token
++        result, _ = await _live(adapter, event)
++        assert result.success
++    assert len(adapter.accepted) == 2
++    assert len(_rows()) == 2
++
++
++@pytest.mark.asyncio
++async def test_idempotent_internal_reply_requires_durable_turn_identity():
++    adapter = _Adapter()
++    event = _event()
++    event.message_id = None
++    event.internal = True
++    result, _ = await _live(adapter, event)
++    assert (result.success, result.error) == (False, "delivery_ledger_unavailable")
++    assert adapter.requests == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("failure", ["record_obligation", "mark_attempting", "ledger_disabled"])
++async def test_idempotent_final_never_sends_without_durable_ledger(failure, monkeypatch):
++    adapter = _Adapter()
++    event = _event()
++    event._turn_marker_handoff = True
++    event._gateway_active_turn_token = "durable-token"
++    runner = _runner(adapter)
++    runner._clear_durable_active_turn = AsyncMock()
++    adapter.gateway_runner = runner
++    if failure == "ledger_disabled":
++        monkeypatch.setattr(dl, "ledger_enabled", lambda: False)
++    else:
++        def unavailable(*args, **kwargs):
++            raise OSError("simulated storage unavailable")
++        monkeypatch.setattr(dl, failure, unavailable)
++    result, _ = await _live(adapter, event)
++    assert (result.success, result.error) == (False, "delivery_ledger_unavailable")
++    assert adapter.requests == []
++    # The background task's final cleanup must not discard the only recovery marker.
++    await adapter._release_turn_marker(event)
++    runner._clear_durable_active_turn.assert_not_awaited()
++    assert event._gateway_active_turn_token == "durable-token"
++
++
++@pytest.mark.asyncio
++async def test_default_feishu_still_sends_when_ledger_unavailable(monkeypatch):
++    def unavailable(**kwargs):
++        raise OSError("simulated storage unavailable")
++    monkeypatch.setattr(dl, "record_obligation", unavailable)
++    adapter = _Adapter(idempotent=False)
++    result, _ = await _live(adapter)
++    assert result.success
++    assert adapter.requests == [("chat-1", "original reply", {})]
++
++
++@pytest.mark.asyncio
++async def test_crash_left_transcript_gets_durable_id_without_regenerating(tmp_path):
++    from tests.gateway.test_active_turn_recovery import (
++        _close_store_db, _db_runner, _entry_for, _turn,
++    )
++
++    runner, store = _db_runner(tmp_path)
++    source = _turn(store, "replied", marked=True, reply="original reply")
++    adapter = _Adapter(platform=source.platform)
++    runner.adapters = {source.platform: adapter}
++    runner._profile_adapters = {}
++    runner._active_profile_name = lambda: "default"
++    runner._running = False
++    try:
++        assert await runner._recover_unclean_sessions() == (0, 1)
++        assert await runner._redeliver_pending_obligations() == 1
++        identity = _rows()[0][0]
++        assert adapter.requests == [("replied", "original reply",
++                                     {"thread_id": "thread-1", "delivery_id": identity})]
++        assert not _entry_for(store, source).resume_pending
++        assert await runner._recover_unclean_sessions() == (0, 0)
++        assert await runner._redeliver_pending_obligations() == 0
++    finally:
++        _close_store_db(store)
+diff --git a/tests/gateway/test_idempotent_marker_lifecycle.py b/tests/gateway/test_idempotent_marker_lifecycle.py
+new file mode 100644
+index 0000000000..7af9856331
+--- /dev/null
++++ b/tests/gateway/test_idempotent_marker_lifecycle.py
+@@ -0,0 +1,171 @@
++"""Storage failure keeps the recovery token without stalling the live session FIFO."""
++
++import asyncio
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from gateway import delivery_ledger as dl
++from gateway.session_authority import SessionAuthority
++from gateway.session_ingress import busy_acceptance, deliver_settled, dispatch_shared_busy
++from tests.gateway.test_idempotent_delivery import _Adapter, _event, _runner
++
++
++@pytest.fixture(autouse=True)
++def _isolated_ledger(tmp_path, monkeypatch):
++    monkeypatch.setattr(dl, "_db_path", lambda: tmp_path / "state.db")
++
++
++def _authority(adapter, event):
++    runner = _runner(adapter)
++    runner._draining = False
++
++    async def clear_marker(current):
++        current._gateway_active_turn_token = None
++
++    runner._clear_durable_active_turn = AsyncMock(side_effect=clear_marker)
++    adapter.gateway_runner = runner
++    event._turn_marker_handoff = True
++    event._gateway_active_turn_token = "original-turn"
++    authority = object.__new__(SessionAuthority)
++    authority.runner = runner
++    authority.retiring = False
++    authority.marker_adopters = {"admission": event}
++    authority.waiters = {"admission": asyncio.get_running_loop().create_future()}
++    authority.native_waiters = set()
++    authority.pending_deliveries = {}
++    authority.held_turn_markers = {}
++    return authority
++
++
++def _fail_ledger(monkeypatch, failure):
++    if failure == "ledger_disabled":
++        monkeypatch.setattr(dl, "ledger_enabled", lambda: False)
++    else:
++        def unavailable(*args, **kwargs):
++            raise OSError("simulated storage unavailable")
++        monkeypatch.setattr(dl, failure, unavailable)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("failure", ["record_obligation", "mark_attempting", "ledger_disabled", None])
++async def test_waiting_fifo_is_not_stalled_by_preserved_recovery_marker(failure, monkeypatch):
++    adapter, event = _Adapter(), _event()
++    authority = _authority(adapter, event)
++    if failure:
++        _fail_ledger(monkeypatch, failure)
++    waiter = authority.waiters["admission"]
++    settlement = asyncio.create_task(authority._resolve_settled_waiter("admission", "reply"))
++    try:
++        assert await asyncio.wait_for(asyncio.shield(waiter), 2) == "reply"
++        # The real authority creates the notification before waking the sending adapter.
++        assert not event._gateway_marker_released.is_set()
++        result, _ = await adapter.send_final_ledgered(
++            event, "route", "reply", {}, reply_to=event.message_id)
++        await adapter._release_turn_marker(event)  # background delivery's finally
++        await asyncio.wait_for(asyncio.shield(settlement), 2)
++        assert event._gateway_marker_released.is_set()
++        if failure:
++            assert (result.success, result.error) == (False, "delivery_ledger_unavailable")
++            assert adapter.requests == []
++            assert event._gateway_active_turn_token == "original-turn"
++            authority.runner._clear_durable_active_turn.assert_not_awaited()
++        else:
++            assert result.success and len(adapter.requests) == 1
++            assert event._gateway_active_turn_token is None
++            authority.runner._clear_durable_active_turn.assert_awaited_once_with(event)
++    finally:
++        settlement.cancel()
++        await asyncio.gather(settlement, return_exceptions=True)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("state", ["draining", "retiring"])
++async def test_drain_and_retire_do_not_wait_for_adapter_notification(state, monkeypatch):
++    adapter, event = _Adapter(), _event()
++    authority = _authority(adapter, event)
++    authority.runner._draining = state == "draining"
++    authority.retiring = state == "retiring"
++    _fail_ledger(monkeypatch, "record_obligation")
++    waiter = authority.waiters["admission"]
++    await asyncio.wait_for(authority._resolve_settled_waiter("admission", "reply"), 2)
++    assert waiter.result() == "reply"
++    assert not event._gateway_marker_released.is_set()
++    result, _ = await adapter.send_final_ledgered(event, "route", "reply", {}, reply_to=event.message_id)
++    await adapter._release_turn_marker(event)
++    assert not result.success and not adapter.requests
++    assert event._gateway_marker_released.is_set()
++    assert event._gateway_active_turn_token == "original-turn"
++    authority.runner._clear_durable_active_turn.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("failure", [True, False])
++async def test_recovered_no_waiter_reply_keeps_marker_only_when_ledger_fails(failure, monkeypatch):
++    adapter, event = _Adapter(), _event()
++    authority = _authority(adapter, event)
++    authority.marker_adopters.clear()
++    authority.waiters.clear()
++    authority.held_turn_markers["admission"] = event
++    authority.pending_deliveries["admission"] = (adapter, event, "route", "reply", None)
++    # Exercise the actual settled delivery and ledger bracket, with no media side effects.
++    adapter._extract_response_content = AsyncMock(return_value=SimpleNamespace(text_content="reply"))
++    adapter._deliver_attachments = AsyncMock()
++    if failure:
++        _fail_ledger(monkeypatch, "record_obligation")
++    await deliver_settled(authority, "admission")
++    assert authority.pending_deliveries == {}
++    assert authority.held_turn_markers == {}
++    if failure:
++        assert adapter.requests == []
++        assert event._gateway_active_turn_token == "original-turn"
++        authority.runner._clear_durable_active_turn.assert_not_awaited()
++    else:
++        assert len(adapter.requests) == 1
++        assert event._gateway_active_turn_token is None
++        authority.runner._clear_durable_active_turn.assert_awaited_once_with(event)
++    await deliver_settled(authority, "admission")
++    assert len(adapter.requests) == (0 if failure else 1)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("failure", [True, False])
++async def test_busy_clone_notifies_original_waiter_without_losing_failed_marker(failure, monkeypatch):
++    adapter, event = _Adapter(), _event()
++    authority = _authority(adapter, event)
++    waiter = authority.waiters["admission"]
++
++    async def handler(current):
++        assert current is event
++        busy_acceptance.get().set_result(None)
++        return await asyncio.shield(waiter)
++
++    adapter._message_handler = handler
++    adapter._extract_response_content = AsyncMock(return_value=SimpleNamespace(text_content="reply"))
++    adapter._deliver_attachments = AsyncMock()
++    if failure:
++        _fail_ledger(monkeypatch, "record_obligation")
++    await dispatch_shared_busy(adapter, event, "route")
++    observers = tuple(adapter._background_tasks)
++    assert len(observers) == 1
++    settlement = asyncio.create_task(authority._resolve_settled_waiter("admission", "reply"))
++    try:
++        await asyncio.wait_for(asyncio.gather(settlement, *observers), 2)
++        clone = adapter._extract_response_content.call_args.args[1]
++        assert clone is not event
++        assert event._gateway_marker_released.is_set()
++        assert not getattr(event, "_gateway_active_turn_token", None)
++        if failure:
++            assert clone._gateway_active_turn_token == "original-turn"
++            assert adapter.requests == []
++            authority.runner._clear_durable_active_turn.assert_not_awaited()
++        else:
++            assert clone._gateway_active_turn_token is None
++            assert len(adapter.requests) == 1
++            authority.runner._clear_durable_active_turn.assert_awaited_once_with(clone)
++    finally:
++        settlement.cancel()
++        for observer in observers:
++            observer.cancel()
++        await asyncio.gather(settlement, *observers, return_exceptions=True)
