@@ -18,6 +18,7 @@ public final class MessagePayload {
     public String roomId;
     public String sender;
     public String text;
+    public java.util.Set<String> mentionedWxids = java.util.Collections.emptySet();
     public int messageType;
     public String mediaKind;
     public String mediaMime;
@@ -27,6 +28,12 @@ public final class MessagePayload {
     public long createTime;
 
     public String toJson() {
+        StringBuilder mentions = new StringBuilder("[");
+        for (String wxid : mentionedWxids) {
+            if (mentions.length() > 1) mentions.append(',');
+            mentions.append('"').append(Strings.json(wxid)).append('"');
+        }
+        mentions.append(']');
         return "{"
                 + "\"id\":\"" + Strings.json(id) + "\","
                 + "\"event_id\":" + eventId + ","
@@ -43,6 +50,7 @@ public final class MessagePayload {
                 + "\"room_id\":\"" + Strings.json(roomId) + "\","
                 + "\"sender\":\"" + Strings.json(sender) + "\","
                 + "\"text\":\"" + Strings.json(text) + "\","
+                + "\"mentioned_wxids\":" + mentions + ","
                 + "\"message_type\":" + messageType + ","
                 + "\"media_kind\":\"" + Strings.json(mediaKind) + "\","
                 + "\"media_mime\":\"" + Strings.json(mediaMime) + "\","

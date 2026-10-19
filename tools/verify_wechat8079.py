@@ -22,6 +22,8 @@ EXPECTED_VERSION = {"package": "com.tencent.mm", "version_name": "8.0.79", "vers
 
 # Exact field descriptors include both the declaring class and field type.
 FIELDS = [
+    ("Lim/c8;->G:Ljava/lang/String;", False),
+    ("Lim/c8;->field_lvbuffer:[B", False),
     ("Lqs/g;->a:[Lqs/h;", True),
     ("Lni5/n0;->f:[Z", True),
     ("Lf61/t1;->a:Lf61/p1;", True),
@@ -35,6 +37,13 @@ FIELDS = [
 ]
 # Full descriptors assert the argument list AND return type.
 METHODS = [
+    ("Lcom/tencent/mm/sdk/platformtools/e2;->i([B)I", False),
+    ("Lcom/tencent/mm/sdk/platformtools/e2;->c()Z", False),
+    ("Lcom/tencent/mm/sdk/platformtools/e2;->g()Ljava/lang/String;", False),
+    ("Lcom/tencent/mm/sdk/platformtools/e2;->e()I", False),
+    ("Lim/c8;->parseBuff()V", False),
+    ("Lim/c8;->F0()Ljava/lang/String;", False),
+    ("Lcom/tencent/mm/storage/e9;->t2(Ljava/lang/String;)Z", False),
     ("Lcom/tencent/mm/modelbase/a3;->c()Z", True),
     ("Lf61/t1;->a(Ljava/lang/String;)Lf61/s1;", True),
     ("Lf61/s1;->h(Ljava/lang/String;)Lf61/s1;", False),

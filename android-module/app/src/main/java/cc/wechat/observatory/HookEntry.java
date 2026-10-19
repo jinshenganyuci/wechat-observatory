@@ -556,6 +556,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
             Long createTime = values.getAsLong("createTime");
             Integer type = values.getAsInteger("type");
             String imgPath = values.getAsString("imgPath");
+            // Do not persist an incomplete group event before the ordered poll can read its metadata.
+            if (isChatroomTalker(talker) && !Integer.valueOf(1).equals(isSend)
+                    && !values.containsKey("lvbuffer")) return;
+            byte[] lvbuffer = values.getAsByteArray("lvbuffer");
 
             int messageType = type == null ? 1 : type;
             if (!shouldReportMessage(talker, content, messageType)) {
@@ -581,7 +585,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 return;
             }
 
-            MessagePayload payload = buildMessagePayload(config, talker, content, isSend, msgId, createTime, messageType, imgPath);
+            MessagePayload payload = buildMessagePayload(config, talker, content, isSend, msgId, createTime, messageType, imgPath, lvbuffer);
             post(config, payload);
             // Only the ordered poll advances its watermark. A later successful
             // hook upload must not skip earlier rows awaiting a network retry.
@@ -1595,7 +1599,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         Object cursor;
         try {
             cursor = rawQuery(db, ""
-                    + "SELECT msgId,talker,COALESCE(content,''),isSend,createTime,type,COALESCE(imgPath,'') "
+                    + "SELECT msgId,talker,COALESCE(content,''),isSend,createTime,type,COALESCE(imgPath,''),lvbuffer "
                     + "FROM message "
                     + "WHERE msgId > ? AND talker IS NOT NULL AND talker <> '' "
                     + "ORDER BY msgId ASC "
@@ -1629,13 +1633,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 long createTime = normalizeCreateTime(longColumn(cursor, 4));
                 int type = intColumn(cursor, 5);
                 String imgPath = hasMediaHint ? stringColumn(cursor, 6) : "";
+                byte[] lvbuffer = hasMediaHint ? (byte[]) cursor.getClass().getMethod("getBlob", int.class).invoke(cursor, 7) : null;
                 if (!shouldReportMessage(talker, content, type)
                         || !allowsHistoricalMessage(config, createTime)) {
                     account.advanceWatermark(msgId);
                     continue;
                 }
 
-                MessagePayload payload = buildMessagePayload(config, talker, content, isSend == 1 ? Integer.valueOf(1) : Integer.valueOf(0), msgId, createTime, type <= 0 ? 1 : type, imgPath);
+                MessagePayload payload = buildMessagePayload(config, talker, content, isSend == 1 ? Integer.valueOf(1) : Integer.valueOf(0), msgId, createTime, type <= 0 ? 1 : type, imgPath, lvbuffer);
                 post(config, payload);
                 account.advanceWatermark(msgId);
                 count++;
@@ -1664,7 +1669,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return type > 0;
     }
 
-    private static MessagePayload buildMessagePayload(BridgeConfig config, String talker, String content, Integer isSend, Long msgId, Long createTime, int type, String mediaHint) {
+    private static MessagePayload buildMessagePayload(BridgeConfig config, String talker, String content, Integer isSend, Long msgId, Long createTime, int type, String mediaHint, byte[] lvbuffer) {
         MessagePayload payload = new MessagePayload();
         String normalizedTalker = talker == null ? "" : talker.trim();
         boolean chatroom = isChatroomTalker(normalizedTalker);
@@ -1695,6 +1700,16 @@ public final class HookEntry implements IXposedHookLoadPackage {
             payload.from = normalizedTalker;
             payload.to = config.selfWxid;
             payload.sender = chatroom ? extractChatroomSender(content) : "";
+            if (chatroom && type == 1) {
+                try {
+                    if (currentWeChatVersionProfile().is8079()) {
+                        payload.mentionedWxids = cc.wechat.observatory.wechat.WeChat8079Mentions.read(
+                                lvbuffer);
+                    }
+                } catch (Exception unavailable) {
+                    log("group mention metadata unavailable: " + shortError(unavailable));
+                }
+            }
         }
         return payload;
     }
