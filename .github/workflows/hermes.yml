@@ -13,8 +13,21 @@ permissions:
 
 jobs:
   delivery:
+    name: Delivery (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: v0.22.2
+            ref: d923a5eb487a17c0a68801bba9ef0f56c81040a8
+            patch: hermes-v0.22.2-delivery.patch
+            marker_lifecycle: false
+          - target: 349e4f7
+            ref: 349e4f7e620ea1be6a8b5703d7152cf1e5ed9998
+            patch: hermes-349e4f7-delivery.patch
+            marker_lifecycle: true
     steps:
       - name: Isolate test state
         run: |
@@ -26,7 +39,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: NousResearch/hermes-agent
-          ref: d923a5eb487a17c0a68801bba9ef0f56c81040a8
+          ref: ${{ matrix.ref }}
           path: hermes
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
@@ -34,8 +47,8 @@ jobs:
       - name: Apply explicit Hermes compatibility patch
         working-directory: hermes
         run: |
-          git apply --check ../observatory/integrations/hermes/compat/hermes-v0.22.2-delivery.patch
-          git apply ../observatory/integrations/hermes/compat/hermes-v0.22.2-delivery.patch
+          git apply --check ../observatory/integrations/hermes/compat/${{ matrix.patch }}
+          git apply ../observatory/integrations/hermes/compat/${{ matrix.patch }}
       - name: Build locked Hermes test environment with Feishu SDK
         working-directory: hermes
         run: python -m pm.build_env --source . --out "$RUNNER_TEMP/hermes-tests" --group dev --group test --extra messaging --extra feishu
@@ -48,6 +61,15 @@ jobs:
             tests/gateway/test_delivery_ledger_producer.py \
             tests/gateway/test_active_turn_recovery.py \
             tests/gateway/test_feishu*.py
+      - name: Test newer queue and marker lifecycle
+        if: matrix.marker_lifecycle
+        working-directory: hermes
+        run: |
+          HERMES_PYTHON="$RUNNER_TEMP/hermes-tests/bin/python" scripts/run_tests.sh \
+            tests/gateway/test_idempotent_marker_lifecycle.py \
+            tests/gateway/test_follower_marker_handoff.py \
+            tests/gateway/test_busy_followup_marker_handoff.py \
+            tests/gateway/test_busy_durable_acceptance.py
       - name: Test plugin, shared gateway, configuration and lab guards
         working-directory: hermes
         run: |

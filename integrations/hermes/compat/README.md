@@ -1,14 +1,23 @@
-# Hermes v0.22.2 投递恢复兼容补丁
+# Hermes 投递恢复兼容补丁
 
-微信与飞书共用 `default`，需要同时保留 Hermes 的通用投递账本和 Observatory 的原请求幂等键。仅安装外部插件不能补齐 Hermes v0.22.2 在恢复路径中遗漏的投递身份，因此这里提供一个明确应用、可以审查的源码补丁：[`hermes-v0.22.2-delivery.patch`](hermes-v0.22.2-delivery.patch)。插件不会在运行时偷偷修改 Hermes。
+微信与飞书共用 `default`，需要同时保留 Hermes 的通用投递账本和 Observatory 的原请求幂等键。仅安装外部插件不能补齐以下 Hermes 版本在恢复路径中遗漏的投递身份，因此这里提供与精确 commit 对应、明确应用的源码补丁。插件不会在运行时偷偷修改 Hermes。
+
+| Hermes 基线 | 完整 commit | 对应补丁 |
+| --- | --- | --- |
+| 官方 v0.22.2 | `d923a5eb487a17c0a68801bba9ef0f56c81040a8` | [`hermes-v0.22.2-delivery.patch`](hermes-v0.22.2-delivery.patch) |
+| 官方 commit `349e4f7` | `349e4f7e620ea1be6a8b5703d7152cf1e5ed9998` | [`hermes-349e4f7-delivery.patch`](hermes-349e4f7-delivery.patch) |
+
+这两个目标分别执行补丁应用检查、原生投递恢复、Observatory 共享网关和飞书回归测试；新版另有会话队列与标记收尾测试。版本号范围不是兼容证明，不能把任一补丁强行用于其他 commit，也不要求把新版降级到 v0.22.2。
 
 ## 补丁的范围
 
-补丁基线为官方 **v0.22.2**，Git commit **`d923a5eb487a17c0a68801bba9ef0f56c81040a8`**。它修改 Hermes 的 `gateway/platforms/base.py`、`gateway/run_startup.py`，将原有投递登记函数移入 `gateway/platforms/base_delivery.py`，并增加 `tests/gateway/test_idempotent_delivery.py`。这次抽取用于遵守 Hermes 对大型核心文件的限制，没有复制第二套投递逻辑。
+两个补丁均修改 Hermes 的 `gateway/platforms/base.py`、`gateway/run_startup.py`，将原有投递登记函数移入 `gateway/platforms/base_delivery.py`，并增加 `tests/gateway/test_idempotent_delivery.py`。这次抽取用于遵守 Hermes 对大型核心文件的限制，没有复制第二套投递逻辑。`349e4f7` 补丁还适配新增的 `gateway/session_ingress.py` 标记清理路径，并增加 `tests/gateway/test_idempotent_marker_lifecycle.py`。
 
 - 增加默认关闭的 `BasePlatformAdapter.idempotent_delivery` 能力。Observatory 显式启用；飞书及其他未选择此能力的渠道保留原来的发送、恢复和提示文字。
 - 对启用此能力的渠道，首次发送和恢复均通过 `metadata["delivery_id"]` 传递同一个原生投递 ID；恢复使用原文，避免添加恢复标记后变成另一个请求。
 - Hermes 账本写入失败时，拒绝发送这条最终文本，返回 `delivery_ledger_unavailable` 并记录故障；不会先发出无法关联原身份的请求。
+
+`349e4f7` 的 `_release_turn_marker()` 同时承担两件事：清理持久化轮次标记，以及通过 `_gateway_marker_released` 通知会话队列可以继续。新版补丁在账本失败时只跳过前者，仍执行后者；不会用旧版提前 `return` 跳过通知。这个通知用于解除本次发送生命周期的等待，不代表投递成功或账本写入成功。恢复发送的独立清理路径同样保留失败标记，忙碌队列则保留原事件与发送事件之间的通知交接。
 
 Observatory 继续使用自己的 SQLite 保存原请求及后端幂等键，Hermes 负责原有的投递义务和恢复。无需关闭 `gateway.delivery_ledger`，也无需复制一套飞书发送逻辑。补丁本身不迁移 profile、改配置、安装服务或发送测试消息。
 
@@ -30,21 +39,25 @@ python -c 'import sys, gateway.platforms.base as b; print(sys.executable); print
 git rev-parse HEAD
 ```
 
-`b.__file__` 必须位于实际运行源码中，版本和 commit 必须匹配上述基线。若是无可写源码的安装包、不同版本、另一个 fork 或已修改的核心文件，先停止；不能强行套用这份补丁。需要针对那份安装单独适配验证，或者由使用者明确决定切换到已验证的源码部署。
+`b.__file__` 必须位于实际运行源码中，完整 commit 必须匹配表中某一基线。若是无可写源码的安装包、其他 commit、另一个 fork 或已修改的核心文件，先停止；不能强行套用补丁。需要针对那份安装单独适配验证，或者由使用者明确决定切换到已验证的源码部署。检查失败本身不授权升级、降级或重置源码。
 
 ## 应用与核验
 
-以下两个变量均应填写**核实过的绝对路径**。Observatory 的补丁可以来自本仓库 checkout；不要下载一个版本不明的同名文件。
+以下两个目录均应填写**核实过的绝对路径**。补丁来自本仓库 checkout，按实际源码的完整 commit 选择；不要下载一个版本不明的同名文件。
 
 ```sh
 HERMES_SOURCE=/实际使用的/hermes-agent
-OBSERVATORY_PATCH=/实际/wechat-observatory/integrations/hermes/compat/hermes-v0.22.2-delivery.patch
+OBSERVATORY_SOURCE=/实际/wechat-observatory
 
-test "$(git -C "$HERMES_SOURCE" rev-parse HEAD)" = \
-  d923a5eb487a17c0a68801bba9ef0f56c81040a8 || {
-  echo 'Hermes 版本不匹配，停止；不要继续 apply'
-  exit 1
-}
+case "$(git -C "$HERMES_SOURCE" rev-parse HEAD)" in
+  d923a5eb487a17c0a68801bba9ef0f56c81040a8)
+    OBSERVATORY_PATCH="$OBSERVATORY_SOURCE/integrations/hermes/compat/hermes-v0.22.2-delivery.patch" ;;
+  349e4f7e620ea1be6a8b5703d7152cf1e5ed9998)
+    OBSERVATORY_PATCH="$OBSERVATORY_SOURCE/integrations/hermes/compat/hermes-349e4f7-delivery.patch" ;;
+  *)
+    echo 'Hermes commit 未验证，停止；不要强行 apply 或自动降级'
+    exit 1 ;;
+esac
 git -C "$HERMES_SOURCE" status --short
 git -C "$HERMES_SOURCE" apply --check "$OBSERVATORY_PATCH"
 ```
@@ -72,7 +85,16 @@ cd "$HERMES_SOURCE"
 scripts/run_tests.sh tests/gateway/test_idempotent_delivery.py \
   tests/gateway/test_delivery_ledger.py \
   tests/gateway/test_delivery_ledger_producer.py \
-  tests/gateway/test_active_turn_recovery.py
+  tests/gateway/test_active_turn_recovery.py \
+  tests/gateway/test_feishu*.py
+
+# 349e4f7 基线还需执行；v0.22.2 没有这些新版队列路径。
+if test "$(git rev-parse HEAD)" = 349e4f7e620ea1be6a8b5703d7152cf1e5ed9998; then
+  scripts/run_tests.sh tests/gateway/test_idempotent_marker_lifecycle.py \
+    tests/gateway/test_follower_marker_handoff.py \
+    tests/gateway/test_busy_followup_marker_handoff.py \
+    tests/gateway/test_busy_durable_acceptance.py
+fi
 ```
 
 这是合成渠道和临时数据的回归测试，不向真实飞书或微信联系人发送消息。补丁接口可通过新 Python 进程确认：
@@ -85,6 +107,6 @@ python -c 'from gateway.platforms.base import BasePlatformAdapter; assert BasePl
 
 ## 升级与回滚边界
 
-Hermes 升级可能覆盖补丁或引入相同能力的新实现；不能依赖“上次装过”。升级前保留状态与配置，升级后重新核验实际源码、能力接口和恢复回归测试。不要把 v0.22.2 补丁用 `--reject` 或手工忽略冲突的方式应用到其他版本。
+Hermes 升级可能覆盖补丁或引入相同能力的新实现；不能依赖“上次装过”。升级前保留状态与配置，升级后重新核验实际源码、能力接口和恢复回归测试。不要用 `--reject` 或手工忽略冲突的方式应用不匹配的补丁，也不要用旧函数覆盖新增的队列或停机流程。
 
 Observatory 会检查恢复能力；账本开启但接口缺失时拒绝运行。不要为了消除这个错误而关闭 default 的账本，这会影响飞书等渠道的崩溃后恢复。需要临时回滚时，先按迁移文档处理最新状态及未完成投递，再停用共享模式；原来的微信独立 profile、`delivery_ledger: false` 模式仍保留兼容。移除核心补丁也须先核对其上是否叠加其他改动，不能直接重置整个 Hermes 仓库。
