@@ -63,6 +63,22 @@ func uploadFileTo(t *testing.T, h http.Handler, key, name, content, recipient st
 	return w
 }
 
+func TestFileUploadPreservesUnicodeAndLiteralPercentNames(t *testing.T) {
+	for _, name := range []string{"自定义物资[最新版].txt", "literal%20%E8%87%AA[1].txt"} {
+		t.Run(name, func(t *testing.T) {
+			service, registration, handler := fileService(t)
+			response := uploadFile(t, handler, "filename-roundtrip", name, "small file fixture", 1, true)
+			if response.Code != http.StatusOK {
+				t.Fatal(response.Code, response.Body.String())
+			}
+			item := filePoll(t, service, registration)
+			if item.Attachment == nil || item.Attachment.Name != name {
+				t.Fatalf("filename changed between upload and phone delivery: want %q, got %+v", name, item.Attachment)
+			}
+		})
+	}
+}
+
 func TestFileUploadToFriendPreservesRecipientIdempotencyAndLease(t *testing.T) {
 	s, registration, handler := fileService(t)
 	const recipient = "wxid_test_friend"

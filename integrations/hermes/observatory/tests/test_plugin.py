@@ -795,6 +795,23 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(BridgeError, "attachment_changed"):
                 await self.client.submit(payload, "hermes-file-key")
 
+    async def test_document_upload_preserves_literal_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.txt"
+            content = "文件内容保持不变。\n".encode()
+            path.write_bytes(content)
+            for name in ("自定义物资.txt", "iui[4.9.6].sh", "中文 [v1] 😀.txt",
+                         "literal-%E8%87%AA-%20.txt", '带"引号".txt'):
+                with self.subTest(name=name):
+                    payload = {"kind": "file", "device": "test", "owner_wxid": "bot",
+                               "account_generation": 3, "wxid": "filehelper",
+                               "attachment": file_description(str(path), name)}
+                    await self.client.submit(payload, "original-name-key")
+                    headers, body, uploaded = self.seen[-1]
+                    self.assertEqual(body["file"].filename, name)
+                    self.assertEqual(uploaded, content)
+                    self.assertEqual(headers["Idempotency-Key"], "original-name-key")
+
 
 class ValidationTests(unittest.TestCase):
     def test_secret_is_not_in_repr_and_bad_urls_are_rejected(self):

@@ -199,7 +199,9 @@ class Client:
             raise BridgeError("attachment_changed_do_not_resend")
         # aiohttp streams the descriptor, without loading the 300 MiB limit into memory.
         with open(attachment["path"], "rb") as stream:
-            form = aiohttp.FormData()
+            # Send the validated filename literally (UTF-8); Go's multipart
+            # parser preserves it and does not URL-decode filename parameters.
+            form = aiohttp.FormData(quote_fields=False)
             for field_name in ("device", "owner_wxid", "account_generation", "wxid"):
                 form.add_field(field_name, str(payload[field_name]))
             form.add_field("file", stream, filename=attachment["name"], content_type="application/octet-stream")
