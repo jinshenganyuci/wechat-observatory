@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "verifier": "tools/verify_wechat8080.py",
+  "apk": {
+    "filename": "phone-wechat8080.apk",
+    "sha256": "024c53bfc192c463d56b66a676d9133f6d5b1cdcd435601d02d4f6632a333152",
+    "bytes": 286320088,
+    "package": "com.tencent.mm",
+    "version_name": "8.0.80",
+    "version_code": 3220
+  },
+  "expected_apk_sha256": "9d9b6c516e8e07e437c81485fde21fe13ce4f61b37d19e793fff40c71be39c0e",
+  "runtime_validation": "not performed; requires a logged-in phone with LSPosed",
+  "status": "pass",
+  "accepted_apk_sha256": [
+    "9d9b6c516e8e07e437c81485fde21fe13ce4f61b37d19e793fff40c71be39c0e",
+    "024c53bfc192c463d56b66a676d9133f6d5b1cdcd435601d02d4f6632a333152"
+  ],
+  "dexsql_version": "dexsql 0.1.1",
+  "checks_sha256": "8fcdaf4179422888e752b73c7b11c6569f8a132d1c9f81ec0dda43284e008239",
+  "checks_reference": "wechat-8.0.80-3220.json",
+  "check_count": 134,
+  "note": "Independently executed on this installed APK; every check result matches the referenced full report. Full raw report remains in the Debian task artifacts."
+}

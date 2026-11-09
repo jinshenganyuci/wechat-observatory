@@ -75,6 +75,7 @@ ACCOUNT_GETTERS = [
 CONFIG_GETTER = "Lcom/tencent/mm/storage/m3;->m(ILjava/lang/Object;)Ljava/lang/Object;"
 PATH_GETTER = "Lpp0/a0;->g()Ljava/lang/String;"
 DIRECTORY_GETTER = "Lpp0/a0;->h()Ljava/lang/String;"
+ACCOUNT_GUARD = "Lpp0/f;->c()V"
 
 
 def sql_values(values):
@@ -174,20 +175,23 @@ def check_definitions(expected, rows, descriptor_key):
     return checked
 
 
-def verify(executable, apk):
+def verify(executable, apk, contract=None):
+    contract = contract or sys.modules[__name__]
     digest = hashlib.sha256()
     with apk.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     report = {
-        "schema": 1, "verifier": "tools/verify_wechat8079.py",
+        "schema": 1, "verifier": "tools/" + Path(contract.__file__).name,
         "apk": {"filename": apk.name, "sha256": digest.hexdigest(), "bytes": apk.stat().st_size},
-        "expected_apk_sha256": EXPECTED_SHA256,
+        "expected_apk_sha256": contract.EXPECTED_SHA256,
         "runtime_validation": "not performed; requires a logged-in phone with LSPosed",
         "status": "fail",
     }
-    if digest.hexdigest() != EXPECTED_SHA256:
-        report["error"] = "APK SHA-256 differs from the bytecode-reviewed 8.0.79/3200 arm64 build"
+    accepted_hashes = getattr(contract, "EXPECTED_SHA256S", (contract.EXPECTED_SHA256,))
+    report["accepted_apk_sha256"] = list(accepted_hashes)
+    if digest.hexdigest() not in accepted_hashes:
+        report["error"] = "APK SHA-256 differs from the bytecode-reviewed " + contract.EXPECTED_VERSION["version_name"] + " arm64 build"
         return report
 
     report["dexsql_version"] = subprocess.check_output(
@@ -202,42 +206,44 @@ def verify(executable, apk):
                    "version_name": manifest.get("android:versionName"),
                    "version_code": int(manifest.get("android:versionCode", 0))}
         report["apk"].update(version)
-        if version != EXPECTED_VERSION:
-            report["error"] = "Manifest package/version does not match com.tencent.mm 8.0.79/3200"
+        if version != contract.EXPECTED_VERSION:
+            report["error"] = "Manifest package/version does not match the verified contract"
             return report
 
         # Definition tables exclude cross-DEX method/field references.
         classes, fields, methods, setters, calls, numbers, strings = client.query([
-            "SELECT descriptor,access_flags FROM classes WHERE descriptor IN (" + sql_values(CLASSES) + ") ORDER BY descriptor",
-            "SELECT field_descriptor,access_flags FROM class_fields WHERE field_descriptor IN (" + sql_values(x[0] for x in FIELDS) + ") ORDER BY field_descriptor",
-            "SELECT method_descriptor,access_flags FROM class_methods WHERE method_descriptor IN (" + sql_values(x[0] for x in METHODS) + ") ORDER BY method_descriptor",
-            "SELECT method,field,using_type FROM method_field_accesses WHERE method IN (" + sql_values(x[0] for x in SETTERS) + ") ORDER BY method,field",
-            "SELECT method,callee FROM method_calls WHERE method IN (" + sql_values([x[0] for x in ACCOUNT_GETTERS] + [PATH_GETTER, DIRECTORY_GETTER]) + ") ORDER BY method,callee",
-            "SELECT method,long_value FROM method_using_numbers WHERE method IN (" + sql_values(x[0] for x in ACCOUNT_GETTERS) + ") ORDER BY method,long_value",
-            "SELECT method,value FROM method_strings WHERE method=" + sql_values([PATH_GETTER]) + " ORDER BY value",
+            "SELECT descriptor,access_flags FROM classes WHERE descriptor IN (" + sql_values(contract.CLASSES) + ") ORDER BY descriptor",
+            "SELECT field_descriptor,access_flags FROM class_fields WHERE field_descriptor IN (" + sql_values(x[0] for x in contract.FIELDS) + ") ORDER BY field_descriptor",
+            "SELECT method_descriptor,access_flags FROM class_methods WHERE method_descriptor IN (" + sql_values(x[0] for x in contract.METHODS) + ") ORDER BY method_descriptor",
+            "SELECT method,field,using_type FROM method_field_accesses WHERE method IN (" + sql_values(x[0] for x in contract.SETTERS) + ") ORDER BY method,field",
+            "SELECT method,callee FROM method_calls WHERE method IN (" + sql_values([x[0] for x in contract.ACCOUNT_GETTERS] + [contract.PATH_GETTER, contract.DIRECTORY_GETTER]) + ") ORDER BY method,callee",
+            "SELECT method,long_value FROM method_using_numbers WHERE method IN (" + sql_values(x[0] for x in contract.ACCOUNT_GETTERS) + ") ORDER BY method,long_value",
+            "SELECT method,value FROM method_strings WHERE method=" + sql_values([contract.PATH_GETTER]) + " ORDER BY value",
         ])
         class_checks = [{"descriptor": name, "definition_count": sum(row["descriptor"] == name for row in classes),
-                         "ok": sum(row["descriptor"] == name for row in classes) == 1} for name in CLASSES]
-        field_checks = check_definitions(FIELDS, fields, "field_descriptor")
-        method_checks = check_definitions(METHODS, methods, "method_descriptor")
+                         "ok": sum(row["descriptor"] == name for row in classes) == 1} for name in contract.CLASSES]
+        field_checks = check_definitions(contract.FIELDS, fields, "field_descriptor")
+        method_checks = check_definitions(contract.METHODS, methods, "method_descriptor")
         semantic_checks = [{
             "check": "setter writes expected field", "method": method, "field": field,
             "ok": any(row["method"] == method and row["field"] == field and row["using_type"] == "put" for row in setters),
-        } for method, field in SETTERS]
-        for method, slot in ACCOUNT_GETTERS:
+        } for method, field in contract.SETTERS]
+        for method, slot in contract.ACCOUNT_GETTERS:
             semantic_checks.append({
                 "check": "native account getter references ConfigStorage and expected slot constant",
                 "method": method, "slot": slot,
-                "ok": any(row["method"] == method and row["callee"] == CONFIG_GETTER for row in calls)
+                "ok": any(row["method"] == method and row["callee"] == contract.CONFIG_GETTER for row in calls)
                       and any(row["method"] == method and int(row["long_value"]) == slot for row in numbers),
             })
         semantic_checks.extend([
             {"check": "main database path uses guarded account directory and EnMicroMsg.db",
-             "ok": any(row["method"] == PATH_GETTER and row["callee"] == DIRECTORY_GETTER for row in calls)
+             "ok": any(row["method"] == contract.PATH_GETTER and row["callee"] == contract.DIRECTORY_GETTER for row in calls)
                    and any(row["value"] == "EnMicroMsg.db" for row in strings)},
             {"check": "account directory calls initialization guard",
-             "ok": any(row["method"] == DIRECTORY_GETTER and row["callee"] == "Lpp0/f;->c()V" for row in calls)},
+             "ok": any(row["method"] == contract.DIRECTORY_GETTER and row["callee"] == contract.ACCOUNT_GUARD for row in calls)},
         ])
+        if hasattr(contract, "additional_checks"):
+            semantic_checks.extend(contract.additional_checks(client))
         report["checks"] = {"classes": class_checks, "fields": field_checks,
                             "methods": method_checks, "bytecode_relations": semantic_checks}
         report["status"] = "pass" if all(item["ok"] for group in report["checks"].values() for item in group) else "fail"
@@ -246,14 +252,14 @@ def verify(executable, apk):
         client.close()
 
 
-def main():
+def main(verifier=verify):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dexsql", required=True, type=Path)
     parser.add_argument("--apk", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        result = verify(args.dexsql.resolve(), args.apk.resolve())
+        result = verifier(args.dexsql.resolve(), args.apk.resolve())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         result = {"schema": 1, "status": "error", "error": str(error)}
     output = json.dumps(result, ensure_ascii=False, indent=2) + "\n"

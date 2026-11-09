@@ -801,10 +801,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
         report.append(" observation=").append(checkObservation(classLoader));
         report.append(" identity=").append(isBlank(CURRENT_WXID) ? "pending" : "ok");
         try {
-            if (currentWeChatVersionProfile().is8079()) {
+            if (currentWeChatVersionProfile().hasModernBindings()) {
                 String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(
-                        runtimeClassLoader(classLoader));
-                report.append(" send.adapter=8.0.79/3200 send.builder=")
+                        runtimeClassLoader(classLoader), currentWeChatVersionProfile());
+                report.append(" send.adapter=").append(wechatVersion()).append(" send.builder=")
                         .append(pending == null ? "ready" : pending);
                 LAST_CAPABILITY_REPORT = report.toString();
                 log(LAST_CAPABILITY_REPORT);
@@ -837,9 +837,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
     /** Why isWeChatReadyForSend() would pass or fail: registry slot and kernel flag. */
     private static String readinessDetail(ClassLoader classLoader) {
         try {
-            if (currentWeChatVersionProfile().is8079()) {
-                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(classLoader);
-                return pending == null ? "8.0.79 ready" : pending;
+            if (currentWeChatVersionProfile().hasModernBindings()) {
+                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(classLoader, currentWeChatVersionProfile());
+                return pending == null ? currentWeChatVersionProfile().versionName + " ready" : pending;
             }
         } catch (Throwable t) {
             return "verified adapter unavailable(" + shortError(t) + ")";
@@ -926,9 +926,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
         try {
             classLoader = runtimeClassLoader(classLoader);
             WECHAT_CLASS_LOADER = classLoader;
-            if (currentWeChatVersionProfile().is8079()) {
-                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(classLoader);
-                return readyState(pending == null, pending == null ? "8.0.79 ready" : pending);
+            if (currentWeChatVersionProfile().hasModernBindings()) {
+                String pending = cc.wechat.observatory.wechat.WeChat8079SendAdapter.readiness(classLoader, currentWeChatVersionProfile());
+                return readyState(pending == null, pending == null ? currentWeChatVersionProfile().versionName + " ready" : pending);
             }
             ensureWeChatRegistries(classLoader);
             if (!isStaticArraySlotReady(classLoader, new String[]{"fs.g", "qs.g"}, "f283324a", "a")) {
@@ -1132,11 +1132,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static ClassLoader firstLoadable(List<ClassLoader> candidates) {
         try {
-            if (currentWeChatVersionProfile().is8079()) {
+            if (currentWeChatVersionProfile().hasModernBindings()) {
                 for (ClassLoader candidate : candidates) {
                     try {
-                        Class.forName("pp0.i1", false, candidate);
-                        Class.forName("f61.t1", false, candidate);
+                        Class.forName(currentWeChatVersionProfile().accountKernelClass, false, candidate);
+                        Class.forName(cc.wechat.observatory.wechat.WeChat8079SendAdapter.factoryClass(
+                                currentWeChatVersionProfile()), false, candidate);
                         return candidate;
                     } catch (ClassNotFoundException ignored) {
                         // A reused legacy class name must not select this loader.
@@ -1702,7 +1703,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             payload.sender = chatroom ? extractChatroomSender(content) : "";
             if (chatroom && type == 1) {
                 try {
-                    if (currentWeChatVersionProfile().is8079()) {
+                    if (currentWeChatVersionProfile().hasModernBindings()) {
                         payload.mentionedWxids = cc.wechat.observatory.wechat.WeChat8079Mentions.read(
                                 lvbuffer);
                     }
@@ -2581,9 +2582,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static synchronized boolean fileDeliverySupported(ClassLoader loader) {
         try {
-            if (!currentWeChatVersionProfile().is8079()) return false;
+            if (!currentWeChatVersionProfile().hasModernBindings()) return false;
             if (FILE_WORKER == null) FILE_WORKER = FileDeliveryWorker.get(bridgeContext());
-            if (FILE_ADAPTER == null) FILE_ADAPTER = new WeChat8079FileAdapter(loader);
+            if (FILE_ADAPTER == null) FILE_ADAPTER = new WeChat8079FileAdapter(loader,
+                    currentWeChatVersionProfile().versionName, currentWeChatVersionProfile().versionCode);
             return true;
         } catch (Throwable unsupported) { return false; }
     }
@@ -2601,7 +2603,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
             }
             @Override public void validate() throws Exception {
                 validateCached();
-                if (!isCurrentAccount(account) || !currentWeChatVersionProfile().is8079())
+                if (!isCurrentAccount(account) || !currentWeChatVersionProfile().hasModernBindings())
                     throw new IllegalStateException("File delivery identity unavailable");
             }
             private JSONObject body(FileJob job) throws Exception {
@@ -3221,7 +3223,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     + " msgId=" + prepared.chatRecordId
                     + " attempts=" + attempts[0]);
             if (prepared.requiresLocalConfirmation) {
-                // 8.0.79's execute() only schedules the NetScene. A successful
+                // The verified execute() only schedules the NetScene. A successful
                 // queue submission must not produce a successful outbox ACK.
                 SendResult result = cc.wechat.observatory.wechat.QueuedMessageConfirmation.await(
                         prepared.chatRecordId,
@@ -3237,7 +3239,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                                 Thread.sleep(delayMillis);
                             }
                         }, SEND_STATUS_MAX_CHECKS, SEND_QUEUE_RETRY_DELAY_MS);
-                log("8.0.79 queued message confirmation msgId=" + prepared.chatRecordId
+                log("queued message confirmation msgId=" + prepared.chatRecordId
                         + " result=" + (result.ok ? "sent" : result.error));
                 return result;
             }
@@ -3304,9 +3306,9 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
 
         try {
-            if (currentWeChatVersionProfile().is8079()) {
+            if (currentWeChatVersionProfile().hasModernBindings()) {
                 cc.wechat.observatory.wechat.WeChat8079SendAdapter.PreparedSend prepared =
-                        cc.wechat.observatory.wechat.WeChat8079SendAdapter.prepare(classLoader, wxid, text);
+                        cc.wechat.observatory.wechat.WeChat8079SendAdapter.prepare(classLoader, currentWeChatVersionProfile(), wxid, text);
                 return PreparedTextSend.builder(prepared.request, prepared.chatRecordId, prepared.msgType, true);
             }
         } catch (Throwable t) {

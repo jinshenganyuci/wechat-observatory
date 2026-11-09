@@ -2,27 +2,44 @@ package cc.wechat.observatory.wechat;
 
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import java.util.Arrays;
+import java.util.Collection;
 
 import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.Assert.*;
 
+@RunWith(Parameterized.class)
 public class WeChat8079SendAdapterTest {
+    @Parameterized.Parameters(name = "WeChat {0}") public static Collection<Object[]> versions() {
+        return Arrays.asList(new Object[][]{{"8.0.79", 3200L}, {"8.0.80", 3220L}});
+    }
+    @Parameterized.Parameter(0) public String version;
+    @Parameterized.Parameter(1) public long versionCode;
+    private WeChatVersionProfile profile;
+    private String kernelClass;
+
     private Map<String, Class<?>> classes;
 
     @Before public void reset() {
+        profile = WeChatVersionProfile.forVersion(version, versionCode);
+        boolean v8080 = profile.is8080();
+        Builder.v8080 = v8080;
+        kernelClass = v8080 ? "fi5.n0" : "ni5.n0";
         classes = new HashMap<>();
-        classes.put("qs.g", Registry.class);
-        classes.put("qs.h", Slot.class);
-        classes.put("ni5.n0", Kernel.class);
-        classes.put("f61.t1", Factory.class);
-        classes.put("f61.p1", Session.class);
-        classes.put("f61.s1", Builder.class);
-        classes.put("f61.o1", Request.class);
+        classes.put(v8080 ? "us.g" : "qs.g", Registry.class);
+        classes.put(v8080 ? "us.h" : "qs.h", Slot.class);
+        classes.put(kernelClass, Kernel.class);
+        classes.put(v8080 ? "q61.t1" : "f61.t1", Factory.class);
+        classes.put(v8080 ? "q61.p1" : "f61.p1", Session.class);
+        classes.put(v8080 ? "q61.s1" : "f61.s1", Builder.class);
+        classes.put(v8080 ? "q61.o1" : "f61.o1", Request.class);
         classes.put("com.tencent.mm.modelbase.a3", Queue.class);
         classes.put("com.tencent.mm.modelbase.n1", Scene.class);
-        classes.put("l41.d2", Types.class);
+        classes.put(v8080 ? "w41.e2" : "l41.d2", Types.class);
         Registry.a = new Slot[]{new Slot()};
         Kernel.f = new boolean[]{true};
         Factory.a = new Session();
@@ -39,7 +56,7 @@ public class WeChat8079SendAdapterTest {
             Class<?> result = classes.get(name);
             if (result == null) throw new ClassNotFoundException(name);
             return result;
-        });
+        }, profile);
     }
 
     @Test public void usesVerifiedRecipientSetterAndPreservesMessageParameters() throws Exception {
@@ -50,7 +67,7 @@ public class WeChat8079SendAdapterTest {
         assertEquals(11, Builder.last.e);
         assertEquals(0, Builder.last.f);
         assertEquals(4, Builder.last.i);
-        assertNull("g(String) is metadata, not the recipient setter", Builder.last.q);
+        assertNull("Recipient must not be written into metadata", Builder.last.q);
         assertEquals(42L, prepared.chatRecordId);
         assertEquals(11, prepared.msgType);
         assertEquals(0, ((Request) prepared.request).executions);
@@ -60,13 +77,13 @@ public class WeChat8079SendAdapterTest {
     @Test public void waitsForNativeInitializationWithoutCreatingOrInstallingAnything() throws Exception {
         WeChat8079SendAdapter.Bindings bindings = bind();
         Registry.a[0] = null;
-        assertEquals("8.0.79 extension registry pending", bindings.readiness());
+        assertEquals(version + " extension registry pending", bindings.readiness());
         Registry.a[0] = new Slot();
         Kernel.f[0] = false;
-        assertEquals("8.0.79 service manager pending", bindings.readiness());
+        assertEquals(version + " service manager pending", bindings.readiness());
         Kernel.f[0] = true;
         Factory.a = null;
-        assertEquals("8.0.79 send factory pending", bindings.readiness());
+        assertEquals(version + " send factory pending", bindings.readiness());
         try {
             bindings.prepare("alice", "hello");
             fail("must wait for WeChat's factory");
@@ -78,13 +95,13 @@ public class WeChat8079SendAdapterTest {
         assertEquals(0, Builder.builds);
         Factory.a = new Session();
         Queue.ready = false;
-        assertEquals("8.0.79 network queue pending", bindings.readiness());
+        assertEquals(version + " network queue pending", bindings.readiness());
         Queue.ready = true;
         assertNull(bindings.readiness());
     }
 
     @Test public void rejectsSameNameCollisionWithWrongFieldType() throws Exception {
-        classes.put("ni5.n0", UnrelatedKernel.class);
+        classes.put(kernelClass, UnrelatedKernel.class);
         try {
             bind();
             fail("a matching field name is not enough");
@@ -161,16 +178,27 @@ public class WeChat8079SendAdapterTest {
     public static class Builder {
         static int builds;
         static Builder last;
-        static boolean wrongRecipientSetter, invalidRequest;
+        static boolean wrongRecipientSetter, invalidRequest, v8080;
         public String b, d, q;
         public int e, f, i;
         public Builder h(String value) {
+            if (v8080) throw new AssertionError("8.0.80 has no h(String) recipient setter");
             if (wrongRecipientSetter) q = value; else b = value;
             return this;
         }
-        public Builder g(String value) { q = value; return this; }
+        public Builder g(String value) {
+            if (!v8080 || wrongRecipientSetter) q = value; else b = value;
+            return this;
+        }
+        public Builder h(int value) {
+            if (!v8080) throw new AssertionError("8.0.79 has no h(int) type setter");
+            e = value; return this;
+        }
         public Builder e(String value) { d = value; return this; }
-        public Builder i(int value) { e = value; return this; }
+        public Builder i(int value) {
+            if (v8080) throw new AssertionError("8.0.80 has no i(int) type setter");
+            e = value; return this;
+        }
         public Request a() {
             builds++;
             last = this;

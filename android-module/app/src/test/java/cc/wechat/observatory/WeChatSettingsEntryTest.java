@@ -27,9 +27,23 @@ public class WeChatSettingsEntryTest {
 
     @Test public void onlyExactAuditedVersionEnablesResourceIds() {
         assertTrue(WeChatSettingsEntry.Binding.supports("8.0.79", 3200));
+        assertTrue(WeChatSettingsEntry.Binding.supports("8.0.80", 3220));
+        assertFalse(WeChatSettingsEntry.Binding.supports("8.0.80", 3221));
         assertFalse(WeChatSettingsEntry.Binding.supports("8.0.79", 3201));
         assertFalse(WeChatSettingsEntry.Binding.supports("8.0.80", 3200));
         assertFalse(WeChatSettingsEntry.Binding.supports(null, 3200));
+    }
+
+    @Test public void resourceBindingsStaySeparateAcrossVersions() {
+        WeChatSettingsEntry.Layout old = WeChatSettingsEntry.Layout.forVersion("8.0.79", 3200);
+        WeChatSettingsEntry.Layout current = WeChatSettingsEntry.Layout.forVersion("8.0.80", 3220);
+        assertEquals(0x7f0e1384, old.page);
+        assertEquals(0x7f0e1380, current.page);
+        assertEquals(0x7f0a48fd, current.root);
+        assertEquals(0x7f0a48fc, current.column);
+        assertEquals(0x7f0a578b, current.recycler);
+        assertEquals("ept", current.name);
+        assertNull(WeChatSettingsEntry.Layout.forVersion("8.0.79", 3220));
     }
 
     @Test public void bindsOnlyTheExpectedDeclaredLifecycleMethod() throws Exception {

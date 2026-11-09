@@ -5,12 +5,13 @@ public final class WeChatVersionProfile {
     private static final WeChatVersionProfile[] SUPPORTED = {
             new WeChatVersionProfile("8.0.74", 3120, "gm0.j1", "u", "l"),
             new WeChatVersionProfile("8.0.78", 3180, "gp0.j1", "x", "m"),
-            new WeChatVersionProfile("8.0.79", 3200, "pp0.i1", "x", "m")
+            new WeChatVersionProfile("8.0.79", 3200, "pp0.i1", "x", "m"),
+            new WeChatVersionProfile("8.0.80", 3220, "zp0.j1", "x", "m")
     };
 
     public final String versionName;
     public final long versionCode;
-    final String accountKernelClass;
+    public final String accountKernelClass;
     final String accountStorageMethod;
     final String configGetterMethod;
 
@@ -30,10 +31,18 @@ public final class WeChatVersionProfile {
             }
         }
         throw new UnsupportedOperationException("Unsupported WeChat version " + versionName + "/"
-                + versionCode + "; verified versions: 8.0.74/3120, 8.0.78/3180, 8.0.79/3200");
+                + versionCode + "; verified versions: 8.0.74/3120, 8.0.78/3180, 8.0.79/3200, 8.0.80/3220");
     }
 
     public boolean is8079() {
         return versionCode == 3200 && "8.0.79".equals(versionName);
+    }
+
+    public boolean is8080() {
+        return versionCode == 3220 && "8.0.80".equals(versionName);
+    }
+
+    public boolean hasModernBindings() {
+        return is8079() || is8080();
     }
 }
