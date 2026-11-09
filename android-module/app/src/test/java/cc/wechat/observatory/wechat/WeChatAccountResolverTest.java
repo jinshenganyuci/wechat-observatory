@@ -7,7 +7,10 @@ import static org.junit.Assert.*;
 public class WeChatAccountResolverTest {
     @Before
     public void resetVersionFactories() {
-        pp0.i1.calls = gp0.j1.calls = gm0.j1.calls = 0;
+        zp0.j1.calls = pp0.i1.calls = gp0.j1.calls = gm0.j1.calls = 0;
+        Config78 latest = new Config78();
+        latest.id = "wxid_8080";
+        zp0.j1.storage = new Storage(latest);
         Config78 current = new Config78();
         current.id = "wxid_8079";
         pp0.i1.storage = new Storage(current);
@@ -54,6 +57,36 @@ public class WeChatAccountResolverTest {
         RuntimeAccount account = WeChatAccountResolver.resolve(getClass().getClassLoader(), "8.0.79", 3200);
         assertEquals("wxid_8079", account.wxid);
         assertEquals(1, pp0.i1.calls);
+        assertEquals(0, gp0.j1.calls);
+        assertEquals(0, gm0.j1.calls);
+        assertEquals(0, zp0.j1.calls);
+    }
+
+    @Test
+    public void resolves8080WithoutUsing8079ClassesThatStillExist() throws Exception {
+        RuntimeAccount account = WeChatAccountResolver.resolve(getClass().getClassLoader(), "8.0.80", 3220);
+        assertEquals("wxid_8080", account.wxid);
+        assertEquals(1, zp0.j1.calls);
+        assertEquals(0, pp0.i1.calls);
+        assertEquals(0, gp0.j1.calls);
+        assertEquals(0, gm0.j1.calls);
+    }
+
+    @Test
+    public void missing8080FactoryNeverReadsThe8079Account() throws Exception {
+        ClassLoader withoutCurrent = new ClassLoader(getClass().getClassLoader()) {
+            @Override protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if ("zp0.j1".equals(name)) throw new ClassNotFoundException(name);
+                return super.loadClass(name, resolve);
+            }
+        };
+        try {
+            WeChatAccountResolver.resolve(withoutCurrent, "8.0.80", 3220);
+            fail("Missing exact-version factory must fail closed");
+        } catch (ClassNotFoundException expected) {
+            assertEquals("zp0.j1", expected.getMessage());
+        }
+        assertEquals(0, pp0.i1.calls);
         assertEquals(0, gp0.j1.calls);
         assertEquals(0, gm0.j1.calls);
     }

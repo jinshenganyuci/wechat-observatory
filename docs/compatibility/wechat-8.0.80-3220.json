@@ -1,0 +1,983 @@
+{
+  "schema": 1,
+  "verifier": "tools/verify_wechat8080.py",
+  "apk": {
+    "filename": "wechat8080.apk",
+    "sha256": "9d9b6c516e8e07e437c81485fde21fe13ce4f61b37d19e793fff40c71be39c0e",
+    "bytes": 286319384,
+    "package": "com.tencent.mm",
+    "version_name": "8.0.80",
+    "version_code": 3220
+  },
+  "expected_apk_sha256": "9d9b6c516e8e07e437c81485fde21fe13ce4f61b37d19e793fff40c71be39c0e",
+  "runtime_validation": "not performed; requires a logged-in phone with LSPosed",
+  "status": "pass",
+  "accepted_apk_sha256": [
+    "9d9b6c516e8e07e437c81485fde21fe13ce4f61b37d19e793fff40c71be39c0e",
+    "024c53bfc192c463d56b66a676d9133f6d5b1cdcd435601d02d4f6632a333152"
+  ],
+  "dexsql_version": "dexsql 0.1.1",
+  "checks": {
+    "classes": [
+      {
+        "descriptor": "Lcom/tencent/mm/modelbase/a3;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/modelbase/n1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/sdk/platformtools/e2;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/storage/f9;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/storage/r3;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lfi5/n0;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/o1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/p1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/t1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lus/g;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lus/h;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lw41/e2;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lw41/z1;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lzp0/b0;",
+        "definition_count": 1,
+        "ok": true
+      },
+      {
+        "descriptor": "Lzp0/j1;",
+        "definition_count": 1,
+        "ok": true
+      }
+    ],
+    "fields": [
+      {
+        "descriptor": "Llm/d8;->G:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->field_lvbuffer:[B",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          2
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lus/g;->a:[Lus/h;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lfi5/n0;->f:[Z",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/t1;->a:Lq61/p1;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->b:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->d:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->e:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->f:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->i:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/o1;->a:Lcom/tencent/mm/modelbase/n1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/o1;->b:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      }
+    ],
+    "methods": [
+      {
+        "descriptor": "Lcom/tencent/mm/sdk/platformtools/e2;->i([B)I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/sdk/platformtools/e2;->c()Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/sdk/platformtools/e2;->g()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/sdk/platformtools/e2;->e()I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->parseBuff()V",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->F0()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/storage/f9;->s2(Ljava/lang/String;)Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/modelbase/a3;->c()Z",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/t1;->a(Ljava/lang/String;)Lq61/s1;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->g(Ljava/lang/String;)Lq61/s1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->e(Ljava/lang/String;)Lq61/s1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->h(I)Lq61/s1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/s1;->a()Lq61/o1;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lq61/o1;->a()Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lw41/e2;->C(Ljava/lang/String;)I",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lzp0/j1;->x()Lzp0/b0;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lzp0/b0;->g()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lzp0/b0;->h()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lzp0/b0;->c()Lcom/tencent/mm/storage/r3;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/storage/r3;->m(ILjava/lang/Object;)Ljava/lang/Object;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lw41/z1;->u()Ljava/lang/String;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lw41/z1;->m()Ljava/lang/String;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      }
+    ],
+    "bytecode_relations": [
+      {
+        "check": "setter writes expected field",
+        "method": "Lq61/s1;->g(Ljava/lang/String;)Lq61/s1;",
+        "field": "Lq61/s1;->b:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "setter writes expected field",
+        "method": "Lq61/s1;->e(Ljava/lang/String;)Lq61/s1;",
+        "field": "Lq61/s1;->d:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "setter writes expected field",
+        "method": "Lq61/s1;->h(I)Lq61/s1;",
+        "field": "Lq61/s1;->e:I",
+        "ok": true
+      },
+      {
+        "check": "native account getter references ConfigStorage and expected slot constant",
+        "method": "Lw41/z1;->u()Ljava/lang/String;",
+        "slot": 2,
+        "ok": true
+      },
+      {
+        "check": "native account getter references ConfigStorage and expected slot constant",
+        "method": "Lw41/z1;->m()Ljava/lang/String;",
+        "slot": 4,
+        "ok": true
+      },
+      {
+        "check": "main database path uses guarded account directory and EnMicroMsg.db",
+        "ok": true
+      },
+      {
+        "check": "account directory calls initialization guard",
+        "ok": true
+      },
+      {
+        "check": "LVBuffer msgSource remains third field (string, int, string)",
+        "ok": true
+      },
+      {
+        "check": "LVBuffer strings use short byte length and UTF-8",
+        "ok": true
+      },
+      {
+        "check": "native mention test parses msgsource.atuserlist from field G",
+        "ok": true
+      },
+      {
+        "check": "native SendMsgEvent uses the selected recipient, text and request methods",
+        "ok": true
+      },
+      {
+        "check": "prepared request preserves native scene and local message ID",
+        "ok": true
+      },
+      {
+        "check": "execution enqueues the prepared scene without rebuilding",
+        "ok": true
+      },
+      {
+        "check": "main settings directly extends verified base lifecycle",
+        "ok": true
+      },
+      {
+        "check": "settings getLayoutId returns reviewed layout ID",
+        "ok": true
+      },
+      {
+        "check": "settings resource identity layout/ept",
+        "ok": true
+      },
+      {
+        "check": "settings resource identity id/jlw",
+        "ok": true
+      },
+      {
+        "check": "settings resource identity id/jlv",
+        "ok": true
+      },
+      {
+        "check": "settings resource identity id/lqa",
+        "ok": true
+      },
+      {
+        "check": "settings XML keeps vertical insertion parent and weighted list",
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;->q:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;->r:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;->s:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;->x:Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;->J:Llu/q0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/q0;->a:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/m0;->o:Llu/o0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llt5/w;->a:Llt5/v;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lhr3/i0;->g:Lcom/tencent/mm/plugin/msg/MsgIdTalker;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lhr3/i0;->a:Lhr3/k0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/plugin/msg/MsgIdTalker;->d:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/plugin/msg/MsgIdTalker;->e:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lju/a;->m:Lhr3/j0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lju/a;->n:Lhr3/m0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lju/a;->o:Lhr3/h0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lju/a;->p:Lhr3/o0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lhr3/j0;->a:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lhr3/m0;->a:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lhr3/h0;->a:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lhr3/o0;->a:I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lyx0/k0;->A1:Lyx0/j0;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lyx0/t;->z1:Lyx0/s;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          25
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_msgInfoId:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_msgInfoTalker:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_status:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_totalLen:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_offset:J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_isUpload:Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/s;->field_fileFullPath:Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;-><init>(Ljava/lang/String;Ljava/lang/String;)V",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          65537
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/o0;->n(Ljava/lang/String;)V",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llt5/v;->c(Llu/o0;)V",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llu/m0;->h()Lhr3/i0;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->getMsgId()J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->O0()Ljava/lang/String;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->G0()J",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->N0()I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Llm/d8;->A0()I",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          1
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/pluginsdk/model/app/d;-><init>()V",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          65537
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/pluginsdk/model/app/v5;->Ej()Lcom/tencent/mm/pluginsdk/model/app/e;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lgg5/n0;->get(Lgg5/f0;[Ljava/lang/String;)Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          129
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lyx0/s;->a(Ljava/lang/String;)Z",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lyx0/j0;->k(Ljava/lang/String;J)Lcom/tencent/mm/storage/f9;",
+        "static": false,
+        "definition_count": 1,
+        "access_flags": [
+          17
+        ],
+        "ok": true
+      },
+      {
+        "descriptor": "Lcom/tencent/mm/vfs/z6;->E(Ljava/lang/String;)Ljava/io/InputStream;",
+        "static": true,
+        "definition_count": 1,
+        "access_flags": [
+          9
+        ],
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llu/o0;-><init>(Ljava/lang/String;Ljava/lang/String;)V => Llu/o0;->q:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llu/o0;-><init>(Ljava/lang/String;Ljava/lang/String;)V => Llu/o0;->r:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llu/o0;->n(Ljava/lang/String;)V => Llu/o0;->s:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llu/m0;->h()Lhr3/i0; => Llu/m0;->o:Llu/o0;",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llu/m0;->h()Lhr3/i0; => Lhr3/i0;->g:Lcom/tencent/mm/plugin/msg/MsgIdTalker;",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llm/d8;->getMsgId()J => Llm/d8;->field_msgId:J",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llm/d8;->O0()Ljava/lang/String; => Llm/d8;->field_talker:Ljava/lang/String;",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llm/d8;->G0()J => Llm/d8;->field_msgSvrId:J",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llm/d8;->N0()I => Llm/d8;->field_status:I",
+        "ok": true
+      },
+      {
+        "check": "file field semantics: Llm/d8;->A0()I => Llm/d8;->field_isSend:I",
+        "ok": true
+      },
+      {
+        "check": "file controller submits through the native task and coroutine flow",
+        "ok": true
+      },
+      {
+        "check": "file snapshot carries the native message ID/talker pair",
+        "ok": true
+      },
+      {
+        "check": "native final phase still has the literal enum name Finish",
+        "ok": true
+      },
+      {
+        "check": "file success writes message status 2, server ID and attachment status 199",
+        "ok": true
+      },
+      {
+        "check": "file failure writes message status 5 and attachment status 198",
+        "ok": true
+      },
+      {
+        "check": "file completion checks preparation, upload and send phase results",
+        "ok": true
+      },
+      {
+        "check": "attachment migration selector only reads the migrated flag",
+        "ok": true
+      },
+      {
+        "check": "attachment store accessor resolves the current native store",
+        "ok": true
+      },
+      {
+        "check": "native message lookup verifies both local message ID and talker",
+        "ok": true
+      }
+    ]
+  }
+}

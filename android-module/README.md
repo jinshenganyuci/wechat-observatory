@@ -6,7 +6,7 @@ It runs inside WeChat through LSPosed and posts message DB insert events to the
 gateway. The gateway stores WeChat events and queues admin-created send actions
 for the module to receive and send from inside the WeChat process.
 
-This fork targets WeChat for Android **8.0.79 / 3200 arm64**. See the [0.1.21 upgrade notes](../docs/compatibility/wechat-8079-0121.md).
+This fork targets WeChat for Android **8.0.80 / 3220 and 8.0.79 / 3200 arm64**. See the [0.1.25 compatibility notes](../docs/compatibility/wechat-8080.md).
 WeChat internals change between releases; validate message observation, contact
 sync, media upload, and text send after upgrading WeChat.
 
@@ -15,7 +15,7 @@ Version 0.1.21 keeps the 0.1.18 send flow and private configuration storage. Onl
 Version 0.1.23 adds ordinary file notifications through the existing outbox. A
 separate serial file worker downloads and verifies the attachment, persists an
 intent, obtains a one-time server handoff grant, and calls the verified WeChat
-8.0.79 native file sender. It leaves the WebSocket reader free to answer control
+8.0.79/8.0.80 native file sender. It leaves the WebSocket reader free to answer control
 frames. See [file API, duplicate prevention and cleanup](../docs/file-send.md).
 Private staging is a sibling directory `no_backup/observatory-outgoing`, not
 part of the configuration directory. Native WeChat attachment copies are kept.

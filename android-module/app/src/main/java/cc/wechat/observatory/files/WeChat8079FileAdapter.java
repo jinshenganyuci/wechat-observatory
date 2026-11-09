@@ -9,26 +9,39 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
-/** Exact 8.0.79/3200 bindings verified against native file sends. No alternative sender. */
+/** Verified 8.0.79/3200 and 8.0.80/3220 native file bindings. No alternative sender. */
 public final class WeChat8079FileAdapter {
     private final ClassLoader loader;
+    private final boolean wechat8080;
     private final Class<?> parameters, controller, vfs, attachment, stores, migration;
     private final ConcurrentHashMap<Object, Trace> traces = new ConcurrentHashMap<>();
 
-    public WeChat8079FileAdapter(ClassLoader loader) throws Exception {
+    public WeChat8079FileAdapter(ClassLoader loader, String versionName, long versionCode) throws Exception {
+        wechat8080 = "8.0.80".equals(versionName) && versionCode == 3220;
+        if (!wechat8080 && !("8.0.79".equals(versionName) && versionCode == 3200)) {
+            throw new UnsupportedOperationException("Unverified WeChat file binding "
+                    + versionName + "/" + versionCode);
+        }
         this.loader = loader;
-        parameters = find("gu.o0"); controller = find("rt5.w");
+        parameters = find(wechat8080 ? "lu.o0" : "gu.o0");
+        controller = find(wechat8080 ? "lt5.w" : "rt5.w");
         vfs = find("com.tencent.mm.vfs.z6"); attachment = find("com.tencent.mm.pluginsdk.model.app.d");
-        stores = find("com.tencent.mm.pluginsdk.model.app.v5"); migration = find("ox0.t");
+        stores = find("com.tencent.mm.pluginsdk.model.app.v5");
+        migration = find(wechat8080 ? "yx0.t" : "ox0.t");
         parameters.getConstructor(String.class, String.class);
         require(parameters.getDeclaredMethod("n", String.class), void.class);
-        require(find("rt5.v").getDeclaredMethod("c", parameters), void.class);
+        require(find(wechat8080 ? "lt5.v" : "rt5.v").getDeclaredMethod("c", parameters), void.class);
         require(vfs.getDeclaredMethod("E", String.class), InputStream.class);
-        require(find("im.c8").getDeclaredMethod("M0"), int.class);
-        require(find("im.c8").getDeclaredMethod("z0"), int.class);
-        Class<?> task = find("gu.m0");
+        Class<?> message = find(wechat8080 ? "lm.d8" : "im.c8");
+        require(message.getDeclaredMethod(wechat8080 ? "N0" : "M0"), int.class);
+        require(message.getDeclaredMethod(wechat8080 ? "A0" : "z0"), int.class);
+        require(message.getDeclaredMethod(wechat8080 ? "O0" : "N0"), String.class);
+        require(message.getDeclaredMethod(wechat8080 ? "G0" : "H0"), long.class);
+        require(stores.getDeclaredMethod(wechat8080 ? "Ej" : "yj"),
+                find("com.tencent.mm.pluginsdk.model.app.e"));
+        Class<?> task = find(wechat8080 ? "lu.m0" : "gu.m0");
         if (task.getDeclaredField("o").getType() != parameters) throw new NoSuchFieldException("file task parameters changed");
-        Method event = task.getDeclaredMethod("h"); require(event, find("qq3.f0"));
+        Method event = task.getDeclaredMethod("h"); require(event, find(wechat8080 ? "hr3.i0" : "qq3.f0"));
         XposedBridge.hookMethod(event, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam call) {
                 if (call.hasThrowable() || call.getResult() == null) return;
@@ -83,24 +96,25 @@ public final class WeChat8079FileAdapter {
         return trace;
     }
 
-    /** Read-only native storage lookup. Never call Z1/Mj: they may migrate or rename files. */
+    /** Read-only storage lookup; native attachment convenience getters may move or rename files. */
     public Proof inspect(FileJob job, long messageId) throws Exception {
         if (messageId <= 0) return Proof.pending();
-        Object messages = XposedHelpers.getStaticObjectField(find("ox0.k0"), "d1");
+        Object messages = XposedHelpers.getStaticObjectField(find(wechat8080 ? "yx0.k0" : "ox0.k0"),
+                wechat8080 ? "A1" : "d1");
         Object message = XposedHelpers.callMethod(messages, "k", job.recipient, messageId);
         if (message == null) return Proof.pending();
         long actualId = ((Number)XposedHelpers.callMethod(message, "getMsgId")).longValue();
-        String talker = String.valueOf(XposedHelpers.callMethod(message, "N0"));
-        long serverId = ((Number)XposedHelpers.callMethod(message, "H0")).longValue();
-        int status = ((Number)XposedHelpers.callMethod(message, "M0")).intValue();
-        int outgoing = ((Number)XposedHelpers.callMethod(message, "z0")).intValue();
+        String talker = String.valueOf(XposedHelpers.callMethod(message, wechat8080 ? "O0" : "N0"));
+        long serverId = ((Number)XposedHelpers.callMethod(message, wechat8080 ? "G0" : "H0")).longValue();
+        int status = ((Number)XposedHelpers.callMethod(message, wechat8080 ? "N0" : "M0")).intValue();
+        int outgoing = ((Number)XposedHelpers.callMethod(message, wechat8080 ? "A0" : "z0")).intValue();
         if (actualId != messageId || outgoing != 1 || !job.recipient.equals(talker)) return Proof.pending();
         Object record = XposedHelpers.newInstance(attachment);
         XposedHelpers.setLongField(record, "field_msgInfoId", messageId);
         XposedHelpers.setObjectField(record, "field_msgInfoTalker", job.recipient);
-        Object storage = XposedHelpers.callStaticMethod(stores, "yj");
+        Object storage = XposedHelpers.callStaticMethod(stores, wechat8080 ? "Ej" : "yj");
         boolean migrated = Boolean.TRUE.equals(XposedHelpers.callMethod(
-                XposedHelpers.getStaticObjectField(migration, "c1"), "a", "appattach"));
+                XposedHelpers.getStaticObjectField(migration, wechat8080 ? "z1" : "c1"), "a", "appattach"));
         boolean found = Boolean.TRUE.equals(XposedHelpers.callMethod(storage, "get", record,
                 migrated ? new String[]{"msgInfoId", "msgInfoTalker"} : new String[]{"msgInfoId"}));
         if (!found) return Proof.pending();

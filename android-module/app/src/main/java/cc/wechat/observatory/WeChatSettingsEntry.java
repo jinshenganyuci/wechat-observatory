@@ -25,7 +25,7 @@ import cc.wechat.observatory.util.HookInstallation;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 
-/** Adds a local configuration entry to the verified 8.0.79 main settings page. */
+/** Adds a local configuration entry to an exact, verified main settings layout. */
 public final class WeChatSettingsEntry {
     private static final String MAIN_SETTINGS =
             "com.tencent.mm.plugin.setting.ui.setting_new.MainSettingsUI";
@@ -35,12 +35,24 @@ public final class WeChatSettingsEntry {
     private static final String ENTRY_TAG = "cc.wechat.observatory.settings.entry.v1";
     private static final HookInstallation INSTALLATIONS = new HookInstallation();
 
-    // DexSQL: BaseSettingPrefUI.getLayoutId() -> 0x7f0e1384 -> r/p/ep9.xml.
-    // This new page does not extend MMPreference; its existing list is untouched.
-    private static final int LAYOUT_ID = 0x7f0e1384;
-    private static final int ROOT_ID = 0x7f0a49f7;
-    private static final int COLUMN_ID = 0x7f0a49f6;
-    private static final int RECYCLER_ID = 0x7f0a58e0;
+    // DexSQL-verified resources; the same native view hierarchy has new IDs in 8.0.80.
+    static final class Layout {
+        final int page, root, column, recycler;
+        final String name;
+
+        Layout(int page, int root, int column, int recycler, String name) {
+            this.page = page; this.root = root; this.column = column;
+            this.recycler = recycler; this.name = name;
+        }
+
+        static Layout forVersion(String name, long code) {
+            if ("8.0.79".equals(name) && code == 3200)
+                return new Layout(0x7f0e1384, 0x7f0a49f7, 0x7f0a49f6, 0x7f0a58e0, "ep9");
+            if ("8.0.80".equals(name) && code == 3220)
+                return new Layout(0x7f0e1380, 0x7f0a48fd, 0x7f0a48fc, 0x7f0a578b, "ept");
+            return null;
+        }
+    }
 
     public interface Callback {
         void onOpen(Activity activity) throws Throwable;
@@ -51,7 +63,8 @@ public final class WeChatSettingsEntry {
     /** Call with WeChat's runtime loader and installed PackageInfo version. */
     public static boolean install(ClassLoader loader, String versionName, long versionCode,
                                   Callback callback) throws Throwable {
-        if (!Binding.supports(versionName, versionCode)) return false;
+        final Layout layout = Layout.forVersion(versionName, versionCode);
+        if (layout == null) return false;
         if (loader == null || callback == null) throw new IllegalArgumentException("settings dependencies missing");
         final Class<?> main = Class.forName(MAIN_SETTINGS, false, loader);
         final Class<?> base = Class.forName(BASE_SETTINGS, false, loader);
@@ -74,10 +87,10 @@ public final class WeChatSettingsEntry {
                         Activity target = reference.get();
                         if (target == null || target.isFinishing() || target.isDestroyed()) return;
                         try {
-                            if (!Integer.valueOf(LAYOUT_ID).equals(binding.getLayoutId.invoke(target))) {
+                            if (!Integer.valueOf(layout.page).equals(binding.getLayoutId.invoke(target))) {
                                 throw new IllegalStateException("settings layout changed");
                             }
-                            addEntry(target, callback);
+                            addEntry(target, callback, layout);
                         } catch (Throwable error) {
                             // A missing entry must never prevent settings from opening.
                             BridgeLogger.log("settings entry unavailable: " + error.getClass().getSimpleName());
@@ -85,18 +98,18 @@ public final class WeChatSettingsEntry {
                     });
                 }
             });
-            BridgeLogger.log("settings entry hook installed for WeChat 8.0.79/3200");
+            BridgeLogger.log("settings entry hook installed for WeChat " + versionName + "/" + versionCode);
         });
     }
 
-    private static void addEntry(Activity activity, Callback callback) {
-        requireResource(activity, LAYOUT_ID, "com.tencent.mm:layout/ep9");
-        requireResource(activity, ROOT_ID, "com.tencent.mm:id/jlw");
-        requireResource(activity, COLUMN_ID, "com.tencent.mm:id/jlv");
-        requireResource(activity, RECYCLER_ID, "com.tencent.mm:id/lqa");
-        View root = activity.findViewById(ROOT_ID);
-        View columnView = activity.findViewById(COLUMN_ID);
-        View list = activity.findViewById(RECYCLER_ID);
+    private static void addEntry(Activity activity, Callback callback, Layout layout) {
+        requireResource(activity, layout.page, "com.tencent.mm:layout/" + layout.name);
+        requireResource(activity, layout.root, "com.tencent.mm:id/jlw");
+        requireResource(activity, layout.column, "com.tencent.mm:id/jlv");
+        requireResource(activity, layout.recycler, "com.tencent.mm:id/lqa");
+        View root = activity.findViewById(layout.root);
+        View columnView = activity.findViewById(layout.column);
+        View list = activity.findViewById(layout.recycler);
         if (!(root instanceof RelativeLayout) || !(columnView instanceof LinearLayout)
                 || columnView.getParent() != root || list == null
                 || !RECYCLER.equals(list.getClass().getName())
@@ -198,7 +211,7 @@ public final class WeChatSettingsEntry {
         }
 
         static boolean supports(String name, long code) {
-            return "8.0.79".equals(name) && code == 3200;
+            return Layout.forVersion(name, code) != null;
         }
 
         static Binding resolve(Class<?> main, Class<?> base, Class<?> bundle) throws ReflectiveOperationException {

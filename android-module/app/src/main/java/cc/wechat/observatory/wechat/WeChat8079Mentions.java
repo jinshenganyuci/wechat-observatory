@@ -10,7 +10,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
-/** Verified against 8.0.79/3200: im.c8.parseBuff() reads msgSource as LVBuffer field 3. */
+/** Verified 8.0.79 im.c8 and 8.0.80 lm.d8 parseBuff(): msgSource is LVBuffer field 3. */
 public final class WeChat8079Mentions {
     private WeChat8079Mentions() {}
 
