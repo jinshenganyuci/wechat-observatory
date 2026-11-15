@@ -52,7 +52,7 @@ export type OutboxStatusItem = {
   owner_wxid?: string;
   wxid: string;
   text: string;
-  kind?: "text" | "file";
+  kind?: "text" | "file" | "image";
   attachment?: { id: string; name: string; size: number; sha256: string; expires_at?: string };
   status: string;
   attempt_count: number;
@@ -68,6 +68,7 @@ export type OutboxFilter = "active" | "failed" | "all";
 export type FileTaskFilter = "retained" | "unconfirmed" | "all";
 export type FileCleanupMode = "server_only" | "cancel_unstarted";
 export type FileTaskView = Omit<OutboxStatusItem, "text" | "kind"> & {
+  kind?: "file" | "image";
   owner_wxid: string;
   native_started_at?: string;
   server_copy: {

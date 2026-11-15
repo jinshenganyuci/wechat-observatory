@@ -303,7 +303,7 @@ func TestLiveEventsReplaysDurableCursor(t *testing.T) {
 	}
 }
 
-func TestIngestDiscardsMediaPayload(t *testing.T) {
+func TestIngestDiscardsMediaWhenStorageNotConfigured(t *testing.T) {
 	persistence := &fakePersistence{}
 	service := newTestService("", WithPersistence(persistence))
 	raw := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1, 2, 3}

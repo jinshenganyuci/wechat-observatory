@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -58,8 +59,13 @@ func main() {
 	if err != nil {
 		log.Fatal("initialize private file storage failed")
 	}
+	imageSpool, err := bridge.NewFileSpool(filepath.Join(cfg.FileSpoolDir, "inbound-images"), bridge.DefaultImageSpoolBytes)
+	if err != nil {
+		log.Fatal("initialize private image storage failed")
+	}
 	service := bridge.NewService(bridge.Config{
 		FileSpool:              spool,
+		ImageSpool:             imageSpool,
 		DefaultDevice:          cfg.DefaultDevice,
 		Devices:                cfg.Devices,
 		APIKeys:                cfg.APIKeys,
@@ -116,6 +122,11 @@ func startFileCleanup(ctx context.Context, service *bridge.Service) {
 		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		if err := service.CleanupFiles(cleanupCtx); err != nil && ctx.Err() == nil {
 			log.Print("file storage cleanup incomplete; retrying later")
+		}
+		cancel()
+		cleanupCtx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		if err := service.CleanupImages(cleanupCtx); err != nil && ctx.Err() == nil {
+			log.Print("image storage cleanup incomplete; retrying later")
 		}
 		cancel()
 		select {

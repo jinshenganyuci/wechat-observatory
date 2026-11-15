@@ -48,6 +48,9 @@ func (s *Store) ensureFileTables(ctx context.Context) error {
 }
 
 func (s *Store) EnqueueFile(ctx context.Context, req bridge.FileEnqueue) (item bridge.ModuleOutboxItem, replay bool, err error) {
+	if req.Kind == "" {
+		req.Kind = "file"
+	}
 	tx, err := s.executor(ctx).BeginTx(ctx, nil)
 	if err != nil {
 		return
@@ -67,7 +70,7 @@ func (s *Store) EnqueueFile(ctx context.Context, req bridge.FileEnqueue) (item b
 		if err = tx.Commit(); err != nil {
 			return
 		}
-		return bridge.ModuleOutboxItem{ID: oldID.Int64, Kind: "file"}, true, nil
+		return bridge.ModuleOutboxItem{ID: oldID.Int64, Kind: req.Kind}, true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return
@@ -84,7 +87,7 @@ func (s *Store) EnqueueFile(ctx context.Context, req bridge.FileEnqueue) (item b
 		return item, false, err
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO bridge_module_outbox
-	 (device,owner_wxid,wxid,text,status,kind,attachment_id) VALUES(?,?,?,'','pending','file',?)`, req.Device, req.OwnerWxID, req.WxID, req.Attachment.ID)
+	 (device,owner_wxid,wxid,text,status,kind,attachment_id) VALUES(?,?,?,'','pending',?,?)`, req.Device, req.OwnerWxID, req.WxID, req.Kind, req.Attachment.ID)
 	if err != nil {
 		return
 	}
@@ -191,7 +194,7 @@ func (s *Store) OperateFile(ctx context.Context, req bridge.FileOperation) (resu
 	err = tx.QueryRowContext(ctx, `SELECT o.device,o.owner_wxid,COALESCE(o.file_instance_id,''),COALESCE(o.file_account_session,''),
 	 COALESCE(o.file_lease_token,''),o.status,o.lease_until,o.native_started_at,a.sha256,a.expires_at,a.bytes_removed,CURRENT_TIMESTAMP(6)
 	 FROM bridge_module_outbox o JOIN bridge_file_attachments a ON a.id=o.attachment_id
-	 WHERE o.id=? AND o.kind='file' FOR UPDATE`, req.ID).Scan(&device, &owner, &instance, &session, &token, &status, &lease, &started, &hash, &expires, &removed, &current)
+	 WHERE o.id=? AND o.kind IN ('file','image') FOR UPDATE`, req.ID).Scan(&device, &owner, &instance, &session, &token, &status, &lease, &started, &hash, &expires, &removed, &current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, bridge.ErrFileConflict
 	}
@@ -262,7 +265,7 @@ func (s *Store) ackFile(ctx context.Context, req bridge.ModuleAckRequest, ack br
 	var now time.Time
 	err = tx.QueryRowContext(ctx, `SELECT device,owner_wxid,COALESCE(file_instance_id,''),COALESCE(file_account_session,''),
 	 COALESCE(file_lease_token,''),status,COALESCE(last_error,''),chat_record_id,native_started_at,lease_until,CURRENT_TIMESTAMP(6)
-	 FROM bridge_module_outbox WHERE id=? AND kind='file' FOR UPDATE`, ack.ID).Scan(&device, &owner, &instance, &session, &token, &status, &lastError, &record, &started, &lease, &now)
+	 FROM bridge_module_outbox WHERE id=? AND kind IN ('file','image') FOR UPDATE`, ack.ID).Scan(&device, &owner, &instance, &session, &token, &status, &lastError, &record, &started, &lease, &now)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
 	}
@@ -298,7 +301,7 @@ func (s *Store) FileCleanupCandidates(ctx context.Context) (ids []string, err er
 	// hold an account lock. A granted native handoff can never become cancelled.
 	_, err = s.executor(ctx).ExecContext(ctx, `UPDATE bridge_module_outbox o JOIN bridge_file_attachments a ON a.id=o.attachment_id
 	 SET o.status='cancelled',o.last_error='file expired before native submission',o.lease_until=NULL
-	 WHERE o.kind='file' AND o.status IN ('pending','leased') AND o.native_started_at IS NULL AND a.expires_at<=CURRENT_TIMESTAMP(6)`)
+	 WHERE o.kind IN ('file','image') AND o.status IN ('pending','leased') AND o.native_started_at IS NULL AND a.expires_at<=CURRENT_TIMESTAMP(6)`)
 	if err != nil {
 		return
 	}

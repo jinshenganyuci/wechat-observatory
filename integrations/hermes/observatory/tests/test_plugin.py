@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -21,8 +23,11 @@ from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platform_registry import PlatformEntry, platform_registry
 from observatory import adapter as module
 from observatory.adapter import ObservatoryAdapter
-from observatory.client import BridgeError, Client, Settings, file_description
+from observatory.client import BridgeError, Client, Settings, file_description, image_description
 from observatory.state import State, digest
+
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+IMAGE_REF = "/api/media/images/" + "a" * 32
 
 
 class StateTests(unittest.TestCase):
@@ -186,7 +191,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_private_received_text_reaches_native_auth_boundary(self):
         self.adapter.handle_message = AsyncMock()
         rejected = [dict(direction="sent"), dict(is_send=1), dict(owner_wxid="other"), dict(device="other"),
-                    dict(message_type=3), dict(room_id="room@chatroom"), dict(chat_kind="room"),
+                    dict(message_type=34), dict(room_id="room@chatroom"), dict(chat_kind="room"),
                     dict(sender="impostor"), dict(from_wxid="wxid_bot", sender="wxid_bot", chat_id="wxid_bot"),
                     dict(raw_provider="module_ack"), dict(event_key="")]
         sequence = 10
@@ -203,6 +208,101 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.internal)
         self.assertTrue(event.allow_gateway_control)
         self.assertEqual(self.adapter.state.cursor, sequence + 1)
+
+    async def test_photo_is_cached_for_native_vision_and_replay_does_not_download_again(self):
+        self.adapter.handle_message = AsyncMock()
+        self.client.incoming_image = AsyncMock(return_value=(PNG, "image/png"))
+        row = self.event(message_type=3, text="", media_kind="image", media_url=IMAGE_REF)
+        with patch("gateway.platforms.base.get_image_cache_dir", return_value=Path(self.temp.name)):
+            await self.adapter._ingest(row, 11)
+            await self.adapter._ingest(row, 12)
+        event = self.adapter.handle_message.call_args.args[0]
+        self.assertEqual(event.message_type, MessageType.PHOTO)
+        self.assertEqual(event.media_types, ["image/png"])
+        self.assertEqual(Path(event.media_urls[0]).read_bytes(), PNG)
+        self.assertTrue(Path(event.media_urls[0]).is_absolute())
+        self.assertEqual(Path(event.media_urls[0]).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(event.source.chat_id, self.adapter._chat_id("alice"))
+        self.assertEqual(self.client.incoming_image.await_count, 1)
+        self.assertEqual(self.adapter.handle_message.await_count, 1)
+        self.assertEqual(self.adapter.state.cursor, 12)
+
+    async def test_photo_fetch_failure_keeps_cursor_but_expiry_reaches_native_handler(self):
+        self.adapter.handle_message = AsyncMock()
+        self.client.incoming_image = AsyncMock(side_effect=TimeoutError())
+        row = self.event(message_type=3, media_kind="image", media_url=IMAGE_REF)
+        with self.assertRaises(TimeoutError):
+            await self.adapter._ingest(row, 11)
+        self.assertEqual(self.adapter.state.cursor, 10)
+        self.assertFalse(self.adapter.state.seen("key-1"))
+        self.client.incoming_image.side_effect = BridgeError("image_unavailable", status=410)
+        await self.adapter._ingest(row, 11)
+        event = self.adapter.handle_message.call_args.args[0]
+        self.assertEqual(event.media_urls, [])
+        self.assertIn("过期", event.text)
+        self.assertEqual(self.adapter.state.cursor, 11)
+
+    async def test_photo_never_relaxes_account_direction_or_group_mention_gate(self):
+        self.adapter.handle_message = AsyncMock()
+        self.client.incoming_image = AsyncMock(return_value=(PNG, "image/png"))
+        self.config.extra.update(group_admin_mentions=True, allow_admin_from=["alice"])
+        rows = [self.event(owner_wxid="other"), self.event(is_send=1),
+                self.group_event(mentioned_wxids=[]), self.group_event(sender_wxid="stranger")]
+        for sequence, row in enumerate(rows, 11):
+            row.update(message_type=3, media_kind="image", media_url=IMAGE_REF, event_key=str(sequence))
+            await self.adapter._ingest(row, sequence)
+        self.client.incoming_image.assert_not_awaited()
+        self.adapter.handle_message.assert_not_awaited()
+
+    async def test_thumbnail_quality_notice_reaches_vision_event(self):
+        self.adapter.handle_message = AsyncMock()
+        self.client.incoming_image = AsyncMock(return_value=(PNG, "image/png"))
+        row = self.event(message_type=3, media_kind="image", media_url=IMAGE_REF,
+                         media_name="received-thumb.png", text="untrusted upstream description")
+        with patch("gateway.platforms.base.get_image_cache_dir", return_value=Path(self.temp.name)):
+            await self.adapter._ingest(row, 11)
+        event = self.adapter.handle_message.call_args.args[0]
+        self.assertEqual(event.message_type, MessageType.PHOTO)
+        self.assertIn("缩略图", event.text)
+        self.assertNotIn("untrusted", event.text)
+
+    async def test_native_image_sender_preserves_source_and_original_idempotency(self):
+        path = Path(self.temp.name) / "中文 [1].png"
+        path.write_bytes(PNG)
+        self.client.lose = 1
+        first = await self.adapter.send_image_file("filehelper", str(path), reply_to="photo-1")
+        second = await self.adapter.send_image_file("filehelper", str(path), reply_to="photo-1")
+        self.assertTrue(first.success)
+        self.assertEqual(first.message_id, second.message_id)
+        self.assertEqual(len(self.client.ids), 1)
+        self.assertEqual(self.client.calls[0], self.client.calls[1])
+        self.assertEqual(self.client.calls[0][0]["kind"], "image")
+        self.assertEqual(self.client.calls[0][0]["attachment"]["mime"], "image/png")
+        self.assertEqual(path.read_bytes(), PNG)
+
+    async def test_remote_image_does_not_use_authenticated_bridge_session(self):
+        with patch("tools.url_safety.is_safe_url", return_value=False):
+            result = await self.adapter.send_image("filehelper", "http://127.0.0.1/private.png")
+        self.assertFalse(result.success)
+        self.assertEqual(self.client.calls, [])
+
+    async def test_remote_image_random_cache_names_keep_same_reply_key_after_lost_response(self):
+        paths = [Path(self.temp.name) / ("random-cache-" + str(i) + ".jpg") for i in range(3)]
+        for path in paths:
+            path.write_bytes(PNG)
+        self.client.lose = 2
+        with patch.object(module, "cache_image_from_url", AsyncMock(side_effect=map(str, paths))):
+            first = await self.adapter.send_image("filehelper", "https://example.test/photo.png", reply_to="turn")
+            second = await self.adapter.send_image("filehelper", "https://example.test/photo.png", reply_to="turn")
+            third = await self.adapter.send_image("filehelper", "https://example.test/photo.png", reply_to="turn")
+        self.assertFalse(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(second.message_id, third.message_id)
+        self.assertEqual(len(self.client.ids), 1)
+        self.assertEqual(len(self.client.calls), 3)
+        self.assertTrue(all(call == self.client.calls[0] for call in self.client.calls))
+        self.assertEqual(self.client.calls[0][0]["attachment"]["name"],
+                         "image-" + hashlib.sha256(PNG).hexdigest() + ".png")
 
     async def test_history_control_commands_are_checkpointed_without_reexecution(self):
         self.adapter.handle_message = AsyncMock()
@@ -258,7 +358,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             {"mentioned_wxids": []}, {"mentioned_wxids": "wxid_bot"},
             {"mentioned_wxids": ["notify@all"]}, {"mentioned_wxids": ["wxid_bot_spoof"]},
             {"mentioned_wxids": ["wxid_bot", {"id": "other"}]},
-            {"direction": "sent"}, {"is_send": True}, {"message_type": 3},
+            {"direction": "sent"}, {"is_send": True}, {"message_type": 34},
             {"owner_wxid": "other_bot"}, {"device": "other"}, {"raw_provider": "module_ack"},
         ]
         for sequence, changes in enumerate(rejected, 11):
@@ -496,7 +596,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(current_cron_execution=lambda: SimpleNamespace(execution_id="run-native", profile="wechat"))
         target = SimpleNamespace(job={"id": "cron-test"}, runtime_adapter=self.adapter, chat_id="alice",
             loop=asyncio.get_running_loop(), platform=self.adapter.platform, platform_name="observatory",
-            is_relay=False, where="observatory:alice")
+            is_relay=False, where="observatory:alice", force_document=False)
         errors = []
         with patch.object(module, "_plugin_context", context), \
                 patch.object(cron, "_live_route_metadata", return_value=(None, {}, {})), \
@@ -666,6 +766,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.contacts = []
         self.contact_queries = []
         self.contact_status = 200
+        self.image_status = 200
+        self.image_checksum = hashlib.sha256(PNG).hexdigest()
         self.app = web.Application()
         self.app.router.add_get("/api/modules/status", self.modules)
         self.app.router.add_get("/api/messages", self.history)
@@ -673,6 +775,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.app.router.add_get("/api/live/events", self.events)
         self.app.router.add_post("/api/send/text", self.send)
         self.app.router.add_post("/api/send/file", self.send_file)
+        self.app.router.add_post("/api/send/image", self.send_file)
+        self.app.router.add_get(IMAGE_REF, self.image)
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -721,6 +825,44 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         body = await request.post()
         self.seen.append((dict(request.headers), dict(body), body["file"].file.read()))
         return web.json_response({"ok": True, "outbox_id": 9, "idempotent_replay": False})
+
+    async def image(self, request):
+        self.seen.append(dict(request.headers))
+        return web.Response(body=PNG, status=self.image_status, content_type="image/png",
+                            headers={"X-Content-SHA256": self.image_checksum})
+
+    async def test_incoming_image_fixed_origin_auth_and_integrity(self):
+        row = {"media_url": IMAGE_REF, "media_size": len(PNG), "media_mime": "image/png"}
+        self.assertEqual(await self.client.incoming_image(row), (PNG, "image/png"))
+        self.assertEqual(self.seen[-1]["X-Bridge-Password"], "test-secret")
+        before = len(self.seen)
+        for url in ("https://other.test" + IMAGE_REF, "//other.test/image", IMAGE_REF + "?other=1"):
+            with self.assertRaises(ValueError):
+                await self.client.incoming_image({**row, "media_url": url})
+        self.assertEqual(len(self.seen), before)
+        self.image_checksum = "0" * 64
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            await self.client.incoming_image(row)
+        self.image_status = 410
+        with self.assertRaises(BridgeError) as raised:
+            await self.client.incoming_image(row)
+        self.assertEqual(raised.exception.status, 410)
+
+    async def test_image_upload_preserves_name_and_validates_contents_before_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "中文 [测试].png"
+            path.write_bytes(PNG)
+            payload = {"kind": "image", "device": "test", "owner_wxid": "bot", "account_generation": 3,
+                       "wxid": "filehelper", "attachment": image_description(str(path))}
+            await self.client.submit(payload, "hermes-image-key")
+            headers, body, content = self.seen[-1]
+            self.assertEqual(headers["Idempotency-Key"], "hermes-image-key")
+            self.assertEqual(body["file"].filename, path.name)
+            self.assertEqual(body["file"].content_type, "image/png")
+            self.assertEqual(content, PNG)
+            path.write_bytes(PNG + b"changed")
+            with self.assertRaisesRegex(BridgeError, "attachment_changed"):
+                await self.client.submit(payload, "hermes-image-key")
 
     async def test_fixed_scope_and_explicit_stream_id(self):
         self.assertEqual(await self.client.generation(), 3)
@@ -814,6 +956,21 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_image_format_and_cap_checked_without_large_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "photo.png"
+            path.write_bytes(PNG)
+            self.assertEqual(image_description(str(path))["mime"], "image/png")
+            for name in ("photo.bin", "photo", "photo.gif"):
+                with self.assertRaisesRegex(ValueError, "filename"):
+                    image_description(str(path), name)
+            with patch("observatory.client.MAX_IMAGE_BYTES", len(PNG) - 1):
+                with self.assertRaises(ValueError):
+                    image_description(str(path))
+            path.write_bytes(b"<html>not an image</html>")
+            with self.assertRaises(ValueError):
+                image_description(str(path))
+
     def test_secret_is_not_in_repr_and_bad_urls_are_rejected(self):
         self.assertNotIn("secret-value", repr(Settings("https://example.test", "d", "o", "secret-value")))
         for url in ("https://user:pass@example.test", "https://example.test?q=1", "file:///tmp/foo"):

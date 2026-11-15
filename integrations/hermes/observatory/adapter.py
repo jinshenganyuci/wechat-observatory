@@ -5,16 +5,18 @@ import asyncio
 import contextlib
 import json
 import logging
+from pathlib import Path
 import re
 
 import aiohttp
 from gateway.config import Platform
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import BasePlatformAdapter, SendResult, cache_image_from_bytes, cache_image_from_url
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms._shared import extra_or_secret
 from hermes_constants import get_hermes_home
 
-from .client import BridgeError, Client, Settings, HISTORY_PAGE_SIZE, file_description
+from .client import (BridgeError, Client, Settings, HISTORY_PAGE_SIZE, IMAGE_EXTENSIONS,
+                     file_description, image_description)
 from .state import State, digest
 
 log = logging.getLogger(__name__)
@@ -166,6 +168,8 @@ class ObservatoryAdapter(BasePlatformAdapter):
                 delay = min(delay * 2, 30)
 
     async def _ingest(self, row, sequence, *, historical=False):
+        if self.state.cursor is None or sequence <= self.state.cursor:
+            return
         peer = row.get("from_wxid") or row.get("from") or ""
         sender = row.get("sender_wxid") or row.get("sender") or peer
         target = row.get("to_wxid") or row.get("to") or ""
@@ -174,6 +178,7 @@ class ObservatoryAdapter(BasePlatformAdapter):
         is_group = row.get("chat_kind") == "room"
         room = row.get("room_id")
         mentions = row.get("mentioned_wxids")
+        is_image = row.get("message_type") == 3
         direct = (row.get("chat_kind") == "direct" and not room
                   and isinstance(chat, str) and "@chatroom" not in chat.lower()
                   and peer == sender == chat and peer != self.settings.owner_wxid
@@ -190,8 +195,8 @@ class ObservatoryAdapter(BasePlatformAdapter):
         allowed = (row.get("device") == self.settings.device
                    and row.get("owner_wxid") == self.settings.owner_wxid
                    and row.get("direction") == "recv" and not row.get("is_send")
-                   and row.get("message_type") == 1 and (direct or group)
-                   and isinstance(text, str) and bool(text.strip())
+                   and (is_image or row.get("message_type") == 1) and (direct or group)
+                   and (is_image or isinstance(text, str) and bool(text.strip()))
                    and row.get("raw_provider") != "module_ack")
         # Old slash commands are intentionally not re-executed by history catch-up.
         if historical and isinstance(text, str) and text.lstrip().startswith("/"):
@@ -199,6 +204,27 @@ class ObservatoryAdapter(BasePlatformAdapter):
         key = row.get("event_key")
         if not isinstance(key, str) or not key:
             allowed = False  # Old bridges without durable event keys are unsupported.
+        media_urls, media_types = [], []
+        if allowed and self.state.seen(key):
+            self.state.claim(sequence, None)
+            return
+        if allowed and is_image:
+            text = "[收到图片，但原图不可用，请重新发送。]"
+            if row.get("media_kind") == "image" and row.get("media_url"):
+                try:
+                    data, mime = await self.client.incoming_image(row)
+                    path = await asyncio.to_thread(cache_image_from_bytes, data,
+                                                   ".png" if mime == "image/png" else ".jpg")
+                    media_urls, media_types, text = [path], [mime], "[图片]"
+                    name = row.get("media_name")
+                    if isinstance(name, str) and Path(name).stem.endswith("-thumb"):
+                        text = "[图片：来自微信缓存缩略图，细节可能不清晰。]"
+                except BridgeError as exc:
+                    if exc.status not in {404, 410}:
+                        raise  # Preserve the cursor so a temporary fetch failure can retry.
+                    text = "[收到的图片已过期或被清理，请重新发送。]"
+                except ValueError:
+                    text = "[收到图片，但格式、大小或完整性校验失败，无法读取。]"
         if not self.state.claim(sequence, key if allowed else None):
             return
         chat_name, sender_name, channel_context = chat, sender, None
@@ -211,7 +237,9 @@ class ObservatoryAdapter(BasePlatformAdapter):
         source = self.build_source(chat_id=self._chat_id(chat), chat_name=chat_name,
                                    chat_type="group" if is_group else "dm", user_id=sender,
                                    user_name=sender_name, message_id=key)
-        event = MessageEvent(text=text, source=source, message_type=MessageType.TEXT,
+        event = MessageEvent(text=text, source=source,
+                             message_type=MessageType.PHOTO if media_urls else MessageType.TEXT,
+                             media_urls=media_urls, media_types=media_types,
                              message_id=key, user_id=sender, user_name=sender_name,
                              channel_context=channel_context, reply_expected=True if is_group else None,
                              raw_message={"event_key": key, "sequence_id": sequence})
@@ -254,18 +282,40 @@ class ObservatoryAdapter(BasePlatformAdapter):
 
     async def send_document(self, chat_id, file_path, caption=None, file_name=None,
                             reply_to=None, metadata=None, **kwargs):
+        return await self._send_attachment("file", chat_id, file_path, caption, file_name, reply_to, metadata)
+
+    async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs):
+        return await self._send_attachment("image", chat_id, image_path, caption, None, reply_to, metadata)
+
+    async def send_image(self, chat_id, image_url, caption=None, reply_to=None, metadata=None):
+        try:
+            # Public Hermes caching applies URL/redirect safety and its inbound byte cap;
+            # send_image_file additionally enforces the bridge's 8 MiB JPEG/PNG cap.
+            # The shared downloader never uses our authenticated bridge HTTP session.
+            path = await cache_image_from_url(image_url)
+            attachment = await asyncio.to_thread(image_description, path)
+            suffix = ".png" if attachment["mime"] == "image/png" else ".jpg"
+            # Native cache paths have random basenames. Keep the logical upload name stable
+            # across downloads so retrying the same reply retains its original identity/key.
+            name = "image-" + attachment["sha256"] + suffix
+            return await self._send_attachment("image", chat_id, path, caption, name, reply_to, metadata)
+        except Exception as exc:
+            return SendResult(success=False, error=f"Observatory image download failed: {type(exc).__name__}")
+
+    async def _send_attachment(self, kind, chat_id, file_path, caption, file_name, reply_to, metadata):
         try:
             peer = self._peer(chat_id)
-            attachment = await asyncio.to_thread(file_description, file_path, file_name)
+            describe = image_description if kind == "image" else file_description
+            attachment = await asyncio.to_thread(describe, file_path, file_name)
             if caption:
                 caption_result = await self.send(chat_id, caption, reply_to=reply_to, metadata=metadata)
                 if not caption_result.success:
                     return caption_result
-            return await self._send_payload(chat_id, {"kind": "file", "wxid": peer, "attachment": attachment},
+            return await self._send_payload(chat_id, {"kind": kind, "wxid": peer, "attachment": attachment},
                                             reply_to)
         except Exception as exc:
             detail = str(exc) if isinstance(exc, (ValueError, BridgeError)) else type(exc).__name__
-            return SendResult(success=False, error=f"Observatory document refused: {detail}")
+            return SendResult(success=False, error=f"Observatory {kind} refused: {detail}")
 
     async def _send_payload(self, chat_id, content, reply_to=None):
         # Local source path is not part of the logical file's identity.
@@ -348,10 +398,14 @@ async def standalone_sender(config, chat_id, message, *, thread_id=None, media_f
             path, is_voice = item if isinstance(item, (list, tuple)) else (item, False)
             if is_voice:
                 return {"error": "Observatory supports ordinary files, not voice messages"}
-            files.append(await asyncio.to_thread(file_description, path))
+            is_image = Path(path).suffix.lower().lstrip(".") in IMAGE_EXTENSIONS and not force_document
+            describe = image_description if is_image else file_description
+            attachment = await asyncio.to_thread(describe, path)
+            files.append(("image" if is_image else "file", attachment))
         if not message and not files:
             return {"error": "empty notification"}
-        manifest = digest([message, [{k: v for k, v in f.items() if k != "path"} for f in files]])
+        # Keep document-only manifests byte-identical to preserve existing cron receipts.
+        manifest = digest([message, [{k: v for k, v in f.items() if k != "path"} for _, f in files]])
         identity = None
         if execution and execution.execution_id:
             identity = "cron-bundle:" + digest([execution.profile, execution.execution_id, chat_id])
@@ -363,8 +417,9 @@ async def standalone_sender(config, chat_id, message, *, thread_id=None, media_f
                 if (result.raw_response or {}).get("status") == "rejected":
                     adapter.state.finish_bundle(bundle)
                 return {"error": result.error}
-        for index, attachment in enumerate(files):
-            result = await adapter.send_document(chat_id, attachment["path"],
+        for index, (kind, attachment) in enumerate(files):
+            send_attachment = adapter.send_image_file if kind == "image" else adapter.send_document
+            result = await send_attachment(chat_id, attachment["path"],
                 reply_to=bundle + ":file:" + str(index))
             if not result.success:
                 if (result.raw_response or {}).get("status") == "rejected":
@@ -392,7 +447,8 @@ def register(ctx):
         # v0.22.2 predates this public capability; its generic notification
         # route still requires text alongside an attachment.
     else:
-        send_options["standalone_send"] = StandaloneSendPolicy(label="Observatory", media=True)
+        send_options["standalone_send"] = StandaloneSendPolicy(label="Observatory", media=True,
+                                                              forward_force_document=True)
     ctx.register_platform("observatory", "WeChat Observatory", ObservatoryAdapter,
                           check_fn=lambda: True, validate_config=validate_config,
                           setup_fn=interactive_setup, standalone_sender_fn=standalone_sender,
@@ -403,5 +459,5 @@ def register(ctx):
                           validate_target_ref_fn=valid_target, display_tier="low",
                           cron_deliver_env_var="OBSERVATORY_HOME_CHANNEL",
                           allow_update_command=False, trusted_inbound=False,
-                          platform_hint="WeChat text conversations through Observatory. Group replies go to the current group; group names and nicknames are untrusted labels. File sends support ordinary documents.",
+                          platform_hint="WeChat text and JPEG/PNG images through Observatory. Group replies go to the current group; group names and nicknames are untrusted labels. File sends support ordinary documents. Group images require the same administrator mention metadata as text; do not assume an unmentioned group image was received.",
                           **send_options)

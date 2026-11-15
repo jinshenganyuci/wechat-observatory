@@ -90,6 +90,10 @@ class State:
             self.db.execute("DELETE FROM ingress WHERE claimed_at < ?", (int(time.time()) - 90 * 86400,))
             return accepted
 
+    def seen(self, event_key: str) -> bool:
+        """Avoid downloading an attachment again when its event key reappears."""
+        return self.db.execute("SELECT 1 FROM ingress WHERE event_key=?", (event_key,)).fetchone() is not None
+
     def find_intent(self, intent: str):
         row = self.db.execute("SELECT * FROM outgoing WHERE intent=? OR intent="
                               "(SELECT intent FROM intent_aliases WHERE alias=?)", (intent, intent)).fetchone()

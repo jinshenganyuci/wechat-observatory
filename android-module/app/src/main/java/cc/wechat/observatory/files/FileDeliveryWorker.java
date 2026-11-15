@@ -209,6 +209,7 @@ public final class FileDeliveryWorker {
             output.getFD().sync();
         }
         journal.commitDownload(record);
+        if (job.isImage()) ImagePayload.validate(journal.source(record));
         log(job.id, "download_verified", 0);
     }
 
@@ -221,7 +222,7 @@ public final class FileDeliveryWorker {
         JSONObject remote = response.getJSONObject("item");
         FileJob current = new FileJob(remote);
         if (current.id != job.id || !current.owner.equals(job.owner) || !current.recipient.equals(job.recipient)
-                || !current.sha256.equals(job.sha256)
+                || !current.kind.equals(job.kind) || !current.sha256.equals(job.sha256)
                 || current.size != job.size || !current.attachmentId.equals(job.attachmentId))
             throw new IOException("File recovery scope changed");
         if (!data.optBoolean("intent_recorded") && "cancelled".equals(remote.optString("status"))
@@ -265,8 +266,15 @@ public final class FileDeliveryWorker {
             WeChat8079FileAdapter.Proof proof = host.inspect(job, id);
             // Across restart there is no live task. Native attachment199/full offset is only
             // committed by this adapter's final CGI success path, unlike message status2.
-            if (proof.sent) { finish(record, job, host, "sent", ""); return; }
-            if (proof.failed && data.optBoolean("native_finished")) {
+            // Images are recompressed by WeChat, so unlike ordinary files we cannot
+            // hash its native copy against the download. A reused local ID after a
+            // database rebuild must not turn an unobserved image into a proven send.
+            boolean finished = data.optBoolean("native_finished");
+            boolean phasesOk = data.optBoolean("phases_ok");
+            if (proof.sent && (!job.isImage() || (finished && phasesOk))) {
+                finish(record, job, host, "sent", ""); return;
+            }
+            if (proof.failed && finished && (!job.isImage() || !phasesOk)) {
                 finish(record, job, host, "failed", "WeChat reported a terminal file failure"); return;
             }
         }
@@ -278,7 +286,7 @@ public final class FileDeliveryWorker {
     private void finish(OutgoingFileJournal.Record record, FileJob job, Host host, String state, String error) throws Exception {
         host.validate();
         journal.state(record, state, error);
-        // Only ordinary files are accepted, so there is no parallel thumbnail source reader.
+        // The adapter has proven terminal native completion before releasing our source.
         journal.release(record);
         log(job.id, state, journal.snapshot(record).optLong("message_id"));
         acknowledge(record, job, host);

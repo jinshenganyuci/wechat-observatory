@@ -6,6 +6,7 @@ upstream's uncertain-delivery boundary instead of asserting a patched guarantee.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 import sys
@@ -153,7 +154,8 @@ def cron_media_send(lane, caption, execution_id):
 
     job = {"id": "synthetic-file-job", "name": "Synthetic file delivery"}
     target = SimpleNamespace(job=job, platform=lane.adapter.platform, pconfig=lane.config,
-                             chat_id="filehelper", thread_id=None, where="observatory:filehelper")
+                             chat_id="filehelper", thread_id=None, where="observatory:filehelper",
+                             notify_delivery=True, force_document=False, standalone_in_flight=False)
     token = enter_cron_execution(job, execution_id, {"source": "direct"})
     try:
         result, error = _standalone_send(target, caption, [(str(lane.path), False)])
@@ -208,6 +210,64 @@ def test_official_cron_lost_file_ack_reuses_original_key_then_stops_uploading(na
     accepted_calls = list(lane.bridge.calls)
     assert cron_media_send(lane, "Report ready", "lost-ack-execution").get("success")
     assert lane.bridge.calls == accepted_calls
+
+
+@pytest.fixture
+def native_image(native_media):
+    lane = native_media
+    lane.path = lane.home / "图片 [1].png"
+    lane.path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"))
+    return lane
+
+
+@pytest.mark.parametrize("caption", ["", "Image ready\n"], ids=["image-only", "text-and-image"])
+def test_official_cli_sends_native_image(native_image, capsys, caption):
+    from hermes_cli.send_cmd import cmd_send
+
+    lane = native_image
+    args = SimpleNamespace(to="observatory:filehelper", message=f"{caption}MEDIA:{lane.path}", json=True)
+    with pytest.raises(SystemExit) as stopped:
+        cmd_send(args)
+    result = json.loads(capsys.readouterr().out)
+    if not caption and not lane.media_policy:
+        assert stopped.value.code == 1
+        assert not lane.bridge.calls
+        return
+    assert stopped.value.code == 0 and result.get("media_delivered"), result
+    assert [body["kind"] for body, _ in lane.bridge.calls] == (["text", "image"] if caption else ["image"])
+    assert lane.bridge.calls[-1][0]["attachment"]["mime"] == "image/png"
+    assert lane.path.is_file()
+
+
+def test_official_cron_image_response_loss_reuses_key_and_completed_receipt(native_image):
+    lane = native_image
+    lane.bridge.lose = 1
+    first = cron_media_send(lane, "", "image-execution")
+    if not lane.media_policy:
+        assert first.get("error")
+        assert not lane.bridge.calls
+        return
+    assert first.get("success") and first.get("media_delivered"), first
+    assert len(lane.bridge.tasks) == 1
+    assert lane.bridge.calls[0] == lane.bridge.calls[1]
+    calls = list(lane.bridge.calls)
+    second = cron_media_send(lane, "", "image-execution")
+    assert second["message_id"] == first["message_id"]
+    assert lane.bridge.calls == calls
+
+
+@pytest.mark.asyncio
+async def test_native_reply_media_dispatches_image_without_core_patch(native_image):
+    lane = native_image
+    event = event_for(lane.adapter)
+    delivered = []
+    await lane.adapter._deliver_media_attachments(
+        event, [(str(lane.path), False)], [], force_document_attachments=False,
+        human_delay=0, metadata={}, record_delivery=delivered.append)
+    assert delivered and all(result.success for result in delivered)
+    assert [body["kind"] for body, _ in lane.bridge.calls] == ["image"]
+    assert lane.bridge.calls[0][0]["wxid"] == "alice"
 
 
 def event_for(adapter, event_id="event-one", peer="alice"):

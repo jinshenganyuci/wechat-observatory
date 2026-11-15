@@ -21,7 +21,6 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -59,6 +58,8 @@ import cc.wechat.observatory.files.FileJob;
 import cc.wechat.observatory.files.FileResponseInputStream;
 import cc.wechat.observatory.files.OutgoingFileJournal;
 import cc.wechat.observatory.files.WeChat8079FileAdapter;
+import cc.wechat.observatory.files.WeChat8080ImageAdapter;
+import cc.wechat.observatory.files.WeChat8080ImageReader;
 import cc.wechat.observatory.gateway.GatewayEndpoint;
 import cc.wechat.observatory.gateway.WebSocketFrame;
 import cc.wechat.observatory.gateway.OutboxReconnectPolicy;
@@ -117,6 +118,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile long LAST_ACCOUNT_ERROR_AT;
     private static final Object ACCOUNT_UPLOAD_LOCK = new Object();
     private static final ExecutorService INSERT_REPORTER = Executors.newSingleThreadExecutor();
+    // Only the ordered message worker owns these fields. A completed payload is
+    // retained across HTTP retries so one image never acquires a second event key.
+    private static WeChat8080ImageReader IMAGE_READER;
+    private static PendingIncomingImage PENDING_IMAGE;
     private static final int SEND_QUEUE_MAX_ATTEMPTS = 5;
     private static final long SEND_QUEUE_RETRY_DELAY_MS = 500L;
     private static final int SEND_STATUS_MAX_CHECKS = 10;
@@ -148,6 +153,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
     private static volatile boolean MODULE_REMOVED;
     private static volatile String LAST_SETTINGS_HOOK_ERROR = "";
     private static volatile WeChat8079FileAdapter FILE_ADAPTER;
+    private static volatile WeChat8080ImageAdapter IMAGE_ADAPTER;
     private static volatile FileDeliveryWorker FILE_WORKER;
 
     public static String runtimeStatusText() {
@@ -555,7 +561,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
             Long msgId = values.getAsLong("msgId");
             Long createTime = values.getAsLong("createTime");
             Integer type = values.getAsInteger("type");
-            String imgPath = values.getAsString("imgPath");
             // Do not persist an incomplete group event before the ordered poll can read its metadata.
             if (isChatroomTalker(talker) && !Integer.valueOf(1).equals(isSend)
                     && !values.containsKey("lvbuffer")) return;
@@ -581,11 +586,19 @@ public final class HookEntry implements IXposedHookLoadPackage {
             if (!allowsHistoricalMessage(config, normalizedCreateTime)) {
                 return;
             }
+            // Images may not have cached bytes at insertion. Let the ordered
+            // worker select one representation, including the first startup poll.
+            if (messageType == 3) {
+                if (msgId != null && msgId > 0 && !sourceAccount.watermarkReady()) {
+                    sourceAccount.initializeWatermark(msgId - 1);
+                }
+                return;
+            }
             if (!ensureRegistered(config)) {
                 return;
             }
 
-            MessagePayload payload = buildMessagePayload(config, talker, content, isSend, msgId, createTime, messageType, imgPath, lvbuffer);
+            MessagePayload payload = buildMessagePayload(config, talker, content, isSend, msgId, createTime, messageType, lvbuffer);
             post(config, payload);
             // Only the ordered poll advances its watermark. A later successful
             // hook upload must not skip earlier rows awaiting a network retry.
@@ -1596,17 +1609,17 @@ public final class HookEntry implements IXposedHookLoadPackage {
 
     private static int pollNewMessages(Object db, BridgeConfig config) throws Exception {
         RuntimeAccount account = config.runtimeAccount;
-        boolean hasMediaHint = true;
+        boolean hasMentionMetadata = true;
         Object cursor;
         try {
             cursor = rawQuery(db, ""
-                    + "SELECT msgId,talker,COALESCE(content,''),isSend,createTime,type,COALESCE(imgPath,''),lvbuffer "
+                    + "SELECT msgId,talker,COALESCE(content,''),isSend,createTime,type,lvbuffer "
                     + "FROM message "
                     + "WHERE msgId > ? AND talker IS NOT NULL AND talker <> '' "
                     + "ORDER BY msgId ASC "
                     + "LIMIT 50", new String[]{String.valueOf(account.messageWatermark())});
         } catch (Throwable t) {
-            hasMediaHint = false;
+            hasMentionMetadata = false;
             cursor = rawQuery(db, ""
                     + "SELECT msgId,talker,COALESCE(content,''),isSend,createTime,type "
                     + "FROM message "
@@ -1633,17 +1646,21 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 int isSend = intColumn(cursor, 3);
                 long createTime = normalizeCreateTime(longColumn(cursor, 4));
                 int type = intColumn(cursor, 5);
-                String imgPath = hasMediaHint ? stringColumn(cursor, 6) : "";
-                byte[] lvbuffer = hasMediaHint ? (byte[]) cursor.getClass().getMethod("getBlob", int.class).invoke(cursor, 7) : null;
+                byte[] lvbuffer = hasMentionMetadata ? (byte[]) cursor.getClass().getMethod("getBlob", int.class).invoke(cursor, 6) : null;
                 if (!shouldReportMessage(talker, content, type)
                         || !allowsHistoricalMessage(config, createTime)) {
                     account.advanceWatermark(msgId);
                     continue;
                 }
 
-                MessagePayload payload = buildMessagePayload(config, talker, content, isSend == 1 ? Integer.valueOf(1) : Integer.valueOf(0), msgId, createTime, type <= 0 ? 1 : type, imgPath, lvbuffer);
+                MessagePayload payload = buildMessagePayload(config, talker, content, isSend == 1 ? Integer.valueOf(1) : Integer.valueOf(0), msgId, createTime, type <= 0 ? 1 : type, lvbuffer);
+                if (type == 3 && config.mediaUploadEnabled) {
+                    payload = incomingImagePayload(config, payload, isSend);
+                    if (payload == null) break;
+                }
                 post(config, payload);
                 account.advanceWatermark(msgId);
+                if (type == 3) PENDING_IMAGE = null;
                 count++;
             }
         } finally {
@@ -1670,7 +1687,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return type > 0;
     }
 
-    private static MessagePayload buildMessagePayload(BridgeConfig config, String talker, String content, Integer isSend, Long msgId, Long createTime, int type, String mediaHint, byte[] lvbuffer) {
+    private static MessagePayload buildMessagePayload(BridgeConfig config, String talker, String content, Integer isSend, Long msgId, Long createTime, int type, byte[] lvbuffer) {
         MessagePayload payload = new MessagePayload();
         String normalizedTalker = talker == null ? "" : talker.trim();
         boolean chatroom = isChatroomTalker(normalizedTalker);
@@ -1688,7 +1705,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         payload.text = text;
         payload.messageType = type;
         payload.createTime = normalizeCreateTime(createTime);
-        attachMedia(config, payload, type, mediaHint);
+        payload.mediaKind = mediaKindForMessageType(type);
 
         boolean sent = isSend != null && isSend == 1;
         if (sent) {
@@ -1715,34 +1732,71 @@ public final class HookEntry implements IXposedHookLoadPackage {
         return payload;
     }
 
-    private static void attachMedia(BridgeConfig config, MessagePayload payload, int type, String mediaHint) {
-        String kind = mediaKindForMessageType(type);
-        if (isBlank(kind)) {
-            return;
+    private static final class PendingIncomingImage {
+        final RuntimeAccount account;
+        final long messageId, createTime, limit, startedAt;
+        MessagePayload payload;
+        String error = "";
+        PendingIncomingImage(RuntimeAccount account, MessagePayload source, long limit) {
+            this.account = account;
+            this.messageId = source.eventId;
+            this.createTime = source.createTime;
+            this.limit = limit;
+            this.startedAt = android.os.SystemClock.elapsedRealtime();
         }
-        payload.mediaKind = kind;
-        if (!config.mediaUploadEnabled) {
-            return;
+    }
+
+    /** No sleep or native download: retry cached bytes during normal ordered polls. */
+    private static MessagePayload incomingImagePayload(BridgeConfig config, MessagePayload payload, int isSend) {
+        RuntimeAccount account = config.runtimeAccount;
+        if (PENDING_IMAGE == null || PENDING_IMAGE.account != account
+                || PENDING_IMAGE.messageId != payload.eventId || PENDING_IMAGE.createTime != payload.createTime
+                || PENDING_IMAGE.limit != config.mediaUploadLimitBytes) {
+            PENDING_IMAGE = new PendingIncomingImage(account, payload, config.mediaUploadLimitBytes);
         }
-        File file = resolveMediaFile(config.runtimeAccount, type, mediaHint);
-        if (file == null || !file.isFile()) {
-            return;
+        PendingIncomingImage pending = PENDING_IMAGE;
+        if (pending.payload != null) {
+            // Authentication may rotate while a stable event waits for an HTTP retry.
+            pending.payload.apiKey = config.apiKey;
+            pending.payload.accountSession = account.session.id;
+            pending.payload.device = config.device;
+            return pending.payload;
         }
-        long length = file.length();
-        if (length <= 0 || length > config.mediaUploadLimitBytes) {
-            log("skip media upload type=" + type + " size=" + length + " path=" + file.getAbsolutePath());
-            return;
-        }
+        String unavailable = "[图片暂不可用：微信尚未缓存可读取图片]";
+        boolean terminal = false;
         try {
-            byte[] bytes = readFileBytes(file, config.mediaUploadLimitBytes);
-            String mime = detectMediaMime(type, file, bytes);
-            payload.mediaMime = mime;
-            payload.mediaName = mediaUploadName(file, mime, payload.id);
-            payload.mediaSize = bytes.length;
-            payload.mediaBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP);
-        } catch (Throwable t) {
-            log("read media failed type=" + type + " hint=" + mediaHint + " error=" + shortError(t));
+            if (!isCurrentAccount(account)) return null;
+            if (IMAGE_READER == null) {
+                WeChatVersionProfile profile = currentWeChatVersionProfile();
+                IMAGE_READER = new WeChat8080ImageReader(runtimeClassLoader(WECHAT_CLASS_LOADER),
+                        profile.versionName, profile.versionCode);
+            }
+            WeChat8080ImageReader.Image image = IMAGE_READER.read(payload.chatId, payload.eventId, isSend,
+                    config.mediaUploadLimitBytes);
+            if (!isCurrentAccount(account)) return null;
+            if (image != null) {
+                payload.mediaMime = image.mime;
+                payload.mediaName = image.name;
+                if (image.thumbnail) payload.text = "[图片（微信缓存缩略图，细节可能不清晰）]";
+                payload.mediaSize = image.bytes.length;
+                payload.mediaBase64 = Base64.encodeToString(image.bytes, Base64.NO_WRAP);
+                pending.payload = payload;
+                return payload;
+            }
+            pending.error = IMAGE_READER.lastFailure();
+        } catch (UnsupportedOperationException unsupported) {
+            unavailable = "[图片暂不可用：当前微信版本尚未验证图片读取]";
+            terminal = true;
+        } catch (Throwable unreadable) {
+            // Incomplete native storage is common immediately after insertion.
+            // Resolve it on a later poll without blocking WeChat or retrying sends.
+            pending.error = shortError(unreadable);
         }
+        if (!terminal && android.os.SystemClock.elapsedRealtime() - pending.startedAt < 5000L) return null;
+        if (!pending.error.isEmpty()) log("image read unavailable msgId=" + payload.eventId + " error=" + pending.error);
+        payload.text = unavailable;
+        pending.payload = payload;
+        return payload;
     }
 
     private static String mediaKindForMessageType(int type) {
@@ -1763,270 +1817,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
             default:
                 return "";
         }
-    }
-
-    private static File resolveMediaFile(RuntimeAccount account, int type, String mediaHint) {
-        if (account == null) {
-            return null;
-        }
-        List<String> names = mediaCandidateNames(type, mediaHint);
-        if (names.isEmpty()) {
-            return null;
-        }
-        File direct = directMediaFile(mediaHint);
-        if (direct != null && account.ownsDatabase(direct.getAbsolutePath())) {
-            return direct;
-        }
-        File profile = new File(account.directory);
-        String[] roots = mediaSearchRoots(type);
-        for (String rootName : roots) {
-            File found = findNamedFile(new File(profile, rootName), names, 5, new int[]{0});
-            if (found != null && account.ownsDatabase(found.getAbsolutePath())) {
-                return found;
-            }
-        }
-        return null;
-    }
-
-    private static File directMediaFile(String mediaHint) {
-        if (isBlank(mediaHint)) {
-            return null;
-        }
-        String[] candidates = new String[]{mediaHint.trim(), normalizeMediaHint(mediaHint)};
-        Context context = APP_CONTEXT;
-        File appRoot = null;
-        if (context != null && context.getFilesDir() != null) {
-            appRoot = context.getFilesDir().getParentFile();
-        }
-        for (String candidate : candidates) {
-            if (isBlank(candidate)) {
-                continue;
-            }
-            File direct = new File(candidate);
-            if (direct.isFile()) {
-                return direct;
-            }
-            if (appRoot != null) {
-                File relative = new File(appRoot, candidate);
-                if (relative.isFile()) {
-                    return relative;
-                }
-            }
-        }
-        return null;
-    }
-
-    private static List<String> mediaCandidateNames(int type, String mediaHint) {
-        List<String> names = new ArrayList<>();
-        String normalized = normalizeMediaHint(mediaHint);
-        addMediaCandidate(names, normalized);
-        int slash = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf(File.separatorChar));
-        if (slash >= 0 && slash + 1 < normalized.length()) {
-            addMediaCandidate(names, normalized.substring(slash + 1));
-        }
-        List<String> snapshot = new ArrayList<>(names);
-        for (String candidate : snapshot) {
-            if (type == 3 && candidate.startsWith("th_") && candidate.length() > 3) {
-                addMediaCandidate(names, candidate.substring(3));
-            }
-            if (type == 34 && candidate.indexOf('.') < 0) {
-                addMediaCandidate(names, candidate + ".amr");
-                addMediaCandidate(names, candidate + ".silk");
-            }
-        }
-        return names;
-    }
-
-    private static String normalizeMediaHint(String mediaHint) {
-        if (isBlank(mediaHint)) {
-            return "";
-        }
-        String value = mediaHint.trim();
-        int query = value.indexOf('?');
-        if (query >= 0) {
-            value = value.substring(0, query);
-        }
-        int scheme = value.indexOf("://");
-        if (scheme >= 0 && scheme + 3 < value.length()) {
-            value = value.substring(scheme + 3);
-        }
-        return value.trim();
-    }
-
-    private static void addMediaCandidate(List<String> names, String name) {
-        if (isBlank(name)) {
-            return;
-        }
-        String value = name.trim();
-        for (String existing : names) {
-            if (existing.equals(value)) {
-                return;
-            }
-        }
-        names.add(value);
-    }
-
-    private static String[] mediaSearchRoots(int type) {
-        switch (type) {
-            case 3:
-                return new String[]{"image2"};
-            case 34:
-                return new String[]{"voice2"};
-            case 43:
-            case 62:
-                return new String[]{"video"};
-            case 49:
-                return new String[]{"attachment", "openapi", "image2"};
-            default:
-                return new String[]{"image2", "voice2", "video", "attachment"};
-        }
-    }
-
-    private static File findNamedFile(File root, List<String> names, int depth, int[] visited) {
-        if (root == null || !root.isDirectory() || depth < 0 || visited[0] > 6000) {
-            return null;
-        }
-        File[] files = root.listFiles();
-        if (files == null) {
-            return null;
-        }
-        for (File file : files) {
-            if (file == null) {
-                continue;
-            }
-            visited[0]++;
-            if (file.isFile() && mediaNameMatches(file.getName(), names)) {
-                return file;
-            }
-        }
-        for (File file : files) {
-            if (file != null && file.isDirectory()) {
-                File found = findNamedFile(file, names, depth - 1, visited);
-                if (found != null) {
-                    return found;
-                }
-            }
-        }
-        return null;
-    }
-
-    private static boolean mediaNameMatches(String fileName, List<String> names) {
-        if (isBlank(fileName)) {
-            return false;
-        }
-        for (String name : names) {
-            if (fileName.equals(name)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static byte[] readFileBytes(File file, long limit) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buffer = new byte[8192];
-        long total = 0L;
-        try (FileInputStream input = new FileInputStream(file)) {
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                total += read;
-                if (total > limit) {
-                    throw new IOException("media file exceeds limit");
-                }
-                out.write(buffer, 0, read);
-            }
-        }
-        return out.toByteArray();
-    }
-
-    private static String detectMediaMime(int type, File file, byte[] bytes) {
-        String name = file == null ? "" : file.getName().toLowerCase(Locale.US);
-        if (name.endsWith(".jpg") || name.endsWith(".jpeg") || startsWith(bytes, new byte[]{(byte) 0xff, (byte) 0xd8})) {
-            return "image/jpeg";
-        }
-        if (name.endsWith(".png") || startsWith(bytes, new byte[]{(byte) 0x89, 0x50, 0x4e, 0x47})) {
-            return "image/png";
-        }
-        if (name.endsWith(".gif") || startsWith(bytes, new byte[]{0x47, 0x49, 0x46})) {
-            return "image/gif";
-        }
-        if (name.endsWith(".webp") || containsAsciiAt(bytes, "WEBP", 8)) {
-            return "image/webp";
-        }
-        if (name.endsWith(".mp4") || containsAsciiAt(bytes, "ftyp", 4)) {
-            return "video/mp4";
-        }
-        if (name.endsWith(".amr") || startsWith(bytes, "#!AMR".getBytes(StandardCharsets.US_ASCII))) {
-            return "audio/amr";
-        }
-        if (type == 34) {
-            return "audio/amr";
-        }
-        if (type == 3) {
-            return "image/jpeg";
-        }
-        if (type == 43 || type == 62) {
-            return "video/mp4";
-        }
-        return "application/octet-stream";
-    }
-
-    private static boolean startsWith(byte[] bytes, byte[] prefix) {
-        if (bytes == null || prefix == null || bytes.length < prefix.length) {
-            return false;
-        }
-        for (int i = 0; i < prefix.length; i++) {
-            if (bytes[i] != prefix[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static boolean containsAsciiAt(byte[] bytes, String text, int offset) {
-        if (bytes == null || text == null || offset < 0 || bytes.length < offset + text.length()) {
-            return false;
-        }
-        byte[] expected = text.getBytes(StandardCharsets.US_ASCII);
-        for (int i = 0; i < expected.length; i++) {
-            if (bytes[offset + i] != expected[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static String mediaUploadName(File file, String mime, String id) {
-        String name = file == null ? "" : file.getName();
-        if (isBlank(name)) {
-            name = isBlank(id) ? "media" : "media-" + id;
-        }
-        if (name.indexOf('.') >= 0) {
-            return name;
-        }
-        return name + extensionForMime(mime);
-    }
-
-    private static String extensionForMime(String mime) {
-        if ("image/png".equals(mime)) {
-            return ".png";
-        }
-        if ("image/gif".equals(mime)) {
-            return ".gif";
-        }
-        if ("image/webp".equals(mime)) {
-            return ".webp";
-        }
-        if ("audio/amr".equals(mime)) {
-            return ".amr";
-        }
-        if ("video/mp4".equals(mime)) {
-            return ".mp4";
-        }
-        if ("image/jpeg".equals(mime)) {
-            return ".jpg";
-        }
-        return ".bin";
     }
 
     private static String displayMessageText(String talker, String content, int type) {
@@ -2550,7 +2340,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 + "\"device\":\"" + json(config.device) + "\","
                 + "\"wxid\":\"" + json(config.selfWxid) + "\","
                 + "\"account_session\":\"" + json(requestSession.id) + "\","
-                + "\"file_protocol\":" + (acceptFile ? 1 : 0) + ","
+                + "\"file_protocol\":" + (acceptFile ? attachmentProtocol(classLoader) : 0) + ","
                 + "\"limit\":" + (acceptFile ? 1 : config.pollLimit)
                 + "}";
         long started = System.currentTimeMillis();
@@ -2588,6 +2378,15 @@ public final class HookEntry implements IXposedHookLoadPackage {
                     currentWeChatVersionProfile().versionName, currentWeChatVersionProfile().versionCode);
             return true;
         } catch (Throwable unsupported) { return false; }
+    }
+
+    private static synchronized int attachmentProtocol(ClassLoader loader) {
+        if (!fileDeliverySupported(loader)) return 0;
+        try {
+            if (IMAGE_ADAPTER == null) IMAGE_ADAPTER = new WeChat8080ImageAdapter(loader,
+                    currentWeChatVersionProfile().versionName, currentWeChatVersionProfile().versionCode);
+            return 2;
+        } catch (Throwable unsupported) { return 1; }
     }
 
     private static FileDeliveryWorker.Host fileHost(final BridgeConfig config, final ClassLoader loader) throws Exception {
@@ -2647,7 +2446,10 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 FutureTask<Void> task = new FutureTask<>(() -> {
                     validate();
                     if (!isWeChatReadyForSend(loader)) throw new IllegalStateException("WeChat send stack unavailable");
-                    FILE_ADAPTER.submit(job, source, observer);
+                    if (job.isImage()) {
+                        if (attachmentProtocol(loader) < 2) throw new IOException("Native image binding unavailable");
+                        IMAGE_ADAPTER.submit(job, source, observer);
+                    } else FILE_ADAPTER.submit(job, source, observer);
                     return null;
                 });
                 if (!main.post(task)) throw new IOException("Main thread rejected file handoff");
@@ -2661,7 +2463,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
             }
             @Override public WeChat8079FileAdapter.Proof inspect(FileJob job, long messageId) throws Exception {
                 validateCached();
-                WeChat8079FileAdapter.Proof proof = FILE_ADAPTER.inspect(job, messageId);
+                WeChat8079FileAdapter.Proof proof;
+                if (job.isImage()) {
+                    if (attachmentProtocol(loader) < 2) throw new IOException("Native image binding unavailable");
+                    proof = IMAGE_ADAPTER.inspect(job, messageId);
+                } else proof = FILE_ADAPTER.inspect(job, messageId);
                 validateCached();
                 return proof;
             }
@@ -2776,7 +2582,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 + "&device=" + urlEncode(config.device)
                 + "&wxid=" + urlEncode(config.selfWxid)
                 + "&account_session=" + urlEncode(streamSession.id)
-                + "&file_protocol=" + (fileDeliverySupported(classLoader) ? "1" : "0");
+                + "&file_protocol=" + attachmentProtocol(classLoader);
         byte[] nonce = new byte[16];
         new SecureRandom().nextBytes(nonce);
         String key = Base64.encodeToString(nonce, Base64.NO_WRAP);
@@ -2894,7 +2700,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
         }
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
-            if ("file".equals(item.optString("kind"))) {
+            if ("file".equals(item.optString("kind")) || "image".equals(item.optString("kind"))) {
                 if (fileDeliverySupported(classLoader)) {
                     try { FILE_WORKER.enqueue(item, fileHost(config, classLoader)); }
                     catch (Exception rejected) { log("file outbox id=" + item.optLong("id") + " stage=rejected"); }

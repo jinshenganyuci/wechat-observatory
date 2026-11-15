@@ -83,6 +83,14 @@ func TestMessageIdentityV2MySQLIntegration(t *testing.T) {
 		}
 	}
 
+	resolved, found, err := store.InboundEventByKey(ctx, base.EventKey)
+	if err != nil || !found || resolved.Sequence != sequence {
+		t.Fatal("durable image replay lookup", resolved, found, err)
+	}
+	if _, found, err = store.InboundEventByKey(ctx, "not-a-stored-event"); err != nil || found {
+		t.Fatal("missing replay lookup", found, err)
+	}
+
 	changed := base
 	changed.CreateTime++
 	changed.EventKey = changed.CanonicalEventKeyV2()

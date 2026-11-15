@@ -75,8 +75,8 @@ func (o *MemoryOutbox) PollReplyActions(_ context.Context, req ModulePollRequest
 		if o.items[i].Status != "pending" && !(o.items[i].Status == "leased" && o.items[i].leaseUntil.Before(now)) {
 			continue
 		}
-		if o.items[i].Kind == "file" {
-			if req.FileProtocol != 1 || req.InstanceID == "" || req.AccountSession == "" {
+		if IsAttachmentKind(o.items[i].Kind) {
+			if (req.FileProtocol < 1 || (o.items[i].Kind == "image" && req.FileProtocol < 2)) || req.InstanceID == "" || req.AccountSession == "" {
 				continue
 			}
 			expires, _ := time.Parse(time.RFC3339, o.items[i].Attachment.ExpiresAt)
@@ -106,7 +106,7 @@ func (o *MemoryOutbox) AckReplyActions(_ context.Context, req ModuleAckRequest) 
 	out := []ModuleOutboxItem{}
 	for i := range o.items {
 		ack, ok := acks[o.items[i].ID]
-		if ok && o.items[i].Kind == "file" {
+		if ok && IsAttachmentKind(o.items[i].Kind) {
 			if item, accepted := o.ackFile(&o.items[i], req, ack, now); accepted {
 				out = append(out, item)
 			}

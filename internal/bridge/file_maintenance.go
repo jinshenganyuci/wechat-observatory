@@ -15,6 +15,7 @@ var ErrFileTaskNotFound = errors.New("file task not found")
 
 // This admin DTO deliberately excludes credentials and the module lease token.
 type FileTaskView struct {
+	Kind                 string         `json:"kind"`
 	ID                   int64          `json:"id"`
 	Device               string         `json:"device"`
 	OwnerWxID            string         `json:"owner_wxid"`

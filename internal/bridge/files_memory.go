@@ -15,6 +15,9 @@ type memoryFile struct {
 func (o *MemoryOutbox) EnqueueFile(_ context.Context, req FileEnqueue) (ModuleOutboxItem, bool, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if req.Kind == "" {
+		req.Kind = "file"
+	}
 	if o.files == nil {
 		o.files = map[string]*memoryFile{}
 	}
@@ -28,7 +31,7 @@ func (o *MemoryOutbox) EnqueueFile(_ context.Context, req FileEnqueue) (ModuleOu
 				return item.ModuleOutboxItem, true, nil
 			}
 		}
-		return ModuleOutboxItem{ID: old.outboxID, Kind: "file", Attachment: &old.request.Attachment}, true, nil
+		return ModuleOutboxItem{ID: old.outboxID, Kind: old.request.Kind, Attachment: &old.request.Attachment}, true, nil
 	}
 	if !req.AllowNew {
 		return ModuleOutboxItem{}, false, ErrAccountSession
@@ -39,7 +42,7 @@ func (o *MemoryOutbox) EnqueueFile(_ context.Context, req FileEnqueue) (ModuleOu
 	o.nextID++
 	now := formatRFC3339(o.now())
 	attachment := req.Attachment
-	item := ModuleOutboxItem{ID: o.nextID, Kind: "file", Device: req.Device, OwnerWxID: req.OwnerWxID, WxID: req.WxID, Attachment: &attachment, Status: "pending", CreatedAt: now, UpdatedAt: now}
+	item := ModuleOutboxItem{ID: o.nextID, Kind: req.Kind, Device: req.Device, OwnerWxID: req.OwnerWxID, WxID: req.WxID, Attachment: &attachment, Status: "pending", CreatedAt: now, UpdatedAt: now}
 	o.items = append(o.items, memoryOutboxItem{ModuleOutboxItem: item})
 	o.files[key] = &memoryFile{request: req, outboxID: item.ID}
 	return item, false, nil
@@ -50,7 +53,7 @@ func (o *MemoryOutbox) OperateFile(_ context.Context, req FileOperation) (result
 	defer o.mu.Unlock()
 	for i := range o.items {
 		item := &o.items[i]
-		if item.ID != req.ID || item.Kind != "file" {
+		if item.ID != req.ID || !IsAttachmentKind(item.Kind) {
 			continue
 		}
 		if item.Device != req.Device || item.OwnerWxID != req.WxID || req.InstanceID == "" || item.fileInstance != req.InstanceID {

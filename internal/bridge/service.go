@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -41,6 +42,7 @@ type Service struct {
 
 	diagnostics diagnosticDeduper
 	fileSpool   *FileSpool
+	imageSpool  *FileSpool
 }
 
 const maxOutboxPollBatch = 1
@@ -73,6 +75,7 @@ func (e *IngestPersistenceError) Unwrap() error {
 
 type Config struct {
 	FileSpool              *FileSpool
+	ImageSpool             *FileSpool
 	DefaultDevice          string
 	Devices                map[string]config.Device
 	APIKeys                map[string]config.APIKey
@@ -87,6 +90,7 @@ type Config struct {
 func NewService(cfg Config, opts ...Option) *Service {
 	service := &Service{
 		fileSpool:            cfg.FileSpool,
+		imageSpool:           cfg.ImageSpool,
 		cfg:                  cfg,
 		accountCurrent:       map[string]AccountBinding{},
 		accountHistory:       map[string]AccountBinding{},
@@ -422,24 +426,37 @@ func (s *Service) ingest(ctx context.Context, event MessageEvent) (*IngestResult
 	if err != nil {
 		return nil, err
 	}
-	if event.Device == "" {
-		event.Device = auth.Device
-	}
+	event.Device = auth.Device
 	if event.Direction == "" {
 		event.Direction = DirectionRecv
 	}
 	if event.MessageType == 0 {
 		event.MessageType = 1
 	}
-	sourceCreateTime := event.CreateTime
 	event = event.Normalize()
 	mediaError := ""
-	if stored, err := s.StoreMediaAttachment(event); err != nil {
-		event.MediaBase64 = ""
-		mediaError = err.Error()
-	} else {
-		event = stored
+	storedMedia, mediaErr := s.StoreMediaAttachment(ctx, event)
+	event = storedMedia
+	if mediaErr != nil {
+		var validation *IngestValidationError
+		if errors.As(mediaErr, &validation) {
+			return nil, validation
+		}
+		if !errors.Is(mediaErr, ErrInvalidImage) && !errors.Is(mediaErr, ErrImageTooLarge) {
+			return nil, &IngestPersistenceError{Err: fmt.Errorf("store image: %w", mediaErr)}
+		}
+		mediaError = mediaErr.Error()
+		if event.Text == "" {
+			event.Text = "[图片不可用]"
+		}
 	}
+	imageID := inboundImageID(event.MediaURL)
+	retainImage := false
+	defer func() {
+		if imageID != "" && !retainImage {
+			_ = s.imageSpool.Remove(imageID)
+		}
+	}()
 	event.APIKey = ""
 	if err := event.Validate(); err != nil {
 		return nil, err
@@ -451,17 +468,9 @@ func (s *Service) ingest(ctx context.Context, event MessageEvent) (*IngestResult
 	// choose the business idempotency boundary. A v2 device must never fall
 	// back to the legacy key family because that would make a retry eligible
 	// under two durable identities.
-	event.EventKey = ""
-	if _, enabled := s.cfg.EventIdentityV2Devices[event.Device]; enabled {
-		if sourceCreateTime <= 0 {
-			return nil, &IngestValidationError{
-				Field:   "create_time",
-				Problem: "must be positive for v2 event identity",
-			}
-		}
-		event.EventKey = event.CanonicalEventKeyV2()
-	} else {
-		event.EventKey = event.CanonicalEventKey()
+	event.EventKey, err = s.messageEventKey(event)
+	if err != nil {
+		return nil, err
 	}
 	if event.CreateTime == 0 {
 		event.CreateTime = time.Now().Unix()
@@ -471,6 +480,9 @@ func (s *Service) ingest(ctx context.Context, event MessageEvent) (*IngestResult
 	if mediaError != "" {
 		result.PersistenceError = "media: " + mediaError
 	}
+	// A failed COMMIT response can still have stored this URL. Keep the blob
+	// until its bounded TTL unless a successful duplicate read proves otherwise.
+	retainImage = true
 	if s.persistence != nil {
 		stored, err := s.persistence.RecordInboundEvent(ctx, event)
 		if err != nil {
@@ -481,12 +493,25 @@ func (s *Service) ingest(ctx context.Context, event MessageEvent) (*IngestResult
 			// the persistence error for audit and keep publishing the observation.
 			result.PersistenceError = err.Error()
 		} else {
+			if imageID != "" && stored.MediaURL != event.MediaURL {
+				retainImage = false
+			}
 			event = stored
 		}
 	}
 	s.hub.Publish(event)
 	result.Published = true
 	return result, nil
+}
+
+func (s *Service) messageEventKey(event MessageEvent) (string, error) {
+	if _, enabled := s.cfg.EventIdentityV2Devices[event.Device]; enabled {
+		if event.CreateTime <= 0 {
+			return "", &IngestValidationError{Field: "create_time", Problem: "must be positive for v2 event identity"}
+		}
+		return event.CanonicalEventKeyV2(), nil
+	}
+	return event.CanonicalEventKey(), nil
 }
 
 func (s *Service) sendText(ctx context.Context, req SendTextRequest) (int64, error) {
@@ -657,7 +682,7 @@ func (s *Service) ackOutbox(ctx context.Context, req ModuleAckRequest) ([]Module
 		acks[ack.ID] = ack
 	}
 	for _, item := range items {
-		if item.Kind == "file" {
+		if IsAttachmentKind(item.Kind) {
 			s.notifyOutbox(req.Device)
 			// Native file observations own chat history. An ACK proves a task
 			// result, not the exact WeChat XML/type/timestamp of that message.

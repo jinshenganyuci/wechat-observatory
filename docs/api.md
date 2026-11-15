@@ -134,6 +134,8 @@ curl -X POST \
 
 ## 实时事件
 
+图片消息使用 `POST /api/send/image`，multipart 字段与文件接口相同，JPEG/PNG 单张最大 8 MiB；复用原发送状态与清理接口。入站图片经管理员鉴权通过 `GET /api/media/images/{id}` 读取，有效期 24 小时。详见[图片收发](images.md)。
+
 ```bash
 curl -N -H "X-Bridge-Password: your-admin-password" \
   http://127.0.0.1:8088/api/live/events

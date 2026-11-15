@@ -193,9 +193,10 @@ Message payloads may include:
 - `media_base64`
 - `media_url`
 
-If `media_base64` is present, the gateway discards the raw bytes before
-persistence. The current transport deployment does not create a `media_url`
-or expose a media download endpoint.
+For image events, a bounded JPEG/PNG `media_base64` can be stored in the private
+incoming-image spool. The gateway supplies its own authenticated
+`/api/media/images/{id}` URL, valid for 24 hours, and never trusts a module-supplied
+URL. Non-image raw media is discarded. See [image transport](images.md).
 
 If media bytes are missing, the event is still valid when `text` carries a
 placeholder such as `[图片]` or `[语音]` and `media_kind` identifies the attachment.

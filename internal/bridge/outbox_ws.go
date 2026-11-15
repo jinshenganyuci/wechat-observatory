@@ -43,8 +43,11 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 	wxid := strings.TrimSpace(r.URL.Query().Get("wxid"))
 	accountSession := strings.TrimSpace(r.URL.Query().Get("account_session"))
 	fileProtocol := 0
-	if r.URL.Query().Get("file_protocol") == "1" {
+	switch r.URL.Query().Get("file_protocol") {
+	case "1":
 		fileProtocol = 1
+	case "2":
+		fileProtocol = 2
 	}
 	if device == "" {
 		device = s.service.DefaultDevice()
@@ -148,7 +151,7 @@ func (s *HTTPServer) outboxWebSocket(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 		inFlight = true
-		inFlightID, inFlightFile = items[0].ID, items[0].Kind == "file"
+		inFlightID, inFlightFile = items[0].ID, IsAttachmentKind(items[0].Kind)
 		return true
 	}
 	// File workers ACK over HTTP so their socket reader keeps serving Pings.

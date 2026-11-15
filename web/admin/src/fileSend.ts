@@ -1,4 +1,6 @@
 export const MAX_FILE_BYTES = 300 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+export type AttachmentKind = "file" | "image";
 
 const MEDIA_EXTENSIONS = new Set([
   "jpg", "jpeg", "bmp", "png", "tif", "tiff", "heic", "heif", "webp",
@@ -7,7 +9,7 @@ const MEDIA_EXTENSIONS = new Set([
 
 export type FileSendScope = { device: string; ownerWxid: string; generation: number; wxid: string };
 export type FileSendDraft = {
-  file?: File; name: string; size: number; key: string; scope: FileSendScope;
+  kind?: AttachmentKind; file?: File; name: string; size: number; key: string; scope: FileSendScope;
   stage: "ready" | "submitting" | "unknown" | "rejected";
   message: string;
 };
@@ -16,7 +18,7 @@ const PENDING_FILE_KEY = "wgc_pending_file_request";
 
 /** Store only retry identity, never file bytes or credentials. Write before the POST. */
 export function persistFileRequest(draft: FileSendDraft, storage: Pick<Storage, "setItem"> = sessionStorage) {
-  storage.setItem(PENDING_FILE_KEY, JSON.stringify({ name: draft.name, size: draft.size,
+  storage.setItem(PENDING_FILE_KEY, JSON.stringify({ kind: draft.kind ?? "file", name: draft.name, size: draft.size,
     key: draft.key, scope: draft.scope }));
 }
 
@@ -24,10 +26,11 @@ export function restoreFileRequest(storage: Pick<Storage, "getItem"> = sessionSt
   try {
     const value = JSON.parse(storage.getItem(PENDING_FILE_KEY) || "null");
     if (!value || typeof value.name !== "string" || !value.name || !Number.isSafeInteger(value.size)
-      || value.size <= 0 || value.size > MAX_FILE_BYTES || !/^file-[a-f0-9]{32}$/.test(value.key)
+      || value.size <= 0 || value.size > (value.kind === "image" ? MAX_IMAGE_BYTES : MAX_FILE_BYTES)
+      || (value.kind !== undefined && value.kind !== "file" && value.kind !== "image") || !/^file-[a-f0-9]{32}$/.test(value.key)
       || !value.scope || ![value.scope.device, value.scope.ownerWxid, value.scope.wxid].every(v => typeof v === "string" && !!v)
       || !Number.isSafeInteger(value.scope.generation) || value.scope.generation <= 0) return null;
-    return { name: value.name, size: value.size, key: value.key, scope: value.scope,
+    return { kind: value.kind ?? "file", name: value.name, size: value.size, key: value.key, scope: value.scope,
       stage: "unknown", message: "原请求结果未确认。请重新选择原文件，以原请求标识核查或重试。" };
   } catch { return null; }
 }
@@ -39,8 +42,9 @@ export function clearFileRequest(storage: Pick<Storage, "getItem" | "removeItem"
   } catch { /* No new request is created by cleanup. */ }
 }
 
-export function fileValidationError(file: Pick<File, "name" | "size">) {
+export function fileValidationError(file: Pick<File, "name" | "size">, kind: AttachmentKind = "file") {
   if (file.size <= 0) return "请选择非空文件。";
+  if (kind === "image" && file.size > MAX_IMAGE_BYTES) return "图片不能超过 8 MiB。";
   if (file.size > MAX_FILE_BYTES) return "文件不能超过 300 MiB。";
   if (!file.name || file.name === "." || file.name === ".."
     || new TextEncoder().encode(file.name).length > 240
@@ -49,6 +53,7 @@ export function fileValidationError(file: Pick<File, "name" | "size">) {
     return "文件名不能超过 240 UTF-8 字节，且不能包含路径分隔符、控制字符或首尾空白。";
   }
   const lastDot = file.name.lastIndexOf(".");
+  if (kind === "image") return /\.(jpe?g|png)$/i.test(file.name) ? "" : "请选择 JPEG 或 PNG 图片。";
   if (lastDot >= 0 && MEDIA_EXTENSIONS.has(file.name.slice(lastDot + 1).toLowerCase())) {
     return "暂不支持图片或视频文件，请选择文档、压缩包等普通文件。";
   }

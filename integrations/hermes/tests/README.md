@@ -96,6 +96,23 @@ connection. The official CI targets are:
 - v0.22.2: `d923a5eb487a17c0a68801bba9ef0f56c81040a8`
 - Current deployment baseline: `6e9b3e3b8852f12bf965f888213470574b72803e`
 
+The 0.5.0 image extension was additionally checked against the deployed stock
+`491f9845833cb0a005a744aa9a81aea8d8bc2b48` on Debian. The plugin, shared delivery
+and setup suites pass 108 cases; 318 selected upstream media-cache, delivery
+recovery and Feishu cases also pass. The first run exposed older test fixtures
+missing newly added cron target fields; only the fixtures were updated. No
+Hermes core or Feishu sources were changed. These are isolated transport tests,
+not a claim that a physical phone or vision provider has received the image.
+
+Image cases cover native PHOTO events with private local cache paths, temporary
+fetch failure without advancing the cursor, expired-image notices, unchanged
+account/group authorization, authenticated same-origin retrieval with integrity
+checks, native reply/CLI/cron image dispatch, preservation of source images,
+and retrying a lost upload receipt with the original key, including a remote
+image downloaded to different randomly named cache files. Thumbnail quality
+notices survive the adapter boundary. All image fixtures
+are small; the 8 MiB cap is checked by temporarily lowering the limit.
+
 No target applies an Observatory core patch. Plugin compatibility declarations
 are broader than these concrete regression targets; they are not a claim that
 all future upstream commits have passed. CI also checks that tracked Hermes

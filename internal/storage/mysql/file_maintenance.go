@@ -9,7 +9,7 @@ import (
 	"wechat-observatory/internal/bridge"
 )
 
-const fileTaskViewColumns = `o.id,o.device,o.owner_wxid,o.wxid,o.status,o.attempt_count,
+const fileTaskViewColumns = `o.kind,o.id,o.device,o.owner_wxid,o.wxid,o.status,o.attempt_count,
  o.chat_record_id,o.last_error,o.created_at,o.updated_at,o.lease_until,o.native_started_at,
  a.id,a.name,a.size,a.sha256,a.expires_at,a.bytes_removed,
  a.cleanup_requested_at,a.cleanup_updated_at,a.cleanup_last_error,CURRENT_TIMESTAMP(6)`
@@ -21,7 +21,7 @@ func scanFileTaskView(row interface{ Scan(...any) error }) (v bridge.FileTaskVie
 	var lease, started, requested, cleaned sql.NullTime
 	var created, updated, expires, now time.Time
 	var removed bool
-	err = row.Scan(&v.ID, &v.Device, &v.OwnerWxID, &v.WxID, &v.Status, &v.AttemptCount, &record, &lastError,
+	err = row.Scan(&v.Kind, &v.ID, &v.Device, &v.OwnerWxID, &v.WxID, &v.Status, &v.AttemptCount, &record, &lastError,
 		&created, &updated, &lease, &started, &v.Attachment.ID, &v.Attachment.Name, &v.Attachment.Size, &v.Attachment.SHA256,
 		&expires, &removed, &requested, &cleaned, &cleanupError, &now)
 	if err != nil {
@@ -57,7 +57,7 @@ func (s *Store) ListFileTasks(ctx context.Context, filter bridge.FileTaskFilter)
 	if err != nil {
 		return nil, err
 	}
-	query := "SELECT " + fileTaskViewColumns + fileTaskViewJoin + " WHERE o.kind='file' AND o.device=? AND o.owner_wxid=?"
+	query := "SELECT " + fileTaskViewColumns + fileTaskViewJoin + " WHERE o.kind IN ('file','image') AND o.device=? AND o.owner_wxid=?"
 	args := []any{filter.Device, filter.OwnerWxID}
 	if filter.BeforeID > 0 {
 		query += " AND o.id<?"
@@ -87,7 +87,7 @@ func (s *Store) ListFileTasks(ctx context.Context, filter bridge.FileTaskFilter)
 	return views, rows.Err()
 }
 func (s *Store) FileTaskViewByID(ctx context.Context, id int64, device, owner string) (v bridge.FileTaskView, found bool, err error) {
-	v, err = scanFileTaskView(s.executor(ctx).QueryRowContext(ctx, "SELECT "+fileTaskViewColumns+fileTaskViewJoin+" WHERE o.kind='file' AND o.id=? AND o.device=? AND o.owner_wxid=?", id, device, owner))
+	v, err = scanFileTaskView(s.executor(ctx).QueryRowContext(ctx, "SELECT "+fileTaskViewColumns+fileTaskViewJoin+" WHERE o.kind IN ('file','image') AND o.id=? AND o.device=? AND o.owner_wxid=?", id, device, owner))
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, false, nil
 	}
@@ -101,7 +101,7 @@ func (s *Store) RequestFileCleanup(ctx context.Context, req bridge.FileCleanupRe
 	defer tx.Rollback()
 	// The same outbox/attachment row lock used by begin and renew makes the
 	// permission check atomic. The request never clears their token or grant.
-	v, err = scanFileTaskView(tx.QueryRowContext(ctx, "SELECT "+fileTaskViewColumns+fileTaskViewJoin+" WHERE o.kind='file' AND o.id=? AND o.device=? AND o.owner_wxid=? FOR UPDATE", req.ID, req.Device, req.OwnerWxID))
+	v, err = scanFileTaskView(tx.QueryRowContext(ctx, "SELECT "+fileTaskViewColumns+fileTaskViewJoin+" WHERE o.kind IN ('file','image') AND o.id=? AND o.device=? AND o.owner_wxid=? FOR UPDATE", req.ID, req.Device, req.OwnerWxID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, bridge.ErrFileTaskNotFound
 	}

@@ -131,7 +131,7 @@ public final class OutgoingFileJournal {
         if (record.data.optBoolean("intent_recorded")) throw new IOException("Native begin intent is immutable");
         FileJob previous = new FileJob(record.data.getJSONObject("item")), next = new FileJob(item);
         if (previous.id != next.id || !previous.owner.equals(next.owner) || !previous.recipient.equals(next.recipient)
-                || !previous.attachmentId.equals(next.attachmentId) || !previous.sha256.equals(next.sha256)
+                || !previous.kind.equals(next.kind) || !previous.attachmentId.equals(next.attachmentId) || !previous.sha256.equals(next.sha256)
                 || previous.size != next.size || !previous.name.equals(next.name)) throw new IOException("Attachment identity changed");
         release(record);
         record.data.put("item", new JSONObject(item.toString())).put("state", "prepared")
