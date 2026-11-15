@@ -59,6 +59,7 @@ public class WeChatConfigUiTest {
         assertEquals("", field("url", EditText.class).getText().toString());
         assertEquals("", field("key", EditText.class).getText().toString());
         assertFalse(field("enabled", Switch.class).isChecked());
+        assertFalse(field("images", Switch.class).isChecked());
         assertFalse(field("backgroundRealtime", Switch.class).isChecked());
         assertEquals("停用并删除配置", dialog.getButton(DialogInterface.BUTTON_NEUTRAL).getText().toString());
         assertNull("host switch backgrounds must stay isolated", field("enabled", Switch.class).getBackground());
@@ -90,6 +91,7 @@ public class WeChatConfigUiTest {
         assertEquals("", field("url", EditText.class).getText().toString());
         assertEquals("", field("key", EditText.class).getText().toString());
         assertFalse(field("enabled", Switch.class).isChecked());
+        assertFalse(field("images", Switch.class).isChecked());
         assertFalse(field("backgroundRealtime", Switch.class).isChecked());
         assertTrue(dialog.isShowing());
     }
@@ -111,6 +113,14 @@ public class WeChatConfigUiTest {
 
         field("backgroundRealtime", Switch.class).setChecked(false);
         assertEquals("0", valuesForSave().get("background_realtime_enabled"));
+    }
+
+    @Test public void imageUploadRequiresExplicitEditorSelection() throws Exception {
+        open(configured());
+        assertFalse(field("images", Switch.class).isChecked());
+        assertEquals("0", valuesForSave().get("media_upload_enabled"));
+        field("images", Switch.class).setChecked(true);
+        assertEquals("1", ConfigWriteContract.normalize(valuesForSave()).get("media_upload_enabled"));
     }
 
     @Test public void refreshAndBusyStateCoverTheProtectionSwitch() throws Exception {

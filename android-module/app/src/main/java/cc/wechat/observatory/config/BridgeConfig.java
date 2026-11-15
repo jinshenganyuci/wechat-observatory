@@ -110,7 +110,7 @@ public final class BridgeConfig {
         config.contactSyncLimit = (int) longSetting(properties, "contact_sync_limit", DEFAULT_CONTACT_SYNC_LIMIT);
         config.includeChatrooms = booleanSetting(properties, "contact_include_chatrooms", true);
         config.mediaUploadEnabled = booleanSetting(properties, "media_upload_enabled", false);
-        config.mediaUploadLimitBytes = longSetting(properties, "media_upload_limit_bytes", 5L * 1024L * 1024L);
+        config.mediaUploadLimitBytes = longSetting(properties, "media_upload_limit_bytes", 8L * 1024L * 1024L);
         config.staleMessageGraceMs = nonNegativeLongSetting(properties, "stale_message_grace_ms", DEFAULT_STALE_MESSAGE_GRACE_MS);
         config.staleMessageReplayLimit = nonNegativeIntSetting(properties, "stale_message_replay_limit", DEFAULT_STALE_MESSAGE_REPLAY_LIMIT);
         config.signature = configSignature(properties);

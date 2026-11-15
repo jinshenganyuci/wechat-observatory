@@ -81,7 +81,7 @@ cp deploy/k3s/secrets.example.yaml deploy/k3s/secrets.yaml
 
 ## 媒体文件
 
-模块上传的 `media_base64` 会在入口处丢弃；当前部署不会写附件文件，也不会生成可下载的 `media_url`。因此不需要媒体卷、对象存储或媒体备份策略。
+开启手机图片接收后，服务端将校验通过的 JPEG/PNG 保存到 `BRIDGE_FILE_SPOOL_DIR/inbound-images`，仅提供管理员鉴权下载。该目录使用独立的 256 MiB 配额与 24 小时有效期，须随父暂存目录持久化；非图片媒体仍只保留元数据。不要把此目录配置成公开静态站点。发送附件暂存与入站图片生命周期见[文件发送](file-send.md)和[图片收发](images.md)。
 
 ## 网络建议
 

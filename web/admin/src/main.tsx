@@ -1,6 +1,6 @@
 import { AccountScope, belongsToAccount } from "./accountScope";
 import { useAdminConnection, type AdminSession } from "./useAdminConnection";
-import { clearFileRequest, fileDraftMatchesScope, fileValidationError, formatFileSize, newFileRequestKey, persistFileRequest, restoreFileRequest, type FileSendDraft } from "./fileSend";
+import { clearFileRequest, fileDraftMatchesScope, fileValidationError, formatFileSize, newFileRequestKey, persistFileRequest, restoreFileRequest, type FileSendDraft, type AttachmentKind } from "./fileSend";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { formatBeijingClock, formatBeijingDateTime, formatBeijingTimeAgo } from "@/time";
@@ -41,7 +41,7 @@ import {
   getApiKeys,
   getMessages,
   getOutbox,
-  publicPath,
+  getMessageImage,
   setApiKeyEnabled,
   sendText,
   sendFile,
@@ -103,7 +103,7 @@ function App() {
   const [contactFilter, setContactFilter] = React.useState<ContactFilter>("all");
   const [autoRefresh, setAutoRefresh] = React.useState(true);
   const [sendOpen, setSendOpen] = React.useState(false);
-  const [sendMode, setSendMode] = React.useState<"text" | "file">("text");
+  const [sendMode, setSendMode] = React.useState<"text" | AttachmentKind>("text");
   const [fileDraft, setFileDraft] = React.useState<FileSendDraft | null>(() => restoreFileRequest());
   const [fileError, setFileError] = React.useState("");
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -654,7 +654,8 @@ function App() {
       setFileError("请先选择已连接的微信和会话。");
       return;
     }
-    const error = fileValidationError(file);
+    const kind = fileDraft?.kind ?? (sendMode === "image" ? "image" : "file");
+    const error = fileValidationError(file, kind);
     setFileError(error);
     if (error) return;
     if (fileDraft) {
@@ -663,7 +664,7 @@ function App() {
         return;
       }
       setFileDraft({ ...fileDraft, file });
-    } else setFileDraft({ file, name: file.name, size: file.size, key: newFileRequestKey(), scope: fileScope, stage: "ready", message: "" });
+    } else setFileDraft({ kind, file, name: file.name, size: file.size, key: newFileRequestKey(), scope: fileScope, stage: "ready", message: "" });
   };
 
   const selectFiles = (files: FileList | null) => {
@@ -695,7 +696,7 @@ function App() {
     try {
       const result = await sendFile({ password: session.password, device: submission.scope.device,
         ownerWxid: submission.scope.ownerWxid, accountGeneration: submission.scope.generation,
-        wxid: submission.scope.wxid, file, idempotencyKey: submission.key });
+        wxid: submission.scope.wxid, file, kind: submission.kind, idempotencyKey: submission.key });
       if (!result.ok || !result.outbox_id) throw new Error("未收到有效任务编号");
       // Settle only this draft. A late response must not close another chat's editor.
       clearFileRequest(sessionStorage, submission.key);
@@ -705,8 +706,8 @@ function App() {
       accountScope.current.invalidate("outbox");
       setSubmittedOutboxId(result.outbox_id); setOutboxFilter("all");
       setNotice(result.idempotent_replay
-        ? `文件任务 #${result.outbox_id} 已存在，未创建新发送；请查看发送记录`
-        : `文件任务 #${result.outbox_id} 已创建，等待微信处理；结果见发送记录`);
+        ? `${submission.kind === "image" ? "图片" : "文件"}任务 #${result.outbox_id} 已存在，未创建新发送；请查看发送记录`
+        : `${submission.kind === "image" ? "图片" : "文件"}任务 #${result.outbox_id} 已创建，等待微信处理；结果见发送记录`);
       void refreshModules().catch(error => reportError(error, "同步暂时中断，正在重试"));
     } catch (error) {
       const definiteRejection = submission.stage !== "unknown"
@@ -1189,7 +1190,11 @@ function App() {
                       {selectedModuleOffline ? "当前微信离线，请查看发送记录确认任务状态" : pendingCount > 0 ? `待发送 ${pendingCount} 条` : failedCount > 0 ? `失败 ${failedCount} 条` : "发送队列空闲"}
                     </span>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Button variant="outline" onClick={() => { setSendMode("file"); setSendOpen(true); }}
+                      <Button variant="outline" onClick={() => { setSendMode(fileDraft?.kind ?? "image"); setSendOpen(true); }}
+                        disabled={sending || selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid}>
+                        <ImageIcon className="h-4 w-4" />发送图片
+                      </Button>
+                      <Button variant="outline" onClick={() => { setSendMode(fileDraft?.kind ?? "file"); setSendOpen(true); }}
                         disabled={sending || selectedModuleOffline || !adminPassword || !selectedDevice || !selectedWxid}>
                         <Paperclip className="h-4 w-4" />
                         发送文件
@@ -1437,7 +1442,10 @@ function App() {
             </div>
             <TabsList aria-label="发送类型">
               <TabsTrigger active={sendMode === "text"} onClick={() => setSendMode("text")}>文本</TabsTrigger>
-              <TabsTrigger active={sendMode === "file"} onClick={() => setSendMode("file")}>文件</TabsTrigger>
+              <TabsTrigger active={sendMode === "image"} disabled={!!fileDraft && fileDraft.kind !== "image"}
+                onClick={() => { setSendMode("image"); setFileError(""); }}>图片</TabsTrigger>
+              <TabsTrigger active={sendMode === "file"} disabled={fileDraft?.kind === "image"}
+                onClick={() => { setSendMode("file"); setFileError(""); }}>文件</TabsTrigger>
             </TabsList>
             {sendMode === "text" ? <div className="grid gap-2">
               <Label htmlFor="send-text">消息内容</Label>
@@ -1453,42 +1461,56 @@ function App() {
               <div data-testid="file-dropzone" className="grid justify-items-center gap-3 rounded-md border-2 border-dashed p-5 text-center"
                 onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
                 onDrop={event => { event.preventDefault(); event.stopPropagation(); selectFiles(event.dataTransfer.files); }}>
-                <Paperclip className="h-6 w-6 text-muted-foreground" />
-                <p className="text-sm">将一个文件拖到这里，或点击按钮选择</p>
-                <input ref={fileInputRef} id="send-file" aria-label="选择文件" type="file" className="hidden"
+                {sendMode === "image" ? <ImageIcon className="h-6 w-6 text-muted-foreground" /> : <Paperclip className="h-6 w-6 text-muted-foreground" />}
+                <p className="text-sm">将{sendMode === "image" ? "一张图片" : "一个文件"}拖到这里，或点击按钮选择</p>
+                <input ref={fileInputRef} id="send-file" aria-label={sendMode === "image" ? "选择图片" : "选择文件"}
+                  accept={sendMode === "image" ? "image/jpeg,image/png,.jpg,.jpeg,.png" : undefined} type="file" className="hidden"
                   disabled={sending || selectedModuleOffline || !!fileDraft?.file || (!!fileDraft && !fileScopeMatches)}
                   onChange={event => { if (event.currentTarget.files?.length) selectFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
                 <Button type="button" variant="outline" onClick={() => fileInputRef.current?.click()}
                   disabled={sending || selectedModuleOffline || !!fileDraft?.file || (!!fileDraft && !fileScopeMatches)}>
-                  选择文件
+                  {sendMode === "image" ? "选择图片" : "选择文件"}
                 </Button>
               </div>
               {fileDraft ? <div className="grid min-w-0 gap-2 rounded-md border p-3">
                 <p className="break-all text-sm" data-testid="file-draft-name">{fileDraft.name}</p>
                 <p className="text-xs text-muted-foreground">{formatFileSize(fileDraft.size)}</p>
+                {fileDraft.kind === "image" && fileDraft.file ? <SelectedImage file={fileDraft.file} /> : null}
                 {fileDraft.message ? <p role={fileDraft.stage === "submitting" ? "status" : "alert"} className="text-xs leading-5">{fileDraft.message}</p> : null}
                 {!fileScopeMatches ? <p role="alert" className="text-xs text-destructive">该文件请求属于原账号和会话，不能发送到当前会话。请切回原会话核查发送记录。</p> : null}
                 <Button type="button" size="sm" variant="outline" disabled={fileDraft.stage === "submitting"} onClick={discardFile}>取消选择</Button>
               </div> : null}
               {fileError ? <p role="alert" className="text-xs text-destructive">{fileError}</p> : null}
-              <p className="text-xs leading-5 text-muted-foreground">单个普通文件，最多 300 MiB；暂不支持图片和视频。提交后在发送记录查看结果。</p>
+              <p className="text-xs leading-5 text-muted-foreground">{sendMode === "image"
+                ? "JPEG 或 PNG 图片，最多 8 MiB，以微信图片发送。提交后在发送记录查看结果。"
+                : "单个普通文件，最多 300 MiB；图片请切换至“图片”，暂不支持视频。提交后在发送记录查看结果。"}</p>
               <p className="text-xs leading-5 text-muted-foreground">临时传输文件会自动清理；微信聊天中的原生附件会保留，请在微信内管理。</p>
             </div>}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setSendOpen(false)}>
-              {sendMode === "file" ? "收起" : "取消"}
+              {sendMode !== "text" ? "收起" : "取消"}
             </Button>
-            <Button type="button" onClick={() => void (sendMode === "file" ? submitFile() : submitSend())}
-              disabled={sending || selectedModuleOffline || (sendMode === "file" ? !fileDraft?.file || !fileScopeMatches || fileDraft.stage === "submitting" : !draft.trim())}>
+            <Button type="button" onClick={() => void (sendMode !== "text" ? submitFile() : submitSend())}
+              disabled={sending || selectedModuleOffline || (sendMode !== "text" ? !fileDraft?.file || !fileScopeMatches || fileDraft.stage === "submitting" : !draft.trim())}>
               <Send className="h-4 w-4" />
-              {sending ? "提交中" : sendMode === "file" && fileDraft && fileDraft.stage !== "ready" ? "使用原请求重试" : "加入队列"}
+              {sending ? "提交中" : sendMode !== "text" && fileDraft && fileDraft.stage !== "ready" ? "使用原请求重试" : "加入队列"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   );
+}
+
+function SelectedImage({ file }: { file: File }) {
+  const [url, setURL] = React.useState("");
+  React.useEffect(() => {
+    const next = URL.createObjectURL(file);
+    setURL(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file]);
+  return url ? <img src={url} alt="待发送图片预览" className="max-h-56 max-w-full rounded-md object-contain" /> : null;
 }
 
 function MessageBubble({
@@ -1536,7 +1558,29 @@ function MessageAttachment({
   outgoing: boolean;
 }) {
   const kind = message.media_kind || mediaKindFromType(message.message_type) || "file";
-  const url = message.media_url ? mediaURL(message.media_url, adminPassword) : "";
+  const [image, setImage] = React.useState({ path: "", url: "", error: "" });
+  const path = message.media_url || "";
+  const url = image.path === path ? image.url : "";
+  React.useEffect(() => {
+    if (kind !== "image" || !path) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      controller.abort();
+      setImage({ path, url: "", error: "图片读取超时，请稍后刷新。" });
+    }, 15000);
+    let blobURL = "";
+    setImage({ path, url: "", error: "" });
+    void getMessageImage(path, adminPassword, controller.signal).then(blob => {
+      if (controller.signal.aborted) return;
+      blobURL = URL.createObjectURL(blob);
+      setImage({ path, url: blobURL, error: "" });
+    }).catch(error => {
+      if (!controller.signal.aborted) setImage({ path, url: "", error:
+        error instanceof ApiError && (error.status === 404 || error.status === 410)
+          ? "图片临时副本已过期或不可用，请在微信中查看。" : "图片暂时无法加载，请稍后刷新。" });
+    }).finally(() => window.clearTimeout(timeout));
+    return () => { controller.abort(); window.clearTimeout(timeout); if (blobURL) URL.revokeObjectURL(blobURL); };
+  }, [path, kind, adminPassword]);
   const title = message.media_name || messageTypeText(message.message_type);
   const shell = outgoing ? "border-primary-foreground/30 bg-primary-foreground/10" : "border-border bg-background/80";
 
@@ -1547,7 +1591,9 @@ function MessageAttachment({
           {mediaIcon(kind)}
           <span>{title}</span>
         </div>
-        <div className="mt-1 opacity-80">模块已收到此类消息，但附件文件还没有上传。</div>
+        <div className="mt-1 opacity-80">{kind === "image" && path
+          ? (image.path === path && image.error ? image.error : "正在读取图片…")
+          : "模块已收到此类消息，但附件文件还没有上传。"}</div>
       </div>
     );
   }
@@ -1825,14 +1871,6 @@ function mediaKindFromType(type?: number) {
     default:
       return "";
   }
-}
-
-function mediaURL(path: string, password: string) {
-  const url = new URL(path.startsWith("/") ? publicPath(path) : path, window.location.origin);
-  if (password) {
-    url.searchParams.set("password", password);
-  }
-  return `${url.pathname}${url.search}`;
 }
 
 function mediaIcon(kind: string) {

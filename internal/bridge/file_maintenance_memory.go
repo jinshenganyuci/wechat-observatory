@@ -7,7 +7,7 @@ import (
 )
 
 func (o *MemoryOutbox) fileTaskView(item memoryOutboxItem, f *memoryFile) FileTaskView {
-	v := FileTaskView{ID: item.ID, Device: item.Device, OwnerWxID: item.OwnerWxID, WxID: item.WxID, Status: item.Status,
+	v := FileTaskView{Kind: item.Kind, ID: item.ID, Device: item.Device, OwnerWxID: item.OwnerWxID, WxID: item.WxID, Status: item.Status,
 		AttemptCount: item.AttemptCount, ChatRecordID: item.ChatRecordID, LastError: item.LastError, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		LeaseUntil: formatRFC3339(item.leaseUntil), NativeStartedAt: item.NativeStartedAt, Attachment: f.request.Attachment,
 		ServerCopy: FileServerCopy{State: "retained", CleanupRequestedAt: f.cleanupRequestedAt, UpdatedAt: f.cleanupUpdatedAt, LastError: f.cleanupLastError}}
@@ -28,7 +28,7 @@ func (o *MemoryOutbox) ListFileTasks(_ context.Context, filter FileTaskFilter) (
 	defer o.mu.Unlock()
 	views := []FileTaskView{}
 	for _, item := range o.items {
-		if item.Kind != "file" || item.Device != filter.Device || item.OwnerWxID != filter.OwnerWxID || filter.BeforeID > 0 && item.ID >= filter.BeforeID {
+		if !IsAttachmentKind(item.Kind) || item.Device != filter.Device || item.OwnerWxID != filter.OwnerWxID || filter.BeforeID > 0 && item.ID >= filter.BeforeID {
 			continue
 		}
 		for _, f := range o.files {
@@ -52,7 +52,7 @@ func (o *MemoryOutbox) FileTaskViewByID(_ context.Context, id int64, device, own
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, item := range o.items {
-		if item.Kind == "file" && item.ID == id && item.Device == device && item.OwnerWxID == owner {
+		if IsAttachmentKind(item.Kind) && item.ID == id && item.Device == device && item.OwnerWxID == owner {
 			for _, f := range o.files {
 				if f.outboxID == id {
 					return o.fileTaskView(item, f), true, nil
@@ -67,7 +67,7 @@ func (o *MemoryOutbox) RequestFileCleanup(_ context.Context, req FileCleanupRequ
 	defer o.mu.Unlock()
 	for i := range o.items {
 		item := &o.items[i]
-		if item.Kind != "file" || item.ID != req.ID || item.Device != req.Device || item.OwnerWxID != req.OwnerWxID {
+		if !IsAttachmentKind(item.Kind) || item.ID != req.ID || item.Device != req.Device || item.OwnerWxID != req.OwnerWxID {
 			continue
 		}
 		for _, f := range o.files {

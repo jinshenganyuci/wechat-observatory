@@ -13,6 +13,12 @@ var (
 	ErrModuleSessionActive = errors.New("module device session is active")
 )
 
+// Optional durable lookup lets media replays resolve before allocating spool
+// space, using the same server-owned canonical identity as event insertion.
+type InboundEventKeyReader interface {
+	InboundEventByKey(context.Context, string) (MessageEvent, bool, error)
+}
+
 type Persistence interface {
 	UpdateDeviceIdentity(ctx context.Context, deviceName string, wxid string, nickname string) error
 	RecordInboundEvent(ctx context.Context, event MessageEvent) (MessageEvent, error)

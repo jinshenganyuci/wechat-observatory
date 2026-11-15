@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import time
 import unicodedata
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit
 import aiohttp
 
 MAX_FILE_BYTES = 300 * 1024 * 1024
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png"})
 HISTORY_PAGE_SIZE = 50
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MEDIA_EXTENSIONS = frozenset("jpg jpeg bmp png tif tiff heic heif webp avi flv m4v mkv mov mp4 mts webm wmv".split())
@@ -48,29 +51,51 @@ class Settings:
         return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
-def file_description(path: str, name: str | None = None) -> dict:
+def image_mime(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    raise ValueError("only JPEG and PNG images are supported")
+
+
+def file_description(path: str, name: str | None = None, *, image=False) -> dict:
     source = Path(path)
     name = name or source.name
     if (not name or len(name.encode("utf-8")) > 240 or name.strip() != name
             or name in {".", ".."} or any(c in name for c in "/\\")
             or any(unicodedata.category(c) == "Cc" for c in name)):
         raise ValueError("invalid attachment filename")
-    if Path(name).suffix.lower().lstrip(".") in MEDIA_EXTENSIONS:
+    if not image and Path(name).suffix.lower().lstrip(".") in MEDIA_EXTENSIONS:
         raise ValueError("image/video attachments are not supported; use an ordinary document")
+    if image and Path(name).suffix.lower().lstrip(".") not in IMAGE_EXTENSIONS:
+        raise ValueError("image filename must end with .jpg, .jpeg or .png")
+    limit = MAX_IMAGE_BYTES if image else MAX_FILE_BYTES
     sha = hashlib.sha256()
+    prefix = b""
     with os.fdopen(os.open(source, os.O_RDONLY | os.O_NONBLOCK), "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > MAX_FILE_BYTES:
-            raise ValueError("attachment must be a nonempty ordinary file, at most 300 MiB")
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > limit:
+            raise ValueError("image must be a nonempty file, at most 8 MiB" if image else
+                             "attachment must be a nonempty ordinary file, at most 300 MiB")
         size = 0
         while chunk := stream.read(1024 * 1024):
             size += len(chunk)
-            if size > MAX_FILE_BYTES:
-                raise ValueError("attachment exceeds 300 MiB")
+            if size > limit:
+                raise ValueError("image exceeds 8 MiB" if image else "attachment exceeds 300 MiB")
+            if not prefix:
+                prefix = chunk[:16]
             sha.update(chunk)
     if size != info.st_size:
         raise ValueError("attachment changed while reading")
-    return {"path": str(source.resolve()), "name": name, "size": size, "sha256": sha.hexdigest()}
+    result = {"path": str(source.resolve()), "name": name, "size": size, "sha256": sha.hexdigest()}
+    if image:
+        result["mime"] = image_mime(prefix)
+    return result
+
+
+def image_description(path: str, name: str | None = None) -> dict:
+    return file_description(path, name, image=True)
 
 
 class Client:
@@ -194,7 +219,8 @@ class Client:
             body = {k: v for k, v in payload.items() if k != "kind"}
             return await self._json("POST", "/api/send/text", json=body, headers=headers)
         attachment = payload["attachment"]
-        current = await asyncio.to_thread(file_description, attachment["path"], attachment["name"])
+        describe = image_description if payload["kind"] == "image" else file_description
+        current = await asyncio.to_thread(describe, attachment["path"], attachment["name"])
         if current != attachment:
             raise BridgeError("attachment_changed_do_not_resend")
         # aiohttp streams the descriptor, without loading the 300 MiB limit into memory.
@@ -204,9 +230,40 @@ class Client:
             form = aiohttp.FormData(quote_fields=False)
             for field_name in ("device", "owner_wxid", "account_generation", "wxid"):
                 form.add_field(field_name, str(payload[field_name]))
-            form.add_field("file", stream, filename=attachment["name"], content_type="application/octet-stream")
-            return await self._json("POST", "/api/send/file", data=form, headers=headers,
+            form.add_field("file", stream, filename=attachment["name"],
+                           content_type=attachment.get("mime", "application/octet-stream"))
+            endpoint = "/api/send/image" if payload["kind"] == "image" else "/api/send/file"
+            return await self._json("POST", endpoint, data=form, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=1200, connect=10, sock_read=1200))
+
+    async def incoming_image(self, row: dict) -> tuple[bytes, str]:
+        """Fetch only the private bridge image route; never follow an event-supplied URL."""
+        endpoint = row.get("media_url")
+        if not isinstance(endpoint, str) or not re.fullmatch(r"/api/media/images/[0-9a-f]{32}", endpoint):
+            raise ValueError("invalid incoming image reference")
+        expected_size = row.get("media_size")
+        if (not isinstance(expected_size, int) or isinstance(expected_size, bool)
+                or not 0 < expected_size <= MAX_IMAGE_BYTES):
+            raise ValueError("invalid incoming image size")
+        async with (await self.session()).get(self.url(endpoint), allow_redirects=False) as response:
+            if response.status != 200:
+                if 300 <= response.status < 400 or response.status in {400, 413, 415, 422}:
+                    raise ValueError("invalid incoming image response")
+                raise BridgeError("image_unavailable", status=response.status)
+            raw = bytearray()
+            async for chunk in response.content.iter_chunked(65536):
+                raw.extend(chunk)
+                if len(raw) > expected_size:
+                    raise ValueError("incoming image exceeds declared size")
+            data = bytes(raw)
+            mime = image_mime(data)
+            checksum = response.headers.get("X-Content-SHA256", "")
+            if (len(data) != expected_size or mime != row.get("media_mime")
+                    or response.headers.get("Content-Type", "").split(";")[0].strip() != mime
+                    or not re.fullmatch(r"[0-9a-f]{64}", checksum)
+                    or hashlib.sha256(data).hexdigest() != checksum):
+                raise ValueError("incoming image integrity check failed")
+            return data, mime
 
     async def outbox(self, outbox_id: int):
         return await self._json("GET", f"/api/outbox/{int(outbox_id)}", params={

@@ -560,7 +560,7 @@ func retentionQueries(retentionDays int) (string, string, error) {
 		ORDER BY created_at LIMIT ?`, retentionDays)
 	outboxQuery := fmt.Sprintf(`DELETE FROM bridge_module_outbox
 		WHERE status IN ('sent', 'cancelled')
-			AND (kind<>'file' OR NOT EXISTS(SELECT 1 FROM bridge_file_attachments a WHERE a.outbox_id=bridge_module_outbox.id AND a.bytes_removed=FALSE))
+			AND (kind NOT IN ('file','image') OR NOT EXISTS(SELECT 1 FROM bridge_file_attachments a WHERE a.outbox_id=bridge_module_outbox.id AND a.bytes_removed=FALSE))
 			AND updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %d DAY)
 		ORDER BY updated_at LIMIT ?`, retentionDays)
 	return messageQuery, outboxQuery, nil
@@ -1215,7 +1215,7 @@ func (s *Store) PollReplyActions(ctx context.Context, req bridge.ModulePollReque
 		FROM bridge_module_outbox
 		WHERE device = ?
 			AND owner_wxid = ?
-			AND (kind='text' OR (?=1 AND ?<>'' AND ?<>'' AND EXISTS(SELECT 1 FROM bridge_file_attachments a
+			AND (kind='text' OR (((kind='file' AND ?>=1) OR (kind='image' AND ?>=2)) AND ?<>'' AND ?<>'' AND EXISTS(SELECT 1 FROM bridge_file_attachments a
 				WHERE a.id=attachment_id AND a.bytes_removed=FALSE AND a.expires_at>CURRENT_TIMESTAMP(6))))
 			AND (
 				status = 'pending'
@@ -1225,7 +1225,7 @@ func (s *Store) PollReplyActions(ctx context.Context, req bridge.ModulePollReque
 		LIMIT ? FOR UPDATE`,
 		strings.TrimSpace(req.Device),
 		strings.TrimSpace(req.WxID),
-		req.FileProtocol, req.InstanceID, req.AccountSession,
+		req.FileProtocol, req.FileProtocol, req.InstanceID, req.AccountSession,
 		limit,
 	)
 	if err != nil {
@@ -1268,8 +1268,8 @@ const leaseOutboxItemStatement = `
 	UPDATE bridge_module_outbox
 	SET status = 'leased', attempt_count = attempt_count + 1,
 		lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 60 SECOND),
-		file_lease_token=IF(kind='file',?,NULL), file_instance_id=IF(kind='file',?,NULL),
-		file_account_session=IF(kind='file',?,NULL)
+		file_lease_token=IF(kind IN ('file','image'),?,NULL), file_instance_id=IF(kind IN ('file','image'),?,NULL),
+		file_account_session=IF(kind IN ('file','image'),?,NULL)
 	WHERE id = ?`
 
 const ackOutboxItemStatement = `
@@ -1287,7 +1287,7 @@ func (s *Store) AckReplyActions(ctx context.Context, req bridge.ModuleAckRequest
 		if kindErr != nil && !errors.Is(kindErr, sql.ErrNoRows) {
 			return nil, kindErr
 		}
-		if kind == "file" {
+		if bridge.IsAttachmentKind(kind) {
 			accepted, replay, err := s.ackFile(ctx, req, item)
 			if err != nil {
 				return nil, err
@@ -1463,6 +1463,19 @@ func (s *Store) recordMessageEvent(ctx context.Context, event bridge.MessageEven
 		return bridge.MessageEvent{}, err
 	}
 	return s.messageEventByID(ctx, id)
+}
+
+func (s *Store) InboundEventByKey(ctx context.Context, key string) (bridge.MessageEvent, bool, error) {
+	var id int64
+	err := s.executor(ctx).QueryRowContext(ctx, `SELECT id FROM bridge_message_events WHERE event_key=?`, key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return bridge.MessageEvent{}, false, nil
+	}
+	if err != nil {
+		return bridge.MessageEvent{}, false, err
+	}
+	event, err := s.messageEventByID(ctx, id)
+	return event, err == nil, err
 }
 
 func (s *Store) messageEventByID(ctx context.Context, id int64) (bridge.MessageEvent, error) {

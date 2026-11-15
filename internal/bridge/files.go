@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,10 +28,10 @@ type FileAttachment struct {
 	ExpiresAt string `json:"expires_at"`
 }
 type FileEnqueue struct {
-	Device, OwnerWxID, WxID, IdempotencyHash, Fingerprint string
-	Attachment                                            FileAttachment
-	Stored                                                bool
-	AllowNew                                              bool
+	Kind, Device, OwnerWxID, WxID, IdempotencyHash, Fingerprint string
+	Attachment                                                  FileAttachment
+	Stored                                                      bool
+	AllowNew                                                    bool
 }
 type FileOperation struct {
 	APIKey         string `json:"api_key"`
@@ -62,7 +63,7 @@ type FileOutbox interface {
 	FileBlobReferenced(context.Context, string) (bool, error)
 }
 
-func validateFileName(name string) error {
+func validateAttachmentName(name string) error {
 	if !utf8.ValidString(name) || len(name) > 240 || name == "" || name == "." || name == ".." || strings.TrimSpace(name) != name || strings.ContainsAny(name, "/\\") {
 		return ErrInvalidFile
 	}
@@ -70,6 +71,13 @@ func validateFileName(name string) error {
 		if unicode.IsControl(r) {
 			return ErrInvalidFile
 		}
+	}
+	return nil
+}
+
+func validateFileName(name string) error {
+	if err := validateAttachmentName(name); err != nil {
+		return err
 	}
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
 	for _, blocked := range strings.Fields("jpg jpeg bmp png tif tiff heic heif webp avi flv m4v mkv mov mp4 mts webm wmv") {
@@ -84,7 +92,17 @@ func hashFileKey(text string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// IsAttachmentKind shares the same lease, one-time native grant and cleanup
+// rules for documents and native pictures.
+func IsAttachmentKind(kind string) bool { return kind == "file" || kind == "image" }
+
 func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
+	s.sendAttachment(w, r, "file")
+}
+func (s *HTTPServer) sendImage(w http.ResponseWriter, r *http.Request) {
+	s.sendAttachment(w, r, "image")
+}
+func (s *HTTPServer) sendAttachment(w http.ResponseWriter, r *http.Request, kind string) {
 	if s.service.fileSpool == nil {
 		writeFileError(w, ErrFileUnavailable)
 		return
@@ -100,9 +118,17 @@ func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	const maxRequestBytes = MaxFileBytes + (64 << 10)
+	maxBytes := MaxFileBytes
+	if kind == "image" {
+		maxBytes = MaxImageBytes
+	}
+	maxRequestBytes := maxBytes + (64 << 10)
 	if r.ContentLength > maxRequestBytes {
-		writeFileError(w, ErrFileTooLarge)
+		if kind == "image" {
+			writeFileError(w, ErrImageTooLarge)
+		} else {
+			writeFileError(w, ErrFileTooLarge)
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), fileTransferTimeout)
@@ -140,11 +166,27 @@ func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
 			}
 			seenFile = true
 			name = part.FileName()
-			if e = validateFileName(name); e != nil {
+			if kind == "image" {
+				e = validateImageName(name)
+			} else {
+				e = validateFileName(name)
+			}
+			if e != nil {
 				writeFileError(w, e)
 				return
 			}
-			blob, e = s.service.fileSpool.Put(ctx, part)
+			if kind == "image" {
+				var data []byte
+				data, e = io.ReadAll(io.LimitReader(part, MaxImageBytes+1))
+				if e == nil {
+					_, e = inspectImage(data)
+				}
+				if e == nil {
+					blob, e = s.service.fileSpool.Put(ctx, bytes.NewReader(data))
+				}
+			} else {
+				blob, e = s.service.fileSpool.Put(ctx, part)
+			}
 			if e != nil {
 				writeFileError(w, e)
 				return
@@ -173,13 +215,17 @@ func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
 		writeFileError(w, ErrInvalidFile)
 		return
 	}
-	req := FileEnqueue{Device: strings.TrimSpace(fields["device"]), OwnerWxID: strings.TrimSpace(fields["owner_wxid"]), WxID: strings.TrimSpace(fields["wxid"]), IdempotencyHash: hashFileKey(key), Stored: blob.Stored,
+	req := FileEnqueue{Kind: kind, Device: strings.TrimSpace(fields["device"]), OwnerWxID: strings.TrimSpace(fields["owner_wxid"]), WxID: strings.TrimSpace(fields["wxid"]), IdempotencyHash: hashFileKey(key), Stored: blob.Stored,
 		Attachment: FileAttachment{ID: blob.ID, Name: name, Size: blob.Size, SHA256: blob.SHA256, ExpiresAt: s.service.now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}}
 	if req.Device == "" || req.OwnerWxID == "" || req.WxID == "" || len(req.Device) > 128 || len(req.OwnerWxID) > 191 || len(req.WxID) > 191 {
 		writeFileError(w, ErrInvalidFile)
 		return
 	}
 	fingerprint, _ := json.Marshal([]any{req.WxID, generation, name, blob.Size, blob.SHA256})
+	// Keep the document digest byte-for-byte compatible with old requests.
+	if kind == "image" {
+		fingerprint = append([]byte("image\x00"), fingerprint...)
+	}
 	req.Fingerprint = hashFileKey(string(fingerprint))
 	// A lost SQL COMMIT response is ambiguous. Preserve bytes until the DB-backed
 	// orphan sweep can prove they are unreferenced; never break a committed task.
@@ -198,6 +244,12 @@ func (s *HTTPServer) sendFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) EnqueueFile(ctx context.Context, req FileEnqueue, generation int64) (item ModuleOutboxItem, replay bool, err error) {
+	if req.Kind == "" {
+		req.Kind = "file"
+	}
+	if !IsAttachmentKind(req.Kind) {
+		return item, false, ErrInvalidFile
+	}
 	store, ok := s.outbox.(FileOutbox)
 	if !ok {
 		return item, false, ErrFileUnavailable
@@ -312,6 +364,10 @@ func writeFileError(w http.ResponseWriter, err error) {
 		status, code, message = 400, "invalid_request", err.Error()
 	case errors.Is(err, ErrUnsupportedFileType):
 		status, code, message = 400, "unsupported_file_type", err.Error()
+	case errors.Is(err, ErrImageTooLarge):
+		status, code, message = 413, "image_too_large", err.Error()
+	case errors.Is(err, ErrInvalidImage):
+		status, code, message = 400, "invalid_image", err.Error()
 	case errors.Is(err, ErrFileTooLarge), errors.As(err, &maxBytesError):
 		status, code, message = 413, "file_too_large", ErrFileTooLarge.Error()
 	case errors.Is(err, ErrFileQuota):

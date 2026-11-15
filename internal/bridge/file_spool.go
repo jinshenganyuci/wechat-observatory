@@ -126,6 +126,11 @@ func (s *FileSpool) putLimited(ctx context.Context, input io.Reader, maxBytes in
 		if e != nil {
 			return blob, e
 		}
+		// A nested private spool has its own lock and quota. Never recurse into
+		// it or include its bytes in this spool's outgoing-file budget.
+		if info.IsDir() {
+			continue
+		}
 		if !info.Mode().IsRegular() {
 			return blob, ErrFileUnavailable
 		}
@@ -201,15 +206,22 @@ func (s *FileSpool) Open(id string) (*os.File, error) {
 	}
 	path := filepath.Join(s.dir, id)
 	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() {
+	if err != nil {
+		return nil, errors.Join(ErrFileUnavailable, err)
+	}
+	if !before.Mode().IsRegular() {
 		return nil, ErrFileUnavailable
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, ErrFileUnavailable
+		return nil, errors.Join(ErrFileUnavailable, err)
 	}
 	after, err := f.Stat()
-	if err != nil || !os.SameFile(before, after) {
+	if err != nil {
+		f.Close()
+		return nil, errors.Join(ErrFileUnavailable, err)
+	}
+	if !os.SameFile(before, after) {
 		f.Close()
 		return nil, ErrFileUnavailable
 	}

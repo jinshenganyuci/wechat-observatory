@@ -150,7 +150,7 @@ function FileTasksDialog({ device, ownerWxid, contacts, currentSession, handleEr
       className="max-h-[calc(100dvh-2rem)] max-w-3xl overflow-y-auto">
       <DialogHeader>
         <DialogTitle>文件暂存</DialogTitle>
-        <DialogDescription>查看当前微信的文件任务。刷新只读取状态，不会重新发送；清理不会删除微信聊天中的附件。</DialogDescription>
+        <DialogDescription>查看当前微信的文件和图片任务。刷新只读取状态，不会重新发送；清理不会删除微信聊天中的附件。</DialogDescription>
       </DialogHeader>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <TabsList className="h-auto flex-wrap">
@@ -171,7 +171,7 @@ function FileTasksDialog({ device, ownerWxid, contacts, currentSession, handleEr
           const blocked = item.cleanup_blocked_reason ? cleanupReason(item.cleanup_blocked_reason) : "当前不可清理，请刷新任务状态。";
           return <li key={item.id} data-testid="file-task-row" className="min-w-0 rounded-md border p-3 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="break-all font-medium">任务 #{item.id} · {item.attachment?.name || "文件信息暂不可用"}</span>
+              <span className="break-all font-medium">任务 #{item.id} · {item.kind === "image" ? "图片 · " : ""}{item.attachment?.name || "文件信息暂不可用"}</span>
               <Badge variant={unconfirmed ? "warning" : item.status === "sent" ? "success" : "secondary"}>{fileStageLabel(item)}</Badge>
             </div>
             <p className="mt-2 break-all">{contact?.remark || contact?.nickname || item.wxid} · {item.attachment ? formatFileSize(item.attachment.size) : "大小未知"}</p>

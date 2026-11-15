@@ -247,6 +247,7 @@ public final class WeChatConfigUi {
         final EditText key;
         final Switch enabled;
         final Switch websocket;
+        final Switch images;
         final Switch backgroundRealtime;
         final TextView status;
 
@@ -267,6 +268,15 @@ public final class WeChatConfigUi {
                     ConfigWriteContract.isOn(snapshot.get("enabled"), false));
             websocket = toggle(ui, fields, "实时 WebSocket",
                     ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
+            images = toggle(ui, fields, "图片接收（供机器人看图）",
+                    ConfigWriteContract.isOn(snapshot.get("media_upload_enabled"), false));
+            TextView imageNotice = new TextView(ui);
+            imageNotice.setText("开启后，当前账号聊天中的已缓存图片会上传后端；上传副本 24 小时后清理。机器人仍按原有聊天授权响应。");
+            imageNotice.setTextSize(13);
+            imageNotice.setAlpha(0.75f);
+            imageNotice.setPadding(0, 0, 0, dp(ui, 8));
+            imageNotice.setSaveEnabled(false);
+            fields.addView(imageNotice);
             backgroundRealtime = toggle(ui, fields, "Oplus 息屏保护",
                     "1".equals(snapshot.get("background_realtime_enabled")));
             TextView protectionNotice = new TextView(ui);
@@ -326,6 +336,7 @@ public final class WeChatConfigUi {
             values.put("api_key", key.getText().toString());
             values.put("enabled", enabled.isChecked() ? "1" : "0");
             values.put("outbox_websocket_enabled", websocket.isChecked() ? "1" : "0");
+            values.put("media_upload_enabled", images.isChecked() ? "1" : "0");
             values.put("background_realtime_enabled", backgroundRealtime.isChecked() ? "1" : "0");
             return values;
         }
@@ -337,6 +348,7 @@ public final class WeChatConfigUi {
             key.setText(snapshot.get("api_key"));
             enabled.setChecked(ConfigWriteContract.isOn(snapshot.get("enabled"), false));
             websocket.setChecked(ConfigWriteContract.isOn(snapshot.get("outbox_websocket_enabled"), true));
+            images.setChecked(ConfigWriteContract.isOn(snapshot.get("media_upload_enabled"), false));
             backgroundRealtime.setChecked("1".equals(snapshot.get("background_realtime_enabled")));
         }
 
@@ -346,6 +358,7 @@ public final class WeChatConfigUi {
             key.setText("");
             enabled.setChecked(false);
             websocket.setChecked(true);
+            images.setChecked(false);
             backgroundRealtime.setChecked(false);
         }
 
@@ -358,6 +371,7 @@ public final class WeChatConfigUi {
             key.setEnabled(!saving);
             enabled.setEnabled(!saving);
             websocket.setEnabled(!saving);
+            images.setEnabled(!saving);
             backgroundRealtime.setEnabled(!saving);
         }
 

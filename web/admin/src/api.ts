@@ -1,3 +1,4 @@
+import { MAX_IMAGE_BYTES, type AttachmentKind } from "./fileSend.ts";
 import type { ApiKey, LiveMessageEvent, ModuleContact, ModuleStatus, ModuleSwitchRequest, StoredMessage, OutboxStatusItem, OutboxFilter, FileTaskView, FileTaskFilter, FileCleanupMode } from "@/types";
 
 type ApiOptions = {
@@ -200,7 +201,7 @@ export async function sendText(params: {
 /** The browser owns the multipart boundary; callers retain the key across uncertain replies. */
 export async function sendFile(params: {
   password: string; device: string; ownerWxid: string; accountGeneration: number;
-  wxid: string; file: File; idempotencyKey: string;
+  wxid: string; file: File; idempotencyKey: string; kind?: AttachmentKind;
 }) {
   const body = new FormData();
   body.set("device", params.device);
@@ -211,7 +212,7 @@ export async function sendFile(params: {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 20 * 60 * 1000);
   try {
-    const response = await fetch(publicPath("/api/send/file"), {
+    const response = await fetch(publicPath(params.kind === "image" ? "/api/send/image" : "/api/send/file"), {
       method: "POST", body, signal: controller.signal,
       headers: { "X-Bridge-Password": params.password, "Idempotency-Key": params.idempotencyKey }
     });
@@ -219,6 +220,33 @@ export async function sendFile(params: {
     if (!response.ok) throw new ApiError(response.status, text || `HTTP ${response.status}`);
     return JSON.parse(text) as { ok: boolean; outbox_id?: number; idempotent_replay?: boolean };
   } finally { window.clearTimeout(timeout); }
+}
+
+/** Only the private image route may receive the admin header; URLs from events are untrusted. */
+export async function getMessageImage(path: string, password: string, signal: AbortSignal): Promise<Blob> {
+  if (!/^\/api\/media\/images\/[a-f0-9]{32}$/.test(path)) throw new Error("图片地址无效");
+  const response = await fetch(publicPath(path), {
+    headers: { "X-Bridge-Password": password }, signal, redirect: "error"
+  });
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+  const mime = response.headers.get("content-type")?.split(";")[0];
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("图片内容为空");
+  const chunks: ArrayBuffer[] = [];
+  let size = 0;
+  try {
+    if (mime !== "image/jpeg" && mime !== "image/png") throw new Error("不支持的图片格式");
+    if (Number(response.headers.get("content-length")) > MAX_IMAGE_BYTES) throw new Error("图片超过大小限制");
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > MAX_IMAGE_BYTES) throw new Error("图片超过大小限制");
+      chunks.push(new Uint8Array(value).buffer);
+    }
+  } finally { await reader.cancel().catch(() => {}); }
+  if (!size) throw new Error("图片内容为空");
+  return new Blob(chunks, { type: mime });
 }
 
 export async function getOutbox(params: {

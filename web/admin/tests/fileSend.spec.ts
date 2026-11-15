@@ -271,3 +271,66 @@ test("empty, oversized, unsupported and invalidly named files are rejected befor
   await expect(page.getByRole("button", { name: "加入队列", exact: true }).last()).toBeEnabled();
   expect(sends).toBe(0);
 });
+
+
+const image = { name: "原图.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64") };
+
+test("native image picker previews and retries the same image identity after reload", async ({ page }, testInfo) => {
+  const keys: string[] = [];
+  let fileSends = 0;
+  await setup(page, async (route, url) => {
+    if (url.pathname.endsWith("/send/file")) { fileSends++; await route.fulfill({ status: 500 }); return true; }
+    if (!url.pathname.endsWith("/send/image")) return false;
+    keys.push(route.request().headers()["idempotency-key"]);
+    expect(route.request().postDataBuffer()!.toString()).toContain('filename="原图.png"');
+    if (keys.length === 1) await route.abort("failed");
+    else await route.fulfill({ json: { ok: true, outbox_id: 74, idempotent_replay: true } });
+    return true;
+  });
+  await page.locator(".message-composer").getByRole("button", { name: "发送图片", exact: true }).click();
+  await page.getByLabel("选择图片", { exact: true }).setInputFiles(image);
+  const preview = page.getByRole("img", { name: "待发送图片预览" });
+  await expect(preview).toBeVisible();
+  await expect.poll(() => preview.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+  await page.getByRole("heading", { name: "发送微信消息", exact: true }).locator("../..").screenshot({ path: testInfo.outputPath("image-picker.png") });
+  await expect(page.getByRole("button", { name: "文件", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "加入队列", exact: true }).last().click();
+  await expect(page.getByRole("button", { name: "使用原请求重试", exact: true })).toBeEnabled();
+  await page.reload();
+  await expect(page.locator("#inline-send")).toBeEnabled();
+  // Any attachment entry resumes the outstanding image, never changes its kind.
+  await openFiles(page);
+  await expect(page.getByLabel("选择图片", { exact: true })).toHaveAttribute("accept", /image\/png/);
+  await page.getByLabel("选择图片", { exact: true }).setInputFiles(image);
+  await page.getByRole("button", { name: "使用原请求重试", exact: true }).click();
+  await expect(page.getByText("图片任务 #74 已存在，未创建新发送；请查看发送记录")).toBeVisible();
+  expect(keys).toHaveLength(2);
+  expect(keys[1]).toBe(keys[0]);
+  expect(fileSends).toBe(0);
+});
+
+test("received image loads through header authentication and renders only a blob URL", async ({ page }) => {
+  let downloads = 0;
+  const mediaPath = "/api/media/images/" + "a".repeat(32);
+  await setup(page, async (route, url) => {
+    if (url.pathname.endsWith("/messages")) {
+      await route.fulfill({ json: { messages: [{ id: 44, device: "phone", owner_wxid: "owner", chat_id: "notice@chatroom",
+        chat_kind: "room", room_id: "notice@chatroom", sender_wxid: "friend", direction: "recv", text: "", message_type: 3,
+        media_kind: "image", media_name: "收到的图片.png", media_mime: "image/png", media_url: mediaPath, media_size: image.buffer.length }] } });
+      return true;
+    }
+    if (url.pathname === mediaPath) {
+      downloads++;
+      expect(url.search).toBe("");
+      expect(route.request().headers()["x-bridge-password"]).toBe("mock-password");
+      await route.fulfill({ body: image.buffer, contentType: "image/png" }); return true;
+    }
+    return false;
+  });
+  const received = page.getByRole("img", { name: "收到的图片.png" });
+  await expect(received).toBeVisible();
+  await expect(received).toHaveAttribute("src", /^blob:/);
+  await expect.poll(() => received.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+  expect(downloads).toBeGreaterThan(0);
+  await expect(received.locator("..")).toHaveAttribute("href", /^blob:/);
+});

@@ -8,14 +8,14 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/** Version 1 deliberately excludes formats whose native thumbnail task also reads the source. */
+/** Shared attachment identity; images use a separate verified native sender. */
 public final class FileJob {
     public static final long MAX_BYTES = 300L * 1024 * 1024;
     private static final Set<String> THUMBNAILS = new HashSet<>(Arrays.asList(
             "jpg", "jpeg", "bmp", "png", "tif", "tiff", "heic", "heif", "webp",
             "avi", "flv", "m4v", "mkv", "mov", "mp4", "mts", "webm", "wmv"));
     public final long id, size;
-    public final String owner, device, recipient, token, attachmentId, name, sha256;
+    public final String owner, device, recipient, token, attachmentId, name, sha256, kind;
 
     public FileJob(JSONObject item) throws Exception {
         id = item.getLong("id");
@@ -23,13 +23,14 @@ public final class FileJob {
         device = required(item, "device", 256);
         recipient = required(item, "wxid", 256);
         token = required(item, "lease_token", 256);
-        if (id <= 0 || !"file".equals(item.getString("kind"))) throw new IllegalArgumentException("Invalid file job");
+        kind = item.getString("kind");
+        if (id <= 0 || !("file".equals(kind) || "image".equals(kind))) throw new IllegalArgumentException("Invalid attachment job");
         JSONObject attachment = item.getJSONObject("attachment");
         attachmentId = required(attachment, "id", 128);
-        name = safeName(attachment.getString("name"));
+        name = safeName(attachment.getString("name"), isImage());
         size = attachment.getLong("size");
         sha256 = attachment.getString("sha256");
-        if (size <= 0 || size > MAX_BYTES || !sha256.matches("[0-9a-f]{64}"))
+        if (size <= 0 || size > (isImage() ? ImagePayload.MAX_BYTES : MAX_BYTES) || !sha256.matches("[0-9a-f]{64}"))
             throw new IllegalArgumentException("Invalid attachment length or SHA256");
     }
 
@@ -41,7 +42,11 @@ public final class FileJob {
         return Math.max(120000L, Math.min(20L * 60 * 1000, seconds * 1000));
     }
 
-    public static String safeName(String value) {
+    public boolean isImage() { return "image".equals(kind); }
+
+    public static String safeName(String value) { return safeName(value, false); }
+
+    private static String safeName(String value, boolean image) {
         if (value == null || value.isEmpty() || value.equals(".") || value.equals("..")
                 || value.getBytes(StandardCharsets.UTF_8).length > 240 || isSpace(value.codePointAt(0))
                 || isSpace(value.codePointBefore(value.length())))
@@ -55,7 +60,9 @@ public final class FileJob {
         }
         int dot = value.lastIndexOf('.');
         String extension = dot < 0 ? "" : value.substring(dot + 1).toLowerCase(Locale.ROOT);
-        if (THUMBNAILS.contains(extension)) throw new IllegalArgumentException("Image/video attachments are not supported by file protocol 1");
+        if (image && !(extension.equals("jpg") || extension.equals("jpeg") || extension.equals("png")))
+            throw new IllegalArgumentException("Image requires a JPEG or PNG name");
+        if (!image && THUMBNAILS.contains(extension)) throw new IllegalArgumentException("Image/video attachments are not supported by file protocol 1");
         return value;
     }
 

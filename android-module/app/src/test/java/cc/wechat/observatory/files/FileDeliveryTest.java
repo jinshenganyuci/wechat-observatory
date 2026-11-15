@@ -8,6 +8,7 @@ import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.LooperMode;
 import java.io.*;
 import java.nio.channels.FileChannel;
@@ -60,6 +61,73 @@ public class FileDeliveryTest {
     private OutgoingFileJournal.Record record(long id) throws Exception { return journal.find(SCOPE, id); }
     private void stage(OutgoingFileJournal.Record record) throws Exception {
         journal.reserveDownload(record); Files.write(journal.part(record).toPath(), CONTENT); journal.commitDownload(record);
+    }
+
+    private static byte[] imageBytes() {
+        return java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC");
+    }
+    private static JSONObject imageItem(long id) throws Exception {
+        byte[] bytes = imageBytes();
+        JSONObject item = item(id, "lease").put("kind", "image");
+        item.getJSONObject("attachment").put("name", "测试图片.png").put("size", bytes.length).put("sha256", FileJob.digest(bytes));
+        return item;
+    }
+    @Test public void imageJobKeepsOrdinaryFilesSeparateAndBoundsPayload() throws Exception {
+        assertTrue(new FileJob(imageItem(1)).isImage());
+        JSONObject tooLarge = imageItem(1);
+        tooLarge.getJSONObject("attachment").put("size", ImagePayload.MAX_BYTES + 1);
+        assertThrows(IllegalArgumentException.class, () -> new FileJob(tooLarge));
+        JSONObject badName = imageItem(1); badName.getJSONObject("attachment").put("name", "not-image.pdf");
+        assertThrows(IllegalArgumentException.class, () -> new FileJob(badName));
+        JSONObject oldFile = imageItem(1).put("kind", "file");
+        assertThrows(IllegalArgumentException.class, () -> new FileJob(oldFile));
+    }
+    @Test @Config(sdk = 35) @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void validImageSharesOneShotDeliveryAndCleansOnlyStaging() throws Exception {
+        Host host = new Host(imageItem(1)); host.bytes = imageBytes();
+        FileDeliveryWorker worker = worker(1000);
+        worker.deliver(host.remote, host); worker.deliver(host.remote, host);
+        assertEquals(1, host.submits.get()); assertEquals(1, host.begins.get());
+        assertEquals("sent", journal.snapshot(record(1)).getString("state"));
+        assertFalse(journal.source(record(1)).exists());
+    }
+    @Test @Config(sdk = 35) @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void imageRecoveryRequiresPersistedNativeSuccessBeforeCleaning() throws Exception {
+        Host host = new Host(imageItem(1)); host.bytes = imageBytes(); host.finishEvent = false;
+        FileDeliveryWorker worker = worker(0);
+        worker.deliver(host.remote, host);
+        // An unrelated native row can have this local ID after a database reset.
+        // Storage state alone must not resolve the original image's unknown outcome.
+        worker.deliver(host.remote, host);
+        assertEquals(1, host.submits.get()); assertEquals(1, host.begins.get());
+        assertEquals("unknown", journal.snapshot(record(1)).getString("state"));
+        assertTrue(journal.source(record(1)).exists());
+        journal.observe(record(1), 77, true, true);
+        worker.deliver(host.remote, host);
+        assertEquals("sent", journal.snapshot(record(1)).getString("state"));
+        assertFalse(journal.source(record(1)).exists());
+        assertEquals(1, host.submits.get());
+    }
+
+    @Test public void disguisedImageFailsBeforeNativeGrant() throws Exception {
+        Host host = new Host(imageItem(1)); host.bytes = CONTENT;
+        host.remote.getJSONObject("attachment").put("size", CONTENT.length).put("sha256", FileJob.digest(CONTENT));
+        worker(1000).deliver(host.remote, host);
+        assertEquals(0, host.submits.get()); assertEquals(0, host.begins.get());
+        assertEquals("failed", journal.snapshot(record(1)).getString("state"));
+        assertFalse(journal.source(record(1)).exists());
+    }
+    @Test @Config(sdk = 35) @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void partialImageIsNotAcceptedAsReady() throws Exception {
+        byte[] png = imageBytes();
+        ImagePayload.validate(png);
+        assertThrows(IOException.class, () -> ImagePayload.validate(Arrays.copyOf(png, png.length - 12)));
+    }
+    @Test public void imageIntentCannotBeReinterpretedAsOrdinaryFile() throws Exception {
+        OutgoingFileJournal.Record record = journal.create(SCOPE, "installation", imageItem(1));
+        JSONObject changed = imageItem(1).put("kind", "file");
+        changed.getJSONObject("attachment").put("name", "picture.bin");
+        assertThrows(IOException.class, () -> journal.prepareLease(record, changed));
     }
 
     @Test public void maximumFileAndStagingBudgetUseMetadataOnly() throws Exception {
@@ -336,7 +404,7 @@ public class FileDeliveryTest {
             };
         }
         @Override public void submit(FileJob job, File source, WeChat8079FileAdapter.Observer observer) throws Exception {
-            submits.incrementAndGet(); assertArrayEquals(CONTENT, Files.readAllBytes(source.toPath()));
+            submits.incrementAndGet(); assertArrayEquals(bytes, Files.readAllBytes(source.toPath()));
             observer.observed(77, finishEvent, !nativeFailed); if (invalidateAfterSubmit) invalid = true;
         }
         @Override public WeChat8079FileAdapter.Proof inspect(FileJob job, long id) throws IOException {

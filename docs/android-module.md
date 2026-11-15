@@ -52,8 +52,8 @@ cd android-module
 | `contact_sync_interval_ms` | `600000` | 通讯录同步间隔，`0` 表示关闭 |
 | `contact_sync_limit` | `10000` | 一次同步联系人数量上限 |
 | `contact_include_chatrooms` | `1` | 是否同步群聊 |
-| `media_upload_enabled` | `0` | 是否上传图片、语音、视频、文件等附件 |
-| `media_upload_limit_bytes` | `5242880` | 单个附件上传上限 |
+| `media_upload_enabled` | `0` | 是否上传当前微信账号已缓存的图片，供管理台预览及 Hermes 看图 |
+| `media_upload_limit_bytes` | `8388608` | 单张图片读取上限；已有更小自定义值继续生效 |
 | `stale_message_grace_ms` | `900000` | 超过该时间的插入消息视为历史回灌 |
 | `stale_message_replay_limit` | `500` | 单次微信进程最多上报的历史回灌消息数 |
 
@@ -106,7 +106,7 @@ POST /module/contacts/snapshot
 POST /webhook/lsposed/message
 ```
 
-图片、语音、视频、文件等附件如果能从微信本地文件中读取，会以 `media_base64` 上传。服务端保存后返回管理台可访问的 `media_url`。
+模块 0.1.26 起，在已核验的微信 8.0.80/3220 上，可从微信网关设置开启图片接收。模块通过当前账号的原生图片存储读取已缓存 JPEG/PNG，有界等待后仅上报一次；不遍历微信文件目录，不主动下载全部原图。服务端私有保存图片并提供鉴权 `media_url`，24 小时后清理。语音、视频、文件等接收消息仍保留占位信息，不上传原始内容。详见[图片收发](images.md)。
 
 如果模块只能识别消息类型但读不到附件文件，管理台会显示 `[图片]`、`[语音]` 等占位文本。
 

@@ -59,6 +59,8 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /api/outbox", s.requireAdmin(s.outboxStatuses))
 	mux.HandleFunc("GET /api/outbox/{id}", s.requireAdmin(s.outboxStatusByID))
 	mux.HandleFunc("POST /api/send/file", s.requireAdmin(s.sendFile))
+	mux.HandleFunc("POST /api/send/image", s.requireAdmin(s.sendImage))
+	mux.HandleFunc("GET /api/media/images/{id}", s.requireAdmin(s.incomingImage))
 	mux.HandleFunc("GET /api/live/events", s.requireAdmin(s.liveEvents))
 	mux.HandleFunc("GET /api/modules/status", s.requireAdmin(s.moduleStatuses))
 	mux.HandleFunc("POST /api/modules/{device}/switch", s.requireAdmin(s.switchModuleInstallation))

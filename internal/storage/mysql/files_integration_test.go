@@ -14,6 +14,12 @@ import (
 )
 
 func TestFileOutboxMySQLIntegration(t *testing.T) {
+	for _, kind := range []string{"file", "image"} {
+		t.Run(kind, func(t *testing.T) { testAttachmentOutboxMySQLIntegration(t, kind) })
+	}
+}
+
+func testAttachmentOutboxMySQLIntegration(t *testing.T, kind string) {
 	dsn := strings.TrimSpace(os.Getenv(offlineOutboxIntegrationDSNEnv))
 	if dsn == "" {
 		t.Skip("disposable MySQL DSN required")
@@ -76,7 +82,7 @@ func TestFileOutboxMySQLIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := bridge.FileEnqueue{Device: device, OwnerWxID: reg.WxID, WxID: "filehelper", IdempotencyHash: strings.Repeat("1", 64), Fingerprint: strings.Repeat("2", 64), Stored: true,
+	req := bridge.FileEnqueue{Kind: kind, Device: device, OwnerWxID: reg.WxID, WxID: "filehelper", IdempotencyHash: strings.Repeat("1", 64), Fingerprint: strings.Repeat("2", 64), Stored: true,
 		Attachment: bridge.FileAttachment{ID: blob.ID, Name: "test.txt", Size: blob.Size, SHA256: blob.SHA256, ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}}
 	var wg sync.WaitGroup
 	ids := make(chan int64, 2)
@@ -110,12 +116,18 @@ func TestFileOutboxMySQLIntegration(t *testing.T) {
 		t.Fatal("old APK took file", items, e)
 	}
 	poll.FileProtocol = 1
+	if kind == "image" {
+		if items, e := s1.PollOutbox(ctx, poll); e != nil || len(items) != 0 {
+			t.Fatal("file-only phone took image", items, e)
+		}
+		poll.FileProtocol = 2
+	}
 	items, err := s1.PollOutbox(ctx, poll)
 	if err != nil || len(items) != 1 {
 		t.Fatal(items, err)
 	}
 	leased := items[0]
-	if leased.ID != id || leased.Kind != "file" || leased.Attachment == nil || leased.Attachment.SHA256 != blob.SHA256 || leased.LeaseToken == "" {
+	if leased.ID != id || leased.Kind != kind || leased.Attachment == nil || leased.Attachment.SHA256 != blob.SHA256 || leased.LeaseToken == "" {
 		t.Fatal("wire metadata", leased)
 	}
 	op := bridge.FileOperation{APIKey: key, WxID: reg.WxID, AccountSession: reg.AccountSession, ID: id, LeaseToken: leased.LeaseToken, SHA256: blob.SHA256, Operation: "download"}

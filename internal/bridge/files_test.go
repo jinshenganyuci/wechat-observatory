@@ -548,14 +548,27 @@ func TestFileSpoolOrphansAndQuota(t *testing.T) {
 }
 
 func TestFileHTTPAckReleasesWebSocketInFlight(t *testing.T) {
+	for _, kind := range []string{"file", "image"} {
+		t.Run(kind, func(t *testing.T) { testAttachmentHTTPAckReleasesWebSocketInFlight(t, kind) })
+	}
+}
+func testAttachmentHTTPAckReleasesWebSocketInFlight(t *testing.T, kind string) {
 	s, r, h := fileService(t)
 	s.pollEvery = 20 * time.Millisecond
-	if w := uploadFile(t, h, "file-ws-key", "a.txt", "bytes", 1, true); w.Code != 200 {
-		t.Fatal(w.Code)
+	protocol := "1"
+	var response *httptest.ResponseRecorder
+	if kind == "image" {
+		protocol = "2"
+		response = imageUpload(t, h, "image-ws-key", "test.png", testPNG(t))
+	} else {
+		response = uploadFile(t, h, "file-ws-key", "a.txt", "bytes", 1, true)
+	}
+	if response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
 	}
 	server := httptest.NewServer(h)
 	defer server.Close()
-	conn := dialTestWebSocket(t, server.URL, "/module/outbox/ws?api_key="+r.APIKey+"&wxid="+r.WxID+"&account_session="+r.AccountSession+"&file_protocol=1")
+	conn := dialTestWebSocket(t, server.URL, "/module/outbox/ws?api_key="+r.APIKey+"&wxid="+r.WxID+"&account_session="+r.AccountSession+"&file_protocol="+protocol)
 	defer conn.close()
 	file := readTestWSMessageOfType(t, conn, "outbox").Items[0]
 	if result, err := s.FileTask(t.Context(), fileOp(r, file, "begin")); err != nil || !result.Granted {
